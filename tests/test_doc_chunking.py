@@ -14,12 +14,16 @@ Coverage:
     - Fenced code block body preserved verbatim in chunk text.
     - Size-split: body exceeding cap is split on paragraph boundaries.
     - Size-split: no chunk's text exceeds the cap (load-bearing assertion).
+    - Size-split: single large paragraph (far over cap) triggers line-level fallback.
+    - Size-split: bullet-list block with single-newline separators stays under cap.
+    - Size-split: single unbreakable over-cap line triggers char/word last-resort.
     - Overlap: size-split pieces share trailing paragraph.
     - Unique, stable ids across all chunks of one document.
     - estimate_tokens: empty string → 0.
     - estimate_tokens: conservative (never under-counts for common inputs).
     - DocChunk is frozen (immutable after creation).
     - rel_path is preserved verbatim in chunk.file.
+    - Fence length tracking: 4-backtick fence is not closed by 3-backtick line.
 """
 
 import math
@@ -370,6 +374,77 @@ class TestSizeSplit:
         for chunk in chunks:
             assert chunk.file == "path/to/doc.md"
 
+    # ------------------------------------------------------------------
+    # Regression tests for MUST-FIX 1: oversized-paragraph fallbacks
+    # ------------------------------------------------------------------
+
+    def test_single_large_paragraph_stays_under_cap(self) -> None:
+        """A single paragraph far over the cap must be split so every chunk fits.
+
+        Regression: before the line-level fallback, this paragraph would be
+        emitted as one oversized chunk (worst case: 1080 tokens on real docs).
+        """
+        # 300 space-separated words in one paragraph (no blank lines) → ~390 tokens.
+        huge_para = " ".join(["word"] * 300)
+        md = f"## Section\n\n{huge_para}\n"
+        chunks = chunk_markdown(md, "doc.md")
+        assert len(chunks) >= 1
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} tokens (cap={BODY_TOKEN_CAP}). "
+                f"First 120 chars: {chunk.text[:120]!r}"
+            )
+
+    def test_bullet_list_single_newlines_under_cap(self) -> None:
+        """Bullet-list block with single-\\n separators must stay under cap.
+
+        Regression: a CHANGELOG-style block (20+ ``* [BUG #NNN]...`` items)
+        separated by single newlines forms ONE paragraph in the old splitter,
+        producing a single oversized chunk.  The line-level fallback must split
+        it and preserve every item.
+        """
+        # 30 bullet items, each ~10 words → whole block ~390 tokens as one paragraph.
+        items = [
+            f"* [BUG #{i:04d}] Fixed the thing related to issue {i} in the tracker."
+            for i in range(30)
+        ]
+        bullet_block = "\n".join(items)  # single newlines → one paragraph
+        md = f"## Changelog\n\n{bullet_block}\n"
+        chunks = chunk_markdown(md, "CHANGELOG.md")
+        assert len(chunks) >= 1
+
+        # Every chunk must be under cap.
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} tokens (cap={BODY_TOKEN_CAP})."
+            )
+
+        # Every bullet item must appear in at least one chunk (no content dropped).
+        all_text = " ".join(c.text for c in chunks)
+        for i in range(30):
+            marker = f"BUG #{i:04d}"
+            assert marker in all_text, f"Item {marker!r} was dropped from chunk output."
+
+    def test_single_unbreakable_line_under_cap(self) -> None:
+        """A single line with no spaces (e.g. giant URL) must not exceed the cap.
+
+        Regression: the line-level fallback alone cannot split a no-whitespace
+        line; the char/word last-resort must kick in.
+        """
+        # 800-char string with no spaces → ~200 tokens by char heuristic (borderline),
+        # but we use 2000 chars to guarantee it exceeds the cap.
+        long_token = "x" * 2000
+        md = f"## Section\n\n{long_token}\n"
+        chunks = chunk_markdown(md, "doc.md")
+        assert len(chunks) >= 1
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} tokens (cap={BODY_TOKEN_CAP})."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Overlap on size-split pieces
@@ -591,3 +666,56 @@ class TestSplitIntoHeaderSections:
         sections = _split_into_header_sections(md)
         # Only the preamble section; the # inside fence is NOT a header.
         assert all(s[0] == 0 for s in sections)
+
+
+# ---------------------------------------------------------------------------
+# Fence length tracking (MINOR-FIX 3)
+# ---------------------------------------------------------------------------
+
+
+class TestFenceLengthTracking:
+    """Regression tests for fence-length-aware closing logic.
+
+    A 4-backtick opening fence must NOT be closed by a 3-backtick line;
+    the closing fence must use the same character AND be at least as long
+    as the opening (CommonMark §4.5).
+    """
+
+    def test_four_backtick_fence_not_closed_by_three(self) -> None:
+        """A 3-backtick line inside a 4-backtick fence must NOT close it.
+
+        Before the fix, ``fence_char`` stored only the first char, so a
+        3-backtick close would match a 4-backtick open, letting subsequent
+        ``#`` lines leak out as headers.
+        """
+        md = (
+            "## Outer\n\n"
+            "````python\n"  # 4-backtick open
+            "```\n"  # 3-backtick line — must NOT close the fence
+            "# not-a-header\n"  # inside the fence, must stay as content
+            "````\n"  # 4-backtick close — actually closes the fence
+            "\nContent after fence.\n"
+        )
+        chunks = chunk_markdown(md, "doc.md")
+        # The ``# not-a-header`` line must NOT produce a new section/breadcrumb.
+        header_chunks = [c for c in chunks if "not-a-header" in c.breadcrumb]
+        assert len(header_chunks) == 0, (
+            "``# not-a-header`` inside a 4-backtick fence was incorrectly "
+            "parsed as a header.  Chunks: " + str([c.breadcrumb for c in chunks])
+        )
+
+    def test_four_backtick_fence_content_preserved(self) -> None:
+        """Content inside a 4-backtick fence (including a 3-backtick line) is preserved."""
+        md = "## Block\n\n````md\n```\n# not-a-header\n````\nAfter.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        assert len(chunks) == 1, (
+            f"Expected 1 chunk, got {len(chunks)}: {[c.breadcrumb for c in chunks]}"
+        )
+        assert "# not-a-header" in chunks[0].text
+
+    def test_three_backtick_fence_closed_by_three(self) -> None:
+        """A normal 3-backtick fence is still closed by exactly 3 backticks."""
+        md = "## Normal\n\n```python\nx = 1\n```\n\n# Real Header\n\nContent.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        real_header_chunks = [c for c in chunks if "Real Header" in c.breadcrumb]
+        assert len(real_header_chunks) == 1

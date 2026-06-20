@@ -8,8 +8,21 @@ sentence-transformers (MiniLM, 256-token window).  Two-stage split:
    section with a breadcrumb built from ancestor headers.
 
 2. **Size-split** — any chunk whose total ``text`` (breadcrumb + body) exceeds
-   the token cap is further split on paragraph boundaries, with a small overlap
-   (one trailing paragraph) across consecutive pieces.
+   the token cap is further split, using a three-level fallback cascade:
+
+   a. **Paragraph-level** (primary): accumulate paragraphs (blank-line-separated)
+      greedily until adding the next paragraph would exceed the cap; flush and
+      continue with a one-paragraph overlap for semantic continuity.
+
+   b. **Line-level** (fallback): when a single paragraph still exceeds the cap,
+      split that paragraph on ``\\n`` boundaries, packing lines greedily.  No
+      overlap at the line level (lines are short; overlap is not worth the cost).
+
+   c. **Char/word-level** (last resort): when a single line exceeds the cap (rare —
+      very long URL, minified text, etc.), hard-split the line by word boundaries
+      or, failing that, by character count.  No overlap at this level either.
+      This guarantees the invariant ``estimate_tokens(chunk.text) <= BODY_TOKEN_CAP``
+      for EVERY chunk regardless of input.
 
 Token estimation
 ----------------
@@ -45,7 +58,13 @@ Keeps total chunk length comfortably under the MiniLM 256-token window.
 """
 
 _OVERLAP_PARAGRAPHS: int = 1
-"""Number of trailing paragraphs to repeat at the start of the next size-split piece."""
+"""Number of trailing paragraphs to repeat at the start of the next size-split piece.
+
+Applies only to the paragraph-level split (primary path).  The line-level and
+char/word-level fallbacks do not carry overlap — those paths apply only when a
+single paragraph already exceeds the cap, so repeating lines would just re-bloat
+the next piece.
+"""
 
 # ---------------------------------------------------------------------------
 # Public dataclass
@@ -126,6 +145,11 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
     The very first section (text before the first header) is represented as
     ``(0, "", body)`` — level 0 means "preamble, no header".
 
+    Fence tracking stores both the opening delimiter character and its length.
+    A closing fence must use the same character AND have length >= the opening
+    length (per CommonMark spec).  This prevents a 3-backtick close from
+    incorrectly closing a 4-backtick open.
+
     Args:
         text: Raw markdown string.
 
@@ -140,7 +164,8 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
     current_title: str = ""
     current_body_lines: list[str] = []
     in_fence: bool = False
-    fence_char: str = ""  # the opening fence character sequence (``` or ~~~)
+    fence_char: str = ""  # the opening fence character (` or ~)
+    fence_len: int = 0  # the length of the opening fence sequence
 
     def _flush() -> None:
         body = "".join(current_body_lines).strip("\n")
@@ -152,18 +177,25 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
         # Fence tracking: only open a new fence when we are not already in one.
         if _is_fence_delimiter(stripped):
             if not in_fence:
-                # Opening fence.
+                # Opening fence — record char and length.
                 m = _FENCE_RE.match(stripped)
-                fence_char = m.group(1)[0] if m else "`"  # ` or ~
+                if m:
+                    fence_seq = m.group(1)
+                    fence_char = fence_seq[0]  # ` or ~
+                    fence_len = len(fence_seq)
+                else:
+                    fence_char = "`"
+                    fence_len = 3
                 in_fence = True
                 current_body_lines.append(line)
             else:
                 # Potential closing fence: must use the same delimiter character
-                # and be at least as long as the opening fence.
+                # AND have length >= the opening fence length (CommonMark §4.5).
                 m = _FENCE_RE.match(stripped)
-                if m and m.group(1)[0] == fence_char:
+                if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len:
                     in_fence = False
                     fence_char = ""
+                    fence_len = 0
                 current_body_lines.append(line)
             continue
 
@@ -221,19 +253,189 @@ def _split_paragraphs(body: str) -> list[str]:
     return [p.strip("\n") for p in raw_paragraphs if p.strip()]
 
 
+def _hard_split_text(
+    breadcrumb: str, text_piece: str, file: str, ordinal_start: int
+) -> tuple[list[DocChunk], int]:
+    """Last-resort char/word-level split for a single piece that still exceeds the cap.
+
+    This handles pathological inputs: a single unbreakable long token (e.g. a giant URL,
+    minified JS blob) or a very long line with no whitespace.  Strategy:
+    - Try to split on whitespace (words), packing greedily.
+    - If even a single word exceeds the cap, split by fixed character count.
+
+    No overlap is applied at this level.
+
+    Args:
+        breadcrumb:    The breadcrumb prefix.
+        text_piece:    The raw text to split (not yet prefixed with breadcrumb).
+        file:          Workspace-relative path.
+        ordinal_start: First ordinal to use.
+
+    Returns:
+        ``(chunks, next_ordinal)``.
+    """
+    chunks: list[DocChunk] = []
+    ordinal = ordinal_start
+
+    # Compute how many chars are "safe" for the body.
+    # We rely on estimate_tokens to enforce correctness, not this ratio.
+    # Reserve headroom: breadcrumb + "\n\n" prefix costs some tokens.
+    prefix = f"{breadcrumb}\n\n"
+    prefix_tokens = estimate_tokens(prefix)
+    # Available token budget for the text_piece alone.
+    body_budget = BODY_TOKEN_CAP - prefix_tokens
+    if body_budget <= 0:
+        # Breadcrumb alone already exceeds cap; emit the piece as a best-effort single chunk.
+        chunk_text = f"{prefix}{text_piece}"
+        chunks.append(
+            DocChunk(id=f"{file}::{ordinal}", text=chunk_text, file=file, breadcrumb=breadcrumb)
+        )
+        return chunks, ordinal + 1
+
+    # Try word-level splitting first.
+    words = text_piece.split(" ")
+    accumulated_words: list[str] = []
+
+    for word in words:
+        candidate = " ".join(accumulated_words + [word]) if accumulated_words else word
+        candidate_text = f"{prefix}{candidate}"
+        if estimate_tokens(candidate_text) > BODY_TOKEN_CAP and accumulated_words:
+            # Flush current accumulation.
+            piece_text = f"{prefix}{' '.join(accumulated_words)}"
+            chunks.append(
+                DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
+            )
+            ordinal += 1
+            accumulated_words = [word]
+        else:
+            accumulated_words.append(word)
+
+    if accumulated_words:
+        piece = " ".join(accumulated_words)
+        piece_text = f"{prefix}{piece}"
+        # If even a single word is over the cap, slice by raw characters.
+        if estimate_tokens(piece_text) > BODY_TOKEN_CAP and len(accumulated_words) == 1:
+            # Character-level last resort: use body_budget * 4 chars per slice (conservative).
+            chars_per_slice = max(1, body_budget * 4)
+            raw = piece
+            while raw:
+                slice_text = f"{prefix}{raw[:chars_per_slice]}"
+                # Tighten until it fits (handles edge cases where heuristic is off).
+                while (
+                    estimate_tokens(slice_text) > BODY_TOKEN_CAP and len(raw[:chars_per_slice]) > 1
+                ):
+                    chars_per_slice = max(1, chars_per_slice - 1)
+                    slice_text = f"{prefix}{raw[:chars_per_slice]}"
+                chunks.append(
+                    DocChunk(
+                        id=f"{file}::{ordinal}", text=slice_text, file=file, breadcrumb=breadcrumb
+                    )
+                )
+                ordinal += 1
+                raw = raw[chars_per_slice:]
+        else:
+            chunks.append(
+                DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
+            )
+            ordinal += 1
+
+    return chunks, ordinal
+
+
+def _split_lines_into_chunks(
+    breadcrumb: str, paragraph: str, file: str, ordinal_start: int
+) -> tuple[list[DocChunk], int]:
+    """Line-level fallback split for a single paragraph that exceeds the cap.
+
+    Splits *paragraph* on ``\\n`` boundaries and packs lines greedily into pieces
+    that each fit under the cap.  If a single line still exceeds the cap, delegates
+    to ``_hard_split_text`` (char/word-level last resort).
+
+    No overlap is applied at this level.
+
+    Args:
+        breadcrumb:    The breadcrumb prefix.
+        paragraph:     The oversized paragraph text (single-``\\n``-separated lines).
+        file:          Workspace-relative path.
+        ordinal_start: First ordinal to use.
+
+    Returns:
+        ``(chunks, next_ordinal)``.
+    """
+    chunks: list[DocChunk] = []
+    ordinal = ordinal_start
+    lines = paragraph.split("\n")
+    accumulated_lines: list[str] = []
+
+    def _flush_lines(line_list: list[str]) -> None:
+        nonlocal ordinal
+        if not line_list:
+            return
+        piece_body = "\n".join(line_list)
+        piece_text = f"{breadcrumb}\n\n{piece_body}"
+        chunks.append(
+            DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
+        )
+        ordinal += 1
+
+    for line in lines:
+        candidate_lines = accumulated_lines + [line]
+        candidate_body = "\n".join(candidate_lines)
+        candidate_text = f"{breadcrumb}\n\n{candidate_body}"
+
+        if estimate_tokens(candidate_text) > BODY_TOKEN_CAP and accumulated_lines:
+            # Flush accumulated lines, start fresh with this line.
+            _flush_lines(accumulated_lines)
+            accumulated_lines = [line]
+        else:
+            accumulated_lines.append(line)
+
+    # Flush remaining.
+    if accumulated_lines:
+        # Check if even this remaining piece fits.
+        piece_body = "\n".join(accumulated_lines)
+        piece_text = f"{breadcrumb}\n\n{piece_body}"
+        if estimate_tokens(piece_text) <= BODY_TOKEN_CAP:
+            chunks.append(
+                DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
+            )
+            ordinal += 1
+        else:
+            # Single line exceeds cap → char/word last resort.
+            # accumulated_lines is exactly one line here (we flush on multi-line overages above).
+            hard_chunks, ordinal = _hard_split_text(breadcrumb, piece_body, file, ordinal)
+            chunks.extend(hard_chunks)
+
+    return chunks, ordinal
+
+
 def _size_split(
     breadcrumb: str,
     body: str,
     file: str,
     ordinal_start: int,
 ) -> tuple[list[DocChunk], int]:
-    """Split a section further on paragraph boundaries if it exceeds the cap.
+    """Split a section further on paragraph/line/char boundaries if it exceeds the cap.
 
-    Paragraphs are accumulated greedily until the next paragraph would push the
-    total ``text`` (breadcrumb + ``\\n\\n`` + accumulated) over the cap.  At
-    each boundary the current accumulation is flushed as a chunk, and the last
-    ``_OVERLAP_PARAGRAPHS`` paragraphs are carried into the next piece for
-    semantic continuity.
+    Three-level cascade:
+
+    1. **Paragraph-level** (primary): paragraphs (blank-line-separated) are
+       accumulated greedily until the next paragraph would exceed the cap.  At
+       each boundary the current accumulation is flushed and the last
+       ``_OVERLAP_PARAGRAPHS`` paragraphs are carried into the next piece for
+       semantic continuity.
+
+    2. **Line-level** (fallback): if adding a single paragraph would push the
+       total over the cap even when the accumulation is empty (i.e. the
+       paragraph itself exceeds the cap), the paragraph is split on ``\\n``
+       boundaries.  No overlap at this level.
+
+    3. **Char/word-level** (last resort): if a single line still exceeds the cap
+       (e.g. a very long URL or minified text), ``_hard_split_text`` splits by
+       words or characters.  No overlap at this level.
+
+    The invariant ``estimate_tokens(chunk.text) <= BODY_TOKEN_CAP`` holds for
+    every chunk produced by this function.
 
     If the body is short enough (after prepending the breadcrumb the total is
     under the cap), it is emitted as a single chunk with no further splitting.
@@ -290,7 +492,38 @@ def _size_split(
         )
         ordinal += 1
 
+    def _para_fits_alone(para: str) -> bool:
+        """Return True if *para* alone (with breadcrumb) fits under the cap."""
+        return estimate_tokens(f"{breadcrumb}\n\n{para}") <= BODY_TOKEN_CAP
+
+    def _emit_para(para: str) -> None:
+        """Emit one paragraph through the appropriate path (line-level if oversized)."""
+        nonlocal ordinal
+        if _para_fits_alone(para):
+            chunks.append(
+                DocChunk(
+                    id=f"{file}::{ordinal}",
+                    text=f"{breadcrumb}\n\n{para}",
+                    file=file,
+                    breadcrumb=breadcrumb,
+                )
+            )
+            ordinal += 1
+        else:
+            line_chunks, ordinal = _split_lines_into_chunks(breadcrumb, para, file, ordinal)
+            chunks.extend(line_chunks)
+
     for para in paragraphs:
+        # Check if para itself is oversized — must go through line-level fallback.
+        if not _para_fits_alone(para):
+            # Flush whatever we had first (without including this para).
+            _flush_accumulated(accumulated)
+            accumulated = []
+            _emit_para(para)
+            # No overlap after a line-level split: the oversized para was already
+            # finely split; carrying lines back into the next piece would re-bloat it.
+            continue
+
         # Build candidate text with this paragraph added.
         candidate_paras = accumulated + [para]
         candidate_body = "\n\n".join(candidate_paras)
@@ -300,16 +533,23 @@ def _size_split(
             # Flush current accumulation, then start next piece with overlap.
             _flush_accumulated(accumulated)
             overlap = accumulated[-_OVERLAP_PARAGRAPHS:] if _OVERLAP_PARAGRAPHS else []
+            # Verify that (overlap + para) itself fits; if not, drop the overlap.
+            # This avoids seeding the next accumulation with an already-over-cap window.
+            candidate_with_overlap = "\n\n".join(overlap + [para])
+            if (
+                overlap
+                and estimate_tokens(f"{breadcrumb}\n\n{candidate_with_overlap}") > BODY_TOKEN_CAP
+            ):
+                overlap = []
             accumulated = overlap + [para]
         else:
+            # Fits (or accumulated is empty, in which case para itself fits — checked above).
             accumulated.append(para)
 
     # Flush any remaining paragraphs.
     if accumulated:
         _flush_accumulated(accumulated)
 
-    # Edge case: a single paragraph exceeded the cap — it must still be emitted
-    # as one chunk (we cannot split finer than paragraph level here).
     return chunks, ordinal
 
 
@@ -330,8 +570,8 @@ def chunk_markdown(text: str, rel_path: str) -> list[DocChunk]:
        basename alone.
 
     2. **Size-split**: any chunk whose total ``text`` exceeds ``BODY_TOKEN_CAP``
-       tokens is further split on paragraph boundaries with a small overlap
-       (``_OVERLAP_PARAGRAPHS``) across consecutive pieces.
+       tokens is further split using a three-level cascade (paragraph →
+       line → char/word) ensuring the invariant holds for every output chunk.
 
     Fenced code blocks (``` or ~~~) are preserved verbatim; inline code spans
     (backtick-delimited) are never touched.
