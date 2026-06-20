@@ -432,6 +432,159 @@ class TestIncludeDeclaration:
 
 
 # ---------------------------------------------------------------------------
+# None-vs-empty distinction: delegate None → not_found; [] → ok+empty
+# ---------------------------------------------------------------------------
+#
+# Critical contract: these two outcomes must map to DIFFERENT statuses.
+#   - delegate returns None  → no symbol at this position → not_found.
+#   - delegate returns []    → real symbol with zero callers → ok + references=[].
+#
+# This distinction cannot be collapsed without losing information.
+
+
+class TestNoneVsEmptyDistinction:
+    """delegate None → not_found (no symbol); [] → ok+empty (zero callers)."""
+
+    def test_delegate_none_returns_not_found(self) -> None:
+        """When request_references returns None, find_references must return not_found."""
+        from rust_lsp_mcp.envelope import STATUS_NOT_FOUND
+
+        mgr = _make_manager(STATE_READY)
+
+        async def _inner() -> dict[str, Any]:
+            refs_mock = AsyncMock(return_value=None)
+            defs_mock = AsyncMock(return_value=[])
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=refs_mock),
+                patch.object(mgr, "request_definition", new=defs_mock),
+            ):
+                return await find_references(
+                    file="src/lib.rs", line=5, character=3, include_declaration=False
+                )
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_NOT_FOUND, (
+            f"delegate None must map to not_found (no symbol at position), got {result!r}"
+        )
+        assert "message" in result
+        assert "references" not in result
+
+    def test_delegate_empty_list_returns_ok_empty(self) -> None:
+        """When request_references returns [], find_references must return ok + references=[]."""
+        mgr = _make_manager(STATE_READY)
+
+        async def _inner() -> dict[str, Any]:
+            refs_mock = AsyncMock(return_value=[])
+            defs_mock = AsyncMock(return_value=[])
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=refs_mock),
+                patch.object(mgr, "request_definition", new=defs_mock),
+            ):
+                return await find_references(
+                    file="src/lib.rs", line=5, character=3, include_declaration=False
+                )
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_OK, (
+            f"delegate [] must map to ok+empty (zero callers), got {result!r}"
+        )
+        assert result["references"] == []
+
+    def test_none_and_empty_statuses_are_different(self) -> None:
+        """Explicitly confirm None→not_found and []→ok have distinct statuses."""
+        from rust_lsp_mcp.envelope import STATUS_NOT_FOUND
+
+        mgr = _make_manager(STATE_READY)
+
+        async def _run_with(return_value: Any) -> dict[str, Any]:
+            refs_mock = AsyncMock(return_value=return_value)
+            defs_mock = AsyncMock(return_value=[])
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=refs_mock),
+                patch.object(mgr, "request_definition", new=defs_mock),
+            ):
+                return await find_references(
+                    file="src/lib.rs", line=1, character=1, include_declaration=False
+                )
+
+        null_result = asyncio.run(_run_with(None))
+        empty_result = asyncio.run(_run_with([]))
+
+        assert null_result["status"] == STATUS_NOT_FOUND
+        assert empty_result["status"] == STATUS_OK
+        assert null_result["status"] != empty_result["status"], (
+            "None and [] must produce different statuses — cannot collapse them"
+        )
+
+    def test_delegate_none_not_found_has_no_references_key(self) -> None:
+        """not_found envelope must NOT contain a 'references' key."""
+        from rust_lsp_mcp.envelope import STATUS_NOT_FOUND
+
+        mgr = _make_manager(STATE_READY)
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=AsyncMock(return_value=None)),
+                patch.object(mgr, "request_definition", new=AsyncMock(return_value=[])),
+            ):
+                return await find_references(
+                    file="src/lib.rs", line=1, character=1, include_declaration=False
+                )
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_NOT_FOUND
+        assert "references" not in result, (
+            "not_found must not carry a 'references' key (that belongs to ok envelopes)"
+        )
+
+    def test_none_from_references_skips_definition_call_when_include_declaration(self) -> None:
+        """When refs is None (no symbol), request_definition must NOT be called."""
+        mgr = _make_manager(STATE_READY)
+
+        async def _inner() -> dict[str, Any]:
+            refs_mock = AsyncMock(return_value=None)
+            defs_mock = AsyncMock(return_value=[])
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=refs_mock),
+                patch.object(mgr, "request_definition", new=defs_mock),
+            ):
+                result = await find_references(
+                    file="src/lib.rs", line=1, character=1, include_declaration=True
+                )
+            defs_mock.assert_not_called()
+            return result
+
+        result = asyncio.run(_inner())
+        from rust_lsp_mcp.envelope import STATUS_NOT_FOUND
+
+        assert result["status"] == STATUS_NOT_FOUND
+
+    def test_list_result_with_refs_is_ok(self) -> None:
+        """When request_references returns a non-empty list, result is ok with refs."""
+        mgr = _make_manager(STATE_READY)
+        loc = _make_location("src/main.rs", 9, 3)
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=AsyncMock(return_value=[loc])),
+                patch.object(mgr, "request_definition", new=AsyncMock(return_value=[])),
+            ):
+                return await find_references(
+                    file="src/lib.rs", line=1, character=1, include_declaration=False
+                )
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_OK
+        assert len(result["references"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 

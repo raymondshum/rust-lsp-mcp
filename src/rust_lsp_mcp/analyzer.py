@@ -272,7 +272,7 @@ class AnalyzerManager:
 
     async def request_definition(
         self, relative_file_path: str, line: int, column: int
-    ) -> list[Location]:
+    ) -> list[Location] | None:
         """Delegate go-to-definition query to the live LSP instance.
 
         Args:
@@ -281,7 +281,17 @@ class AnalyzerManager:
             column: 0-indexed column number.
 
         Returns:
-            A list of ``Location`` dicts (possibly empty).
+            A list of ``Location`` dicts (possibly empty), or ``None`` when the
+            LSP returned a null response (no symbol at this position).
+
+            ``None`` vs ``[]`` distinction (multilspy 0.0.15 behaviour):
+                - ``None``  → rust-analyzer returned JSON-RPC ``null``; multilspy
+                  asserts on that shape and raises ``AssertionError`` before
+                  returning.  We catch it here and normalise to ``None`` so callers
+                  can distinguish "no symbol at this position" (None → not_found)
+                  from "symbol with zero definition sites" ([] → ok+empty).
+                - ``[]``    → rust-analyzer returned an empty list; resolution
+                  succeeded with no hits (rare but valid).
 
         Raises:
             RuntimeError: If the manager is not in the ready state.
@@ -290,14 +300,18 @@ class AnalyzerManager:
             raise RuntimeError(
                 "request_definition called before analyzer is ready — call require_ready() first"
             )
-        result = await self._lsp.request_definition(relative_file_path, line, column)
-        if result is None:
-            return []
+        try:
+            result = await self._lsp.request_definition(relative_file_path, line, column)
+        except AssertionError:
+            # multilspy 0.0.15 asserts on a null LSP response instead of
+            # returning None.  Map that to None so callers can distinguish
+            # "no symbol here" (None) from "symbol with zero results" ([]).
+            return None
         return result
 
     async def request_references(
         self, relative_file_path: str, line: int, column: int
-    ) -> list[Location]:
+    ) -> list[Location] | None:
         """Delegate find-references query to the live LSP instance.
 
         Args:
@@ -306,7 +320,17 @@ class AnalyzerManager:
             column: 0-indexed column number.
 
         Returns:
-            A list of ``Location`` dicts (possibly empty).
+            A list of ``Location`` dicts (possibly empty), or ``None`` when the
+            LSP returned a null response (no symbol at this position).
+
+            ``None`` vs ``[]`` distinction (multilspy 0.0.15 behaviour):
+                - ``None``  → rust-analyzer returned JSON-RPC ``null``; multilspy
+                  asserts on that shape and raises ``AssertionError`` before
+                  returning.  We catch it here and normalise to ``None`` so callers
+                  can distinguish "no symbol at this position" (None → not_found)
+                  from "symbol with zero callers" ([] → ok+empty).
+                - ``[]``    → rust-analyzer returned an empty list; the symbol
+                  exists but has no in-tree callers (the zero-callers case).
 
         Raises:
             RuntimeError: If the manager is not in the ready state.
@@ -315,9 +339,13 @@ class AnalyzerManager:
             raise RuntimeError(
                 "request_references called before analyzer is ready — call require_ready() first"
             )
-        result = await self._lsp.request_references(relative_file_path, line, column)
-        if result is None:
-            return []
+        try:
+            result = await self._lsp.request_references(relative_file_path, line, column)
+        except AssertionError:
+            # multilspy 0.0.15 asserts on a null LSP response instead of
+            # returning None.  Map that to None so callers can distinguish
+            # "no symbol here" (None) from "symbol with zero callers" ([]).
+            return None
         return result
 
     async def request_hover(self, relative_file_path: str, line: int, column: int) -> Hover | None:

@@ -224,7 +224,13 @@ class TestDocumentSymbolsDelegate:
 
 
 class TestDefinitionDelegate:
-    """request_definition forwards (rel, line, col) and returns result or []."""
+    """request_definition forwards (rel, line, col) and returns result or None.
+
+    Contract (multilspy 0.0.15):
+        - Underlying returns a list (possibly []) → delegate returns that list.
+        - Underlying raises AssertionError (null LSP response) → delegate returns None.
+        - Underlying returns None cleanly (hypothetical) → delegate returns None.
+    """
 
     def test_forwards_args_and_returns_result(self) -> None:
         mgr = _make_ready_manager()
@@ -241,7 +247,25 @@ class TestDefinitionDelegate:
 
         asyncio.run(_run())
 
-    def test_returns_empty_list_when_none(self) -> None:
+    def test_returns_none_when_underlying_raises_assertion_error(self) -> None:
+        """AssertionError from multilspy (null LSP response) → delegate returns None."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with patch.object(
+                lsp,
+                "request_definition",
+                new=AsyncMock(side_effect=AssertionError("Unexpected response: None")),
+            ):
+                result = await mgr.request_definition("src/lib.rs", 0, 0)
+            assert result is None
+
+        asyncio.run(_run())
+
+    def test_returns_none_when_underlying_returns_none(self) -> None:
+        """Underlying returning None cleanly (hypothetical) → delegate returns None."""
         mgr = _make_ready_manager()
         lsp = _make_unstarted_lsp()
         mgr._lsp = lsp
@@ -249,7 +273,61 @@ class TestDefinitionDelegate:
         async def _run() -> None:
             with patch.object(lsp, "request_definition", new=AsyncMock(return_value=None)):
                 result = await mgr.request_definition("src/lib.rs", 0, 0)
+            assert result is None
+
+        asyncio.run(_run())
+
+    def test_returns_empty_list_when_underlying_returns_empty(self) -> None:
+        """Underlying returning [] (zero results, NOT null) → delegate returns []."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with patch.object(lsp, "request_definition", new=AsyncMock(return_value=[])):
+                result = await mgr.request_definition("src/lib.rs", 0, 0)
             assert result == []
+
+        asyncio.run(_run())
+
+    def test_none_and_empty_list_are_distinguishable(self) -> None:
+        """AssertionError path yields None; empty-list path yields [] — must differ."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with patch.object(
+                lsp,
+                "request_definition",
+                new=AsyncMock(side_effect=AssertionError("null")),
+            ):
+                null_result = await mgr.request_definition("src/lib.rs", 0, 0)
+            with patch.object(lsp, "request_definition", new=AsyncMock(return_value=[])):
+                empty_result = await mgr.request_definition("src/lib.rs", 0, 0)
+
+            assert null_result is None
+            assert empty_result == []
+            assert null_result != empty_result
+
+        asyncio.run(_run())
+
+    def test_other_exceptions_propagate(self) -> None:
+        """Non-AssertionError exceptions (genuine failures) must propagate uncaught."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with (
+                patch.object(
+                    lsp,
+                    "request_definition",
+                    new=AsyncMock(side_effect=RuntimeError("transport failure")),
+                ),
+                pytest.raises(RuntimeError, match="transport failure"),
+            ):
+                await mgr.request_definition("src/lib.rs", 0, 0)
 
         asyncio.run(_run())
 
@@ -269,7 +347,13 @@ class TestDefinitionDelegate:
 
 
 class TestReferencesDelegate:
-    """request_references forwards (rel, line, col) and returns result or []."""
+    """request_references forwards (rel, line, col) and returns result or None.
+
+    Contract (multilspy 0.0.15):
+        - Underlying returns a list (possibly []) → delegate returns that list.
+        - Underlying raises AssertionError (null LSP response) → delegate returns None.
+        - Underlying returns None cleanly (hypothetical) → delegate returns None.
+    """
 
     def test_forwards_args_and_returns_result(self) -> None:
         mgr = _make_ready_manager()
@@ -284,13 +368,32 @@ class TestReferencesDelegate:
         async def _run() -> None:
             with patch.object(lsp, "request_references", new=mock_method):
                 result = await mgr.request_references("src/lib.rs", 9, 3)
+            assert result is not None
             assert result == expected
             assert len(result) == 2
             mock_method.assert_called_once_with("src/lib.rs", 9, 3)
 
         asyncio.run(_run())
 
-    def test_returns_empty_list_when_none(self) -> None:
+    def test_returns_none_when_underlying_raises_assertion_error(self) -> None:
+        """AssertionError from multilspy (null LSP response) → delegate returns None."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with patch.object(
+                lsp,
+                "request_references",
+                new=AsyncMock(side_effect=AssertionError("Unexpected response: None")),
+            ):
+                result = await mgr.request_references("src/lib.rs", 0, 0)
+            assert result is None
+
+        asyncio.run(_run())
+
+    def test_returns_none_when_underlying_returns_none(self) -> None:
+        """Underlying returning None cleanly (hypothetical) → delegate returns None."""
         mgr = _make_ready_manager()
         lsp = _make_unstarted_lsp()
         mgr._lsp = lsp
@@ -298,7 +401,61 @@ class TestReferencesDelegate:
         async def _run() -> None:
             with patch.object(lsp, "request_references", new=AsyncMock(return_value=None)):
                 result = await mgr.request_references("src/lib.rs", 0, 0)
+            assert result is None
+
+        asyncio.run(_run())
+
+    def test_returns_empty_list_when_underlying_returns_empty(self) -> None:
+        """Underlying returning [] (zero callers, NOT null) → delegate returns []."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with patch.object(lsp, "request_references", new=AsyncMock(return_value=[])):
+                result = await mgr.request_references("src/lib.rs", 0, 0)
             assert result == []
+
+        asyncio.run(_run())
+
+    def test_none_and_empty_list_are_distinguishable(self) -> None:
+        """AssertionError path yields None; empty-list path yields [] — must differ."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with patch.object(
+                lsp,
+                "request_references",
+                new=AsyncMock(side_effect=AssertionError("null")),
+            ):
+                null_result = await mgr.request_references("src/lib.rs", 0, 0)
+            with patch.object(lsp, "request_references", new=AsyncMock(return_value=[])):
+                empty_result = await mgr.request_references("src/lib.rs", 0, 0)
+
+            assert null_result is None
+            assert empty_result == []
+            assert null_result != empty_result
+
+        asyncio.run(_run())
+
+    def test_other_exceptions_propagate(self) -> None:
+        """Non-AssertionError exceptions (genuine failures) must propagate uncaught."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with (
+                patch.object(
+                    lsp,
+                    "request_references",
+                    new=AsyncMock(side_effect=RuntimeError("transport failure")),
+                ),
+                pytest.raises(RuntimeError, match="transport failure"),
+            ):
+                await mgr.request_references("src/lib.rs", 0, 0)
 
         asyncio.run(_run())
 

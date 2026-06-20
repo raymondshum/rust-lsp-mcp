@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from rust_lsp_mcp.core import get_manager, location_to_external, mcp, require_ready
-from rust_lsp_mcp.envelope import error, ok
+from rust_lsp_mcp.envelope import error, not_found, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
@@ -35,8 +35,16 @@ async def find_references(
     An empty ``references`` list is a legitimate answer — it means the symbol
     has no callers in the indexed workspace (e.g. a dead function, a private
     item used only at its definition site, or a public API with no in-tree
-    users).  ``not_found`` is NOT returned here; it is reserved for tools where
-    resolution itself fails (e.g. find_symbol with zero workspace-symbol hits).
+    users).
+
+    **Non-symbol position → not_found (distinct from zero references).**
+    When rust-analyzer returns JSON-RPC ``null`` (no symbol at the given
+    position), multilspy 0.0.15 raises ``AssertionError``; the delegate
+    normalises this to ``None`` (see ``AnalyzerManager.request_references``).
+    A ``None`` result here means "no symbol at this position" and returns
+    ``not_found`` — never ``ok+[]``.  This is the critical distinction between:
+    - Resolution failure (None → not_found): blank line, comment, whitespace.
+    - Genuine zero callers ([] → ok+empty): real symbol with no in-tree uses.
 
     **include_declaration synthesis:**
     multilspy's ``request_references`` always sends
@@ -71,19 +79,15 @@ async def find_references(
             "character": int,  # 1-indexed character offset
           }
 
+    - ``not_found`` — the position does not resolve to any symbol (blank line,
+      comment, whitespace).  Distinct from ``ok+[]``: ``not_found`` means
+      resolution itself failed; ``ok+[]`` means a real symbol with zero callers.
+
     - ``not_ready`` — the analyzer is still indexing; retry after
       ``analyzer_status`` reports ``"ready"``.
 
     - ``error`` — input validation failed (line/character < 1) or an unexpected
       exception from the LSP layer; includes a message.
-
-    UNVERIFIED (integration gate required):
-        multilspy asserts the LSP response for references is a list; if
-        rust-analyzer ever returns ``null`` for zero references the delegate
-        already normalises this to ``[]`` (``request_references`` returns
-        ``[]`` on ``None``), so ``ok``+empty is still the correct outcome.
-        The integration gate confirms rust-analyzer emits ``[]`` (not ``null``)
-        for genuinely-zero-reference symbols — this fast path relies on that.
     """
     # Step 1: validate input positions (must be 1-indexed, i.e. >= 1).
     if line < 1 or character < 1:
@@ -109,7 +113,11 @@ async def find_references(
         _log.exception("find_references: LSP error for %r at (%d, %d)", file, line, character)
         return error(f"LSP error: {exc}")
 
-    # refs is list[Location]; request_references normalises None → [].
+    # refs is list[Location] | None.
+    # None means the LSP returned null (no symbol at this position) — not_found.
+    # [] means a real symbol with zero in-tree callers — ok+empty (handled below).
+    if refs is None:
+        return not_found(f"No symbol at {file}:{line}:{character}.")
 
     repo_root = mgr.repository_root
 
@@ -139,15 +147,21 @@ async def find_references(
             )
             return error(f"LSP error (definition): {exc}")
 
-        for loc in defs:
-            mapped = location_to_external(loc, repo_root)
-            if mapped is None:
-                _log.debug("find_references: skipping unmappable definition location %r", loc)
-                continue
-            key = (mapped["file"], mapped["line"], mapped["character"])
-            # Only insert if not already present (declaration already in refs list).
-            seen.setdefault(key, mapped)
+        # defs is list[Location] | None.
+        # None means no symbol at this position — skip silently; the references
+        # call already succeeded (non-None), so we still return ok+refs without
+        # a declaration (there's nothing to declare).
+        if defs is not None:
+            for loc in defs:
+                mapped = location_to_external(loc, repo_root)
+                if mapped is None:
+                    _log.debug("find_references: skipping unmappable definition location %r", loc)
+                    continue
+                key = (mapped["file"], mapped["line"], mapped["character"])
+                # Only insert if not already present (declaration already in refs list).
+                seen.setdefault(key, mapped)
 
     # Step 6/7: return ok envelope with the (possibly empty) reference list.
-    # Zero references is a valid "no callers" answer — never return not_found here.
+    # Zero references is a valid "no callers" answer — not_found is only for the
+    # refs-is-None case (no symbol at position), handled above.
     return ok(references=list(seen.values()))

@@ -327,7 +327,13 @@ class TestPositionRoundTrip:
 
 
 class TestGotoDefinitionNotFound:
-    """Empty list, None, and all-skipped → not_found, never ok+empty."""
+    """Empty list, None, and all-skipped → not_found, never ok+empty.
+
+    The delegate now returns None (not []) when the underlying multilspy call
+    raises AssertionError on a null LSP response.  goto_definition treats both
+    None and [] as not_found (there is no "zero definitions" meaningful semantic
+    distinct from "no symbol here" for this tool).
+    """
 
     def test_empty_list_returns_not_found(self) -> None:
         mgr = _make_manager(STATE_READY)
@@ -337,12 +343,36 @@ class TestGotoDefinitionNotFound:
         assert "definitions" not in result
 
     def test_none_returns_not_found(self) -> None:
-        """Delegate returning None (server returned null) → not_found."""
+        """Delegate returning None (null LSP response → no symbol at position) → not_found."""
         mgr = _make_manager(STATE_READY)
         result = _run_goto_definition(mgr, "src/main.rs", 1, 1, lsp_result=None)
         assert result["status"] == STATUS_NOT_FOUND
         assert result["status"] != STATUS_OK
         assert "definitions" not in result
+
+    def test_none_from_assertion_error_path_returns_not_found(self) -> None:
+        """Delegate mapped from AssertionError (null LSP null response) → not_found.
+
+        Simulates the exact multilspy 0.0.15 behaviour: the delegate's
+        AssertionError catch returns None, and the tool must return not_found.
+        """
+        from rust_lsp_mcp.tools.goto_definition import goto_definition
+
+        mgr = _make_manager(STATE_READY)
+
+        async def _inner() -> dict[str, Any]:
+            # The delegate returns None (as it would after catching AssertionError).
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_definition", new=AsyncMock(return_value=None)),
+            ):
+                return await goto_definition("src/main.rs", 42, 10)
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_NOT_FOUND, (
+            f"Delegate returning None (AssertionError from multilspy) must yield not_found, "
+            f"got {result!r}"
+        )
 
     def test_not_found_has_message(self) -> None:
         mgr = _make_manager(STATE_READY)
