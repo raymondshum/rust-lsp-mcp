@@ -924,6 +924,139 @@ class TestSetextHeaders:
 
 
 # ---------------------------------------------------------------------------
+# Round-2 Hole 1 regression: mid-loop flush of a single oversized line
+# in _split_lines_into_chunks must delegate to _hard_split_text
+# ---------------------------------------------------------------------------
+
+
+class TestHole1MidLoopLineFlush:
+    """Regression for Round-2 Hole 1: when _split_lines_into_chunks flushes a
+    single accumulated line mid-loop (because the NEXT line would push it over
+    cap), that single line must be routed through _hard_split_text if it itself
+    exceeds the cap.  Before the fix, the mid-loop _flush_lines path emitted
+    the single giant line whole without delegating to char/word splitting.
+    """
+
+    def test_two_consecutive_giant_url_lines_all_chunks_under_cap(self) -> None:
+        """Two consecutive giant URL lines in one paragraph: every chunk ≤ cap.
+
+        Repro: the first giant URL is flushed mid-loop (because adding the
+        second would exceed the cap) but was NOT routed through _hard_split_text,
+        producing an oversized chunk (est=663, real=943 in adversary harness).
+        """
+        url = "https://example.com/" + "/".join(f"seg{i}" for i in range(200))
+        md = "# Refs\n\n" + url + "\n" + url + "\n"
+        chunks = chunk_markdown(md, "refs.md")
+        assert chunks, "Expected at least one chunk"
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} est-tokens (cap={BODY_TOKEN_CAP}). "
+                f"First 80 chars: {chunk.text[:80]!r}"
+            )
+
+    def test_overcap_line_first_position_among_several(self) -> None:
+        """A giant line as the FIRST of several lines: all chunks under cap.
+
+        When the first line is over-cap, it stays in ``accumulated_lines`` until
+        a second line is attempted, triggering a flush of the giant line alone.
+        """
+        url = "https://example.com/" + "/".join(f"seg{i}" for i in range(200))
+        md = "# Refs\n\n" + url + "\nshort line one\nshort line two\n"
+        chunks = chunk_markdown(md, "refs.md")
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} est-tokens (cap={BODY_TOKEN_CAP})."
+            )
+
+    def test_overcap_line_middle_position_among_several(self) -> None:
+        """A giant line in the MIDDLE of several lines: all chunks under cap."""
+        url = "https://example.com/" + "/".join(f"seg{i}" for i in range(200))
+        md = "# Refs\n\nfirst short line\n" + url + "\nlast short line\n"
+        chunks = chunk_markdown(md, "refs.md")
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} est-tokens (cap={BODY_TOKEN_CAP})."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Round-2 Hole 2 regression: estimator unsound for pure-punctuation/symbol runs
+# ---------------------------------------------------------------------------
+
+
+class TestHole2PurePunctuationHardSplit:
+    """Regression for Round-2 Hole 2: pure-punctuation/symbol runs tokenize at
+    ~1.0 real token/char, but the old _char_split_single_word used body_budget*2
+    chars per slice (safe only for prose at ~0.5 tokens/char).  This caused
+    slices that passed the estimated cap but exceeded 256 REAL tokens.
+
+    Fix: _char_split_single_word now uses max(16, body_budget) chars per slice,
+    treating 1 char ≈ 1 token (worst-case).  The tightening loop then handles
+    CJK and other high-density inputs.
+
+    These fast tests verify the estimate-cap invariant and the char-budget bound.
+    The integration tests (TestRealTokenizerGate) verify the REAL token count.
+    """
+
+    @staticmethod
+    def _worst_case_char_budget() -> int:
+        """Compute the worst-case char budget used by _char_split_single_word.
+
+        Mirrors: max(16, BODY_TOKEN_CAP - estimate_tokens(breadcrumb + "\\n\\n"))
+        For the simple "# H\\n\\n" breadcrumb the prefix is small so the budget
+        is approximately BODY_TOKEN_CAP.
+        """
+        prefix = "h.md > H\n\n"
+        prefix_tokens = estimate_tokens(prefix)
+        return max(16, BODY_TOKEN_CAP - prefix_tokens)
+
+    def _assert_all_under_cap(self, chunks: list[DocChunk], label: str) -> None:
+        assert chunks, f"Expected at least one chunk for {label}"
+        char_budget = self._worst_case_char_budget()
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"[{label}] Chunk {chunk.id!r} has {tok} est-tokens (cap={BODY_TOKEN_CAP})."
+            )
+            # Also verify the body character length fits the worst-case char budget.
+            prefix = f"{chunk.breadcrumb}\n\n"
+            body_chars = chunk.text[len(prefix) :]
+            assert len(body_chars) <= char_budget, (
+                f"[{label}] Chunk {chunk.id!r} body has {len(body_chars)} chars "
+                f"(worst-case char budget={char_budget}). "
+                "This means the hard-split char budget is not being respected."
+            )
+
+    def test_underscores_600_all_chunks_under_cap(self) -> None:
+        """600 underscores: every chunk ≤ cap by estimate and char budget."""
+        md = "# H\n\n" + "_" * 600 + "\n"
+        chunks = chunk_markdown(md, "h.md")
+        self._assert_all_under_cap(chunks, "underscores*600")
+
+    def test_exclamation_600_all_chunks_under_cap(self) -> None:
+        """600 exclamation marks: every chunk ≤ cap by estimate and char budget."""
+        md = "# H\n\n" + "!" * 600 + "\n"
+        chunks = chunk_markdown(md, "h.md")
+        self._assert_all_under_cap(chunks, "exclamation*600")
+
+    def test_dense_symbol_run_all_chunks_under_cap(self) -> None:
+        """Dense mixed symbol run (repeated !@#$%): every chunk ≤ cap."""
+        md = "# H\n\n" + "!@#$%" * 120 + "\n"
+        chunks = chunk_markdown(md, "h.md")
+        self._assert_all_under_cap(chunks, "dense_symbol*120")
+
+    def test_base64_run_all_chunks_under_cap(self) -> None:
+        """600-char base64-ish run: every chunk ≤ cap by estimate and char budget."""
+        base64_body = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==" * 22  # ~616 chars
+        md = f"# H\n\n{base64_body}\n"
+        chunks = chunk_markdown(md, "h.md")
+        self._assert_all_under_cap(chunks, "base64_run")
+
+
+# ---------------------------------------------------------------------------
 # Integration tier: real-tokenizer gate (excluded from CI)
 # ---------------------------------------------------------------------------
 
@@ -1014,3 +1147,55 @@ class TestRealTokenizerGate:
                 f"CJK chunk {chunk.id!r} has {real} real tokens "
                 f"(window={self._WINDOW}). text[:60]={chunk.text[:60]!r}"
             )
+
+    def _assert_adversarial_fixture(self, tok: object, md: str, rel: str, label: str) -> None:
+        """Helper: chunk *md*, assert every chunk ≤ 256 REAL tokens."""
+        chunks = chunk_markdown(md, rel)
+        assert chunks, f"Expected at least one chunk for adversarial fixture: {label}"
+        for chunk in chunks:
+            real = self._real_tokens(tok, chunk.text)  # type: ignore[arg-type]
+            assert real <= self._WINDOW, (
+                f"[{label}] Chunk {chunk.id!r} has {real} real tokens "
+                f"(window={self._WINDOW}). text[:80]={chunk.text[:80]!r}"
+            )
+
+    def test_adversarial_two_giant_url_lines_under_256_real(self) -> None:
+        """Round-2 Hole 1 adversarial fixture: two consecutive giant URL lines.
+
+        The first URL line is flushed mid-loop from _split_lines_into_chunks;
+        it must be routed through _hard_split_text to stay ≤ 256 real tokens.
+        """
+        tok = self._load_tok()
+        url = "https://example.com/" + "/".join(f"seg{i}" for i in range(200))
+        md = "# Refs\n\n" + url + "\n" + url + "\n"
+        self._assert_adversarial_fixture(tok, md, "refs.md", "two_giant_url_lines")
+
+    def test_adversarial_underscores_600_under_256_real(self) -> None:
+        """Round-2 Hole 2 adversarial: 600 underscores tokenize at ~1 token/char.
+
+        The old hard-split used body_budget*2 chars per slice, which passes the
+        estimated cap but would produce real token counts ~2x the cap.
+        """
+        tok = self._load_tok()
+        md = "# H\n\n" + "_" * 600 + "\n"
+        self._assert_adversarial_fixture(tok, md, "h.md", "underscores_600")
+
+    def test_adversarial_exclamation_600_under_256_real(self) -> None:
+        """Round-2 Hole 2 adversarial: 600 exclamation marks at ~1 token/char."""
+        tok = self._load_tok()
+        md = "# H\n\n" + "!" * 600 + "\n"
+        self._assert_adversarial_fixture(tok, md, "h.md", "exclamation_600")
+
+    def test_adversarial_base64_run_under_256_real(self) -> None:
+        """Round-2 Hole 2 adversarial: base64-ish run (mixed alpha + symbols)."""
+        tok = self._load_tok()
+        base64_body = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==" * 80
+        md = f"# H\n\n{base64_body}\n"
+        self._assert_adversarial_fixture(tok, md, "h.md", "base64_run")
+
+    def test_adversarial_cjk_pure_run_under_256_real(self) -> None:
+        """Round-2 Hole 2 adversarial: pure CJK run (each char = 1 WordPiece token)."""
+        tok = self._load_tok()
+        body = "中文字符测试" * 200
+        md = f"# H\n\n{body}\n"
+        self._assert_adversarial_fixture(tok, md, "h.md", "cjk_pure_run")

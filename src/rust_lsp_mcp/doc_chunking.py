@@ -431,11 +431,23 @@ def _hard_split_text(
     - Try to split on whitespace (words), packing greedily.
     - If even a single word exceeds the cap, split by fixed character count.
 
-    **Break 2 fix**: an oversized space-free token that is NOT the last word in a line
-    must also be char-split.  Previously only the final flush checked for a single-word
+    **Round-1 Break 2 fix**: an oversized space-free token that is NOT the last word in a
+    line must also be char-split.  Previously only the final flush checked for a single-word
     oversize; the mid-loop flush emitted big tokens whole.  Now, after any flush that
     leaves ``accumulated_words`` as a single over-cap token, we char-split it immediately
     before continuing to accumulate the next word.
+
+    **Round-2 Hole 2 fix (estimator unsound for pure-punctuation/symbol runs)**:
+    The ``_char_split_single_word`` helper now sets its initial character-slice budget
+    to ``max(16, body_budget)`` chars (treating 1 char ≈ 1 real token), rather than
+    ``body_budget * 2`` (which assumed the 0.5 tokens/char ratio safe for prose).
+    Pure-punctuation runs (``"_"*600``, ``"!"*600``, dense ``!@#$%``) tokenize at
+    ~1.0 real token/char, so the old budget would produce slices that passed the
+    *estimated* cap but exceeded 256 *real* tokens.  The new worst-case budget is
+    safe for every input regardless of real/char ratio, while the tightening loop
+    below handles CJK and other cases where even the conservative budget needs
+    further shrinkage.  Normal prose/word-level splitting is unaffected (it never
+    reaches this path).
 
     No overlap is applied at this level.
 
@@ -467,13 +479,38 @@ def _hard_split_text(
         return chunks, ordinal + 1
 
     def _char_split_single_word(word: str) -> None:
-        """Emit *word* (which alone exceeds the cap) via character-level slicing."""
+        """Emit *word* (which alone exceeds the cap) via character-level slicing.
+
+        This is the LAST-RESORT path — it fires only on pathological space-free
+        over-cap tokens (giant URLs, minified text, pure-symbol runs).  We set the
+        initial character budget conservatively at ``max(16, body_budget)`` chars,
+        treating 1 char ≈ 1 token (the worst-case real/char ratio for pure
+        punctuation/symbol runs).  The tightening loop below then shrinks further
+        until the estimate passes, so the invariant holds for CJK and every other
+        high-density input as well.
+
+        This does NOT affect normal prose or word-level splitting (which never
+        reaches this path), so real-corpus chunk sizes are unchanged.
+
+        NOTE: The cap guarantee (``estimate_tokens(chunk.text) <= BODY_TOKEN_CAP``)
+        holds for any input whose breadcrumb itself fits the cap.  A breadcrumb
+        (header title) that is itself > cap tokens cannot be made to fit by body-
+        splitting — this is a known accepted residual applicable only to synthetic
+        inputs (pathological 300-word header lines); it is absent from real docs.
+        """
         nonlocal ordinal
-        chars_per_slice = max(1, body_budget * 2)
+        # Worst-case char budget: treat 1 char ≈ 1 real token (pure punctuation/symbol).
+        # body_budget is in tokens; using it directly as a char count is safe even for
+        # CJK (each CJK char is 1 token) and pure punctuation (each char ≈ 1 token).
+        # Floor at 16 to avoid pathologically tiny slices on very long breadcrumbs.
+        worst_case_chars = max(16, body_budget)
         raw = word
         while raw:
+            # Reset slice size each iteration so tightening in one slice doesn't
+            # permanently reduce the budget for subsequent slices.
+            chars_per_slice = worst_case_chars
             slice_text = f"{prefix}{raw[:chars_per_slice]}"
-            # Tighten until it fits (handles edge cases where heuristic is off).
+            # Tighten until the estimate passes (handles CJK and other edge cases).
             while estimate_tokens(slice_text) > BODY_TOKEN_CAP and len(raw[:chars_per_slice]) > 1:
                 chars_per_slice = max(1, chars_per_slice - 1)
                 slice_text = f"{prefix}{raw[:chars_per_slice]}"
@@ -565,10 +602,18 @@ def _split_lines_into_chunks(
             return
         piece_body = "\n".join(line_list)
         piece_text = f"{breadcrumb}\n\n{piece_body}"
-        chunks.append(
-            DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
-        )
-        ordinal += 1
+        if estimate_tokens(piece_text) > BODY_TOKEN_CAP and len(line_list) == 1:
+            # Single accumulated line exceeds the cap — delegate to char/word last resort.
+            # This mirrors the final-flush path and closes the mid-loop hole: without this
+            # check, a single giant line flushed mid-loop would be emitted whole (oversized).
+            nonlocal_chunks, new_ord = _hard_split_text(breadcrumb, piece_body, file, ordinal)
+            chunks.extend(nonlocal_chunks)
+            ordinal = new_ord
+        else:
+            chunks.append(
+                DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
+            )
+            ordinal += 1
 
     for line in lines:
         candidate_lines = accumulated_lines + [line]
