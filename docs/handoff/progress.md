@@ -107,7 +107,7 @@ Read by [continue.md](continue.md) to pick the next phase.
   `analyzer.py`) gets exposed on `AnalyzerManager` so the gated tool can reach it. This tracker
   entry also finalizes Phase 1 → done (the flip rides in Phase 2's PR, mirroring how Phase 0's
   done-flip rode in PR #3, since direct pushes to `main` are blocked).
-- 2026-06-20 Phase 2 → **pr-open** (PR #__PR__). `find_symbol` built, reviewed, QA'd,
+- 2026-06-20 Phase 2 → **pr-open** (PR #4). `find_symbol` built, reviewed, QA'd,
   red-teamed (full pass + focused re-verify) — all gates green. Shipped: `positions.py` (the
   single 1↔0-indexed boundary helper, both directions, line+character); `find_symbol(name)`
   async tool (gate → `request_workspace_symbol` → map to `{name, kind, file, line, character,
