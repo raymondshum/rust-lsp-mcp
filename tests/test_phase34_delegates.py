@@ -300,7 +300,9 @@ class TestDefinitionDelegate:
             with patch.object(
                 lsp,
                 "request_definition",
-                new=AsyncMock(side_effect=AssertionError("null")),
+                new=AsyncMock(
+                    side_effect=AssertionError("Unexpected response from Language Server: None")
+                ),
             ):
                 null_result = await mgr.request_definition("src/lib.rs", 0, 0)
             with patch.object(lsp, "request_definition", new=AsyncMock(return_value=[])):
@@ -428,7 +430,9 @@ class TestReferencesDelegate:
             with patch.object(
                 lsp,
                 "request_references",
-                new=AsyncMock(side_effect=AssertionError("null")),
+                new=AsyncMock(
+                    side_effect=AssertionError("Unexpected response from Language Server: None")
+                ),
             ):
                 null_result = await mgr.request_references("src/lib.rs", 0, 0)
             with patch.object(lsp, "request_references", new=AsyncMock(return_value=[])):

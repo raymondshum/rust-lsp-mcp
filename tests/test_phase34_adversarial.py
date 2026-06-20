@@ -162,3 +162,100 @@ def test_find_references_zero_callers_is_ok_empty(settings) -> None:
     assert result["references"] == [], (
         f"fn main has no in-tree callers; expected empty list, got {result['references']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# NEW BREAK (introduced by the AssertionError fix): masking of malformed
+# LSP responses.
+#
+# The fix added a blanket ``except AssertionError: return None`` to
+# ``AnalyzerManager.request_references`` / ``request_definition``.  multilspy
+# 0.0.15 uses ``AssertionError`` for TWO distinct conditions:
+#
+#   1. A JSON-RPC ``null`` response  -> "Unexpected response ...: None"
+#      (the legitimate "no symbol here" case -> not_found, correct).
+#   2. A malformed-but-non-null response shape, e.g. a NON-empty references
+#      list whose item is missing the ``uri``/``range`` keys
+#      (``assert LSPConstants.URI in item`` at language_server.py:477), or a
+#      definition item that matches neither Location nor LocationLink
+#      (``assert False, f"Unexpected response ...: {item}"`` at line 424).
+#      This is a GENUINE LSP/protocol failure that the envelope contract
+#      classifies as ``error`` ("malformed input / internal / LSP failure"),
+#      NOT ``not_found``.
+#
+# Because the catch does not discriminate on the assertion message, condition
+# (2) is now swallowed and reported as ``not_found`` — a misleading "nothing
+# here" when the analyzer actually returned something broken.  The fix should
+# have been narrow (re-raise unless the assertion is the null-response one,
+# which carries the message suffix "None").
+#
+# These tests need no live analyzer: they inject a fake ``_lsp`` whose delegate
+# raises the SAME malformed-shape AssertionError multilspy raises, then assert
+# the tool surfaces ``error`` (NOT not_found).  They FAIL against current code.
+# ---------------------------------------------------------------------------
+
+
+class _MalformedLSP:
+    """Stand-in for the live LSP whose calls raise multilspy's malformed-shape
+    AssertionError (a non-``None`` assertion — a genuine protocol failure, not a
+    null response)."""
+
+    async def request_references(self, *_a, **_k):
+        # Mirrors language_server.py:477 `assert LSPConstants.URI in item`
+        # (a bare assertion with no message) for a non-empty, malformed list.
+        raise AssertionError
+
+    async def request_definition(self, *_a, **_k):
+        # Mirrors language_server.py:424 `assert False, "Unexpected response ...: {item}"`.
+        raise AssertionError("Unexpected response from Language Server: {'garbage': 1}")
+
+
+def _run_with_fake_lsp(settings, coro_factory):
+    """Warm-start a manager, then swap _lsp for the malformed fake before calling."""
+
+    async def _inner(manager):
+        from unittest.mock import patch
+
+        import rust_lsp_mcp.core as core
+
+        manager._lsp = _MalformedLSP()
+        with patch.object(core, "_manager", manager):
+            return await coro_factory()
+
+    return anyio.run(_with_warm_manager, settings, _inner)
+
+
+@pytest.mark.integration
+def test_find_references_malformed_response_is_error_not_found(settings) -> None:
+    """A malformed (non-null) references response is an LSP failure -> error.
+
+    NEW BREAK: the blanket `except AssertionError: return None` collapses this
+    genuine protocol failure into `not_found`, telling the assistant "no symbol
+    here" when the analyzer actually returned a broken payload.
+    """
+    from rust_lsp_mcp.envelope import STATUS_ERROR
+    from rust_lsp_mcp.tools.find_references import find_references
+
+    result = _run_with_fake_lsp(settings, lambda: find_references("crates/core/main.rs", 43, 4))
+    assert result["status"] == STATUS_ERROR, (
+        f"A malformed (non-null) LSP references response is an LSP failure and must "
+        f"be 'error' per the envelope contract, but got {result!r}.  The blanket "
+        f"AssertionError catch masks a real protocol failure as 'not_found'."
+    )
+
+
+@pytest.mark.integration
+def test_goto_definition_malformed_response_is_error_not_found(settings) -> None:
+    """A malformed (non-null) definition response is an LSP failure -> error.
+
+    NEW BREAK: same masking as above via request_definition's blanket catch.
+    """
+    from rust_lsp_mcp.envelope import STATUS_ERROR
+    from rust_lsp_mcp.tools.goto_definition import goto_definition
+
+    result = _run_with_fake_lsp(settings, lambda: goto_definition("crates/core/main.rs", 43, 4))
+    assert result["status"] == STATUS_ERROR, (
+        f"A malformed (non-null) LSP definition response is an LSP failure and must "
+        f"be 'error', but got {result!r}.  The blanket AssertionError catch in "
+        f"request_definition masks a real protocol failure as 'not_found'."
+    )

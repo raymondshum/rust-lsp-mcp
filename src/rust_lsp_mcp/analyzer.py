@@ -60,6 +60,29 @@ STATE_READY = "ready"
 _log = logging.getLogger(__name__)
 
 
+def _is_null_response_assertion(exc: AssertionError) -> bool:
+    """Whether a multilspy AssertionError signals a *null* LSP response.
+
+    multilspy 0.0.15 raises ``AssertionError`` for two very different conditions
+    in ``request_definition`` / ``request_references``:
+
+    1. The LSP returned JSON-RPC ``null`` — i.e. there is no symbol at the
+       requested position.  multilspy's shape asserts then fail with a message
+       ending in the response repr ``None`` (e.g.
+       ``"Unexpected response from Language Server: None"``).  This is a normal
+       *resolution-failed* outcome → callers should map it to ``not_found``.
+    2. The LSP returned a *malformed but non-null* payload (a list item missing
+       ``uri``/``range``, or a response that is neither Location nor LocationLink).
+       That is a genuine protocol failure → callers must surface ``error``.
+
+    We must NOT collapse (2) into ``not_found`` (that would hide a real failure
+    behind a misleading "nothing here").  Only (1) — message ending in ``None`` —
+    is the null case.  Tied to multilspy 0.0.15 (pinned); the adversarial
+    regression tests guard both branches if the message ever changes.
+    """
+    return str(exc).rstrip().endswith("None")
+
+
 # ---------------------------------------------------------------------------
 # Patched subclass — bypasses multilspy's download table
 # ---------------------------------------------------------------------------
@@ -302,11 +325,13 @@ class AnalyzerManager:
             )
         try:
             result = await self._lsp.request_definition(relative_file_path, line, column)
-        except AssertionError:
-            # multilspy 0.0.15 asserts on a null LSP response instead of
-            # returning None.  Map that to None so callers can distinguish
-            # "no symbol here" (None) from "symbol with zero results" ([]).
-            return None
+        except AssertionError as exc:
+            # multilspy 0.0.15 asserts on a null LSP response instead of returning
+            # None.  Only the null case → None (→ not_found); a malformed non-null
+            # payload is a real protocol failure and must propagate to error.
+            if _is_null_response_assertion(exc):
+                return None
+            raise
         return result
 
     async def request_references(
@@ -341,11 +366,13 @@ class AnalyzerManager:
             )
         try:
             result = await self._lsp.request_references(relative_file_path, line, column)
-        except AssertionError:
-            # multilspy 0.0.15 asserts on a null LSP response instead of
-            # returning None.  Map that to None so callers can distinguish
-            # "no symbol here" (None) from "symbol with zero callers" ([]).
-            return None
+        except AssertionError as exc:
+            # multilspy 0.0.15 asserts on a null LSP response instead of returning
+            # None.  Only the null case → None (→ not_found); a malformed non-null
+            # payload is a real protocol failure and must propagate to error.
+            if _is_null_response_assertion(exc):
+                return None
+            raise
         return result
 
     async def request_hover(self, relative_file_path: str, line: int, column: int) -> Hover | None:
