@@ -115,6 +115,19 @@ class DocStore:
                 seen.add(f)
                 unique_files.append(f)
 
+        # Compute the exclusion set from doc_exclude_patterns and remove those paths.
+        exclude_patterns = [
+            p.strip() for p in self._settings.doc_exclude_patterns.split(",") if p.strip()
+        ]
+        if exclude_patterns:
+            excluded: set[pathlib.Path] = set()
+            for pattern in exclude_patterns:
+                excluded.update(src_root.glob(pattern))
+            before_count = len(unique_files)
+            unique_files = [f for f in unique_files if f not in excluded]
+            removed = before_count - len(unique_files)
+            _log.debug("doc_store: excluded %d files matching doc_exclude_patterns", removed)
+
         _log.debug("doc_store: found %d markdown files to index", len(unique_files))
 
         # Chunk and collect all docs.

@@ -28,7 +28,11 @@ from rust_lsp_mcp.settings import Settings
 
 
 def _real_settings(tmp_chroma: pathlib.Path) -> Settings:
-    """Return settings pointing at the real ripgrep source with a tmp chroma path."""
+    """Return settings pointing at the real ripgrep source with a tmp chroma path.
+
+    Uses the default doc_exclude_patterns ("**/CHANGELOG.md") so the store
+    reflects the production configuration (CHANGELOG excluded by default).
+    """
     return Settings(
         chroma_path=str(tmp_chroma),
         ripgrep_src="/workspaces/ripgrep",
@@ -130,7 +134,11 @@ class TestPhase5Integration:
         )
 
     def test_sensible_retrieval_ignore_files(self, tmp_path: pathlib.Path) -> None:
-        """Query 'how do I make ripgrep ignore files' should return GUIDE.md or FAQ.md."""
+        """Query 'how do I make ripgrep ignore files' should return GUIDE.md or FAQ.md.
+
+        CHANGELOG.md is excluded by the default doc_exclude_patterns so it cannot
+        flood the results with hundreds of changelog bullets about ignore-related changes.
+        """
         settings = _real_settings(tmp_path / "chroma")
         store = DocStore(settings)
         store.rebuild()
@@ -144,11 +152,38 @@ class TestPhase5Integration:
             f"Expected a top result from {expected_files}, got files: {top_files}"
         )
 
+        # Verify that CHANGELOG.md is NOT in top results (default exclusion is live).
+        changelog_in_top = [f for f in top_files if "CHANGELOG.md" in f]
+        assert changelog_in_top == [], (
+            f"CHANGELOG.md appeared in top results despite default exclusion: {top_files}"
+        )
+
         # Verify shape of all results.
         for result in results:
             assert set(result.keys()) == {"file", "breadcrumb", "text", "distance"}
             assert isinstance(result["distance"], float)
             assert result["distance"] >= 0.0
+
+    def test_no_changelog_chunks_in_default_store(self, tmp_path: pathlib.Path) -> None:
+        """Default store must contain NO chunks from CHANGELOG.md.
+
+        The default doc_exclude_patterns excludes CHANGELOG.md to prevent its
+        hundreds of changelog bullets from flooding semantic search results.
+        This test directly queries for CHANGELOG-specific content and verifies
+        no such chunk is stored.
+        """
+        settings = _real_settings(tmp_path / "chroma")
+        store = DocStore(settings)
+        store.rebuild()
+
+        # Query a CHANGELOG-specific term unlikely to appear in authoritative docs.
+        results = store.search("0.10.0 release notes changelog", n_results=10)
+
+        changelog_chunks = [r for r in results if "CHANGELOG.md" in r["file"]]
+        assert changelog_chunks == [], (
+            f"Found CHANGELOG.md chunks in default store (should be excluded by "
+            f"doc_exclude_patterns): {[r['file'] for r in changelog_chunks]}"
+        )
 
     def test_sensible_retrieval_case_insensitive(self, tmp_path: pathlib.Path) -> None:
         """Query 'case insensitive search' should return a relevant result."""

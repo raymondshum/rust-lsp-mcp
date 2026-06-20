@@ -407,6 +407,82 @@ class TestSingletonLifecycle:
         clear_doc_store()
 
 
+# ---------------------------------------------------------------------------
+# Exclude-patterns tests
+# ---------------------------------------------------------------------------
+
+
+class TestDocStoreExcludePatterns:
+    def test_excluded_file_chunks_not_in_store(self, tmp_path: pathlib.Path) -> None:
+        """Chunks from a file matching doc_exclude_patterns are NOT indexed."""
+        corpus = tmp_path / "corpus"
+        corpus.mkdir(parents=True, exist_ok=True)
+
+        (corpus / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## v1.0.0\n\n- ignore files support added\n",
+            encoding="utf-8",
+        )
+        (corpus / "guide.md").write_text(
+            "# Guide\n\nHow to use ripgrep to ignore files.\n",
+            encoding="utf-8",
+        )
+
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            ripgrep_src=str(corpus),
+            doc_glob_patterns="**/*.md",
+            doc_exclude_patterns="**/CHANGELOG.md",
+            chroma_model_cache=str(tmp_path / "model_cache"),
+        )
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        count = store.rebuild()
+
+        assert count > 0, "Expected chunks from guide.md"
+
+        # None of the indexed chunks should reference CHANGELOG.md.
+        all_results = store.search("ignore files", n_results=count + 10)
+        changelog_chunks = [r for r in all_results if "CHANGELOG.md" in r["file"]]
+        assert changelog_chunks == [], (
+            f"Expected no CHANGELOG.md chunks in store, got: {changelog_chunks}"
+        )
+
+        # guide.md chunks should be present.
+        guide_chunks = [r for r in all_results if "guide.md" in r["file"]]
+        assert guide_chunks, "Expected guide.md chunks to be indexed"
+
+    def test_empty_exclude_patterns_indexes_everything(self, tmp_path: pathlib.Path) -> None:
+        """Empty doc_exclude_patterns means nothing is excluded — all files indexed."""
+        corpus = tmp_path / "corpus"
+        corpus.mkdir(parents=True, exist_ok=True)
+
+        (corpus / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## v1.0.0\n\n- ignore files support added\n",
+            encoding="utf-8",
+        )
+        (corpus / "guide.md").write_text(
+            "# Guide\n\nHow to use ripgrep to ignore files.\n",
+            encoding="utf-8",
+        )
+
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            ripgrep_src=str(corpus),
+            doc_glob_patterns="**/*.md",
+            doc_exclude_patterns="",  # No exclusions.
+            chroma_model_cache=str(tmp_path / "model_cache"),
+        )
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        count = store.rebuild()
+
+        # Both files should contribute chunks.
+        all_results = store.search("ignore files", n_results=count + 10)
+        files_found = {r["file"] for r in all_results}
+        assert any("CHANGELOG.md" in f for f in files_found), (
+            "Expected CHANGELOG.md to be indexed when doc_exclude_patterns is empty"
+        )
+        assert any("guide.md" in f for f in files_found), "Expected guide.md to be indexed"
+
+
 def _init_with_fake_ef(settings: Settings, tmp_path: pathlib.Path) -> DocStore:
     """Helper: init DocStore with a fake EF (bypasses model download).
 

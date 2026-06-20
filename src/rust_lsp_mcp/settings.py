@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # Default indexes all *.md in the ripgrep source repo.
     doc_glob_patterns: str = "**/*.md"
 
+    # Comma-separated glob patterns (relative to ripgrep_src) to EXCLUDE from the doc
+    # index, even if matched by doc_glob_patterns.  Default excludes CHANGELOG.md, whose
+    # hundreds of changelog bullets otherwise flood semantic search (plan-decided remedy).
+    doc_exclude_patterns: str = "**/CHANGELOG.md"
+
 
 def get_settings() -> Settings:
     """Return a Settings instance (loads .env + env vars on first call)."""
