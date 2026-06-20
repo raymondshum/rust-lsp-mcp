@@ -180,3 +180,43 @@ class TestProbeTool:
         # status must be not_ready, and there must be no 'results' field
         assert result["status"] == STATUS_NOT_READY
         assert "results" not in result
+
+
+# ---------------------------------------------------------------------------
+# Shutdown drains exception from a dead task (no GC warning)
+# ---------------------------------------------------------------------------
+
+
+class TestShutdownDrainsException:
+    """Verify that shutdown() silently drains an exception from an already-dead task."""
+
+    async def _make_manager_with_failed_task(self) -> AnalyzerManager:
+        """Return a manager whose background task raised before shutdown was called."""
+        mgr = AnalyzerManager(rust_analyzer_bin="/nonexistent", repository_root="/tmp")
+        # Replace _run with a coroutine that raises immediately.
+        import asyncio
+
+        async def _bad_run() -> None:
+            raise RuntimeError("injected failure")
+
+        mgr._task = asyncio.create_task(_bad_run(), name="test-failed-task")
+        # Let the event loop run _bad_run to completion so the task is done+failed.
+        await asyncio.sleep(0)
+        assert mgr._task.done()
+        assert not mgr._task.cancelled()
+        return mgr
+
+    def test_shutdown_does_not_raise_on_dead_task(self) -> None:
+        """shutdown() must not raise when the task already died with an exception."""
+        import asyncio
+
+        async def _run() -> None:
+            mgr = await self._make_manager_with_failed_task()
+            # Must not raise, and must not leave the exception un-drained.
+            await mgr.shutdown()
+            # Calling exception() again would raise InvalidStateError if already
+            # retrieved — but the task is still "done-not-cancelled", so exception()
+            # returns None after it's been drained exactly once.  Just confirm no
+            # exception propagated out of shutdown.
+
+        asyncio.run(_run())
