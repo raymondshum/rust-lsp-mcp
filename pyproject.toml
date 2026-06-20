@@ -41,6 +41,9 @@ dev-dependencies = [
 [tool.ruff]
 src = ["src", "tests"]
 line-length = 100
+# Vendored Claude Code skills (e.g. mcp-builder) ship their own scripts; they are
+# tooling, not our source — keep them out of lint/format. (Adds to ruff's defaults.)
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "UP", "B", "SIM", "I"]
@@ -48,6 +51,14 @@ select = ["E", "F", "UP", "B", "SIM", "I"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["rust_lsp_mcp"]
+
+# ---------------------------------------------------------------------------
+# ty (type checker) — same rationale: don't type-check vendored skill scripts.
+# Syntax confirmed via Context7 (astral-sh/ty docs/reference/configuration.md):
+# [tool.ty.src] exclude, gitignore-style, anchored to project root.
+# ---------------------------------------------------------------------------
+[tool.ty.src]
+exclude = [".claude"]
 
 # ---------------------------------------------------------------------------
 # pytest
