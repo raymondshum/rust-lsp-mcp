@@ -28,6 +28,9 @@ Brief pointers — open the file when its topic or trigger applies.
   docs) over training knowledge; when docs are silent, read the package source.
 - [caching & docs/ layout](docs/conventions/caching.md) — where learned patterns go
   (memory vs `docs/`), and the `docs/` category folders.
+- [documentation writing](docs/conventions/documentation-writing.md) — read before writing
+  or revising human-facing docs (README, `docs/guide/`). The loop: **ground (fan-out
+  explorers → fact-sheets) → shared contract → write (one page/agent) → verify**.
 - [verification pass](docs/conventions/verification-pass.md) — read before a
   "verify the plan" / "flip UNVERIFIED to VERIFIED" pass: inventory → confirm via
   Context7/source → cache + annotate the residue.
