@@ -366,3 +366,129 @@ class TestFindSymbolMissingLocation:
         mgr = _make_manager(STATE_READY)
         result = _run_find_symbol(mgr, "bad", [bad])
         assert result["status"] == STATUS_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
+# URI-fallback path tests (production path: multilspy 0.0.15 omits relativePath)
+# ---------------------------------------------------------------------------
+
+
+def _sym_uri_only(
+    name: str,
+    kind: int,
+    uri: str,
+    line: int,
+    character: int,
+    container: str | None = None,
+) -> dict[str, Any]:
+    """Build a symbol candidate with NO relativePath — only a uri (production path)."""
+    sym: dict[str, Any] = {
+        "name": name,
+        "kind": kind,
+        "location": {
+            # relativePath deliberately absent — this is the multilspy 0.0.15 shape
+            "uri": uri,
+            "range": {
+                "start": {"line": line, "character": character},
+                "end": {"line": line, "character": character + len(name)},
+            },
+        },
+    }
+    if container is not None:
+        sym["containerName"] = container
+    return sym
+
+
+class TestFindSymbolUriFallback:
+    """URI-fallback path: relativePath absent/None, uri is the only path source.
+
+    This is the actual production path for multilspy 0.0.15, which does not
+    populate relativePath in workspace_symbol results.
+    """
+
+    def test_uri_only_in_repo_returns_ok(self) -> None:
+        """Candidate with no relativePath but valid in-repo uri → ok with correct fields."""
+        from multilspy.multilspy_types import SymbolKind
+
+        # Manager root is /fake/repo; uri points inside it
+        mgr = _make_manager(STATE_READY)
+        sym = _sym_uri_only(
+            "my_func",
+            SymbolKind.Function,
+            uri="file:///fake/repo/src/lib.rs",
+            line=4,
+            character=3,
+        )
+        result = _run_find_symbol(mgr, "my_func", [sym])
+
+        assert result["status"] == STATUS_OK
+        assert len(result["results"]) == 1
+        r = result["results"][0]
+        assert r["name"] == "my_func"
+        assert r["kind"] == "Function"
+        assert r["file"] == "src/lib.rs"  # workspace-relative
+        assert r["line"] == 5  # LSP 4 → external 5
+        assert r["character"] == 4  # LSP 3 → external 4
+
+    def test_uri_only_none_relative_path_falls_back_to_uri(self) -> None:
+        """Candidate with relativePath=None (explicit null) also falls back to uri."""
+        from multilspy.multilspy_types import SymbolKind
+
+        mgr = _make_manager(STATE_READY)
+        sym: dict[str, Any] = {
+            "name": "other_fn",
+            "kind": SymbolKind.Function,
+            "location": {
+                "relativePath": None,  # explicit None — not absent, but falsy
+                "uri": "file:///fake/repo/src/main.rs",
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 8},
+                },
+            },
+        }
+        result = _run_find_symbol(mgr, "other_fn", [sym])
+
+        assert result["status"] == STATUS_OK
+        r = result["results"][0]
+        assert r["file"] == "src/main.rs"
+        assert r["line"] == 1
+        assert r["character"] == 1
+
+    def test_out_of_repo_uri_is_skipped(self) -> None:
+        """A candidate whose uri is outside the repo root is skipped → not_found."""
+        from multilspy.multilspy_types import SymbolKind
+
+        mgr = _make_manager(STATE_READY)
+        # /usr/lib/rustlib is outside /fake/repo
+        sym = _sym_uri_only(
+            "std_fn",
+            SymbolKind.Function,
+            uri="file:///usr/lib/rustlib/x.rs",
+            line=0,
+            character=0,
+        )
+        result = _run_find_symbol(mgr, "std_fn", [sym])
+        assert result["status"] == STATUS_NOT_FOUND
+
+    def test_uri_with_percent_encoded_path(self) -> None:
+        """URI with %20-encoded spaces in the path is decoded correctly (nit 2)."""
+        from multilspy.multilspy_types import SymbolKind
+
+        # Repo root contains a space: /fake/my repo
+        mgr = _make_manager(STATE_READY)
+        mgr._repository_root = "/fake/my repo"
+        sym = _sym_uri_only(
+            "enc_fn",
+            SymbolKind.Function,
+            uri="file:///fake/my%20repo/src/lib.rs",
+            line=2,
+            character=0,
+        )
+        result = _run_find_symbol(mgr, "enc_fn", [sym])
+
+        assert result["status"] == STATUS_OK
+        r = result["results"][0]
+        assert r["file"] == "src/lib.rs"
+        assert r["line"] == 3
+        assert r["character"] == 1

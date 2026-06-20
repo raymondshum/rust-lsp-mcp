@@ -32,9 +32,10 @@ import pathlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import FastMCP
+from multilspy.multilspy_types import SymbolKind
 
 from rust_lsp_mcp.analyzer import STATE_READY, AnalyzerManager, analyzer_lifespan
 from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
@@ -57,7 +58,7 @@ def _uri_to_relative_path(uri: str, repository_root: str) -> str | None:
     parsed = urlparse(uri)
     if parsed.scheme != "file":
         return None
-    abs_path = pathlib.Path(parsed.path)
+    abs_path = pathlib.Path(unquote(parsed.path))
     repo_root = pathlib.Path(repository_root)
     try:
         return str(abs_path.relative_to(repo_root))
@@ -236,8 +237,6 @@ async def find_symbol(name: str) -> dict[str, Any]:
             lsp_line=start.get("line", 0),
             lsp_character=start.get("character", 0),
         )
-
-        from multilspy.multilspy_types import SymbolKind
 
         kind_raw = sym.get("kind")
         try:
