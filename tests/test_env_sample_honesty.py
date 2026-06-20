@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).parent.parent
 
 
@@ -20,11 +19,7 @@ def _settings_field_names() -> list[str]:
     """Return all field names declared on Settings (excluding model_config)."""
     from rust_lsp_mcp.settings import Settings
 
-    return [
-        name
-        for name in Settings.model_fields
-        if name != "model_config"
-    ]
+    return [name for name in Settings.model_fields if name != "model_config"]
 
 
 def _env_sample_keys() -> set[str]:

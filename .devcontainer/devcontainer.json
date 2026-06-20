@@ -21,7 +21,11 @@
     "ghcr.io/devcontainers/features/rust:1": {
       "profile": "minimal",
       "components": "rust-analyzer,rust-src,rustfmt,clippy"
-    }
+    },
+    // GitHub CLI — the orchestration PR step (docs/handoff/continue.md) needs `gh`.
+    // Without it, opening a PR hits the pr-open human seam. Auth is still per-user
+    // (gh auth login, or a GH_TOKEN/GITHUB_TOKEN env var).
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
 
   // Bind mounts: observable, gitignored, survive container rebuilds.
@@ -57,7 +61,8 @@
         "charliermarsh.ruff",
         "astral-sh.ty",
         "GitHub.copilot",
-        "ms-python.python"
+        "ms-python.python",
+        "Anthropic.claude-code"
       ],
       "settings": {
         // Point rust-analyzer's own build cache at the bind mount.

@@ -25,4 +25,12 @@ bash "${REPO_ROOT}/scripts/init.sh"
 echo "setup: running uv sync ..." >&2
 uv sync --directory "${REPO_ROOT}"
 
+# 4. Disable git commit signing inside the container (idempotent).
+#    VS Code copies the host ~/.gitconfig into the container on create, which can
+#    carry a host-only signing key path (e.g. gpg.format=ssh + an SSH key under
+#    /Users/...). That key isn't present in the container, so every commit fails.
+#    Signing belongs to the host workflow; force it off for the container copy.
+echo "setup: disabling git commit signing for the container ..." >&2
+git config --global commit.gpgsign false
+
 echo "setup: done." >&2
