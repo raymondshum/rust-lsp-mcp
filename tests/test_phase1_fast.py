@@ -86,9 +86,17 @@ class TestEnvelopeBuilders:
 
 
 def _make_manager(state: str) -> AnalyzerManager:
-    """Create an AnalyzerManager and patch its state directly."""
+    """Create an AnalyzerManager stub with state set directly (no real task).
+
+    When state is STATE_READY, ``_lsp`` is set to a non-None sentinel so that
+    the ``is_ready`` property (which requires BOTH state==ready AND _lsp!=None)
+    behaves correctly.  Indexing fakes leave ``_lsp`` as None — the gate must
+    block regardless of ``_lsp`` when ``state != STATE_READY``.
+    """
     mgr = AnalyzerManager.__new__(AnalyzerManager)
     mgr.state = state
+    # is_ready requires _lsp to be non-None when state==ready (Fix 1).
+    mgr._lsp = object() if state == STATE_READY else None  # type: ignore[assignment]
     return mgr
 
 
