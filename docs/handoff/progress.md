@@ -205,7 +205,7 @@ Read by [continue.md](continue.md) to pick the next phase.
   + singleton) + `core.py` lifespan wiring + fast tests + integration gate; (C) `tools/search_docs.py`
   + `tools/refresh.py` seam wiring + fast tests. This entry also carries the Phase 3+4 → done flip
   from the prior run (direct pushes to `main` are blocked).
-- 2026-06-20 Phase 5 → **pr-open** (PR #TBD). Documentation RAG built, reviewed, QA'd, red-teamed
+- 2026-06-20 Phase 5 → **pr-open** (PR #6). Documentation RAG built, reviewed, QA'd, red-teamed
   (full + re-verify) — all gates green. Fan-out: Wave 1 chunker (risk core) → Wave 2 doc_store+lifespan
   (B) ∥ search_docs+refresh (C), coordinated by an orchestrator-owned `doc_store.py` interface stub so
   the two waves never co-edited a file. **Worktree base-mismatch handled:** C's worktree branched from
