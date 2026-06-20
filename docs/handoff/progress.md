@@ -22,8 +22,8 @@ Read by [continue.md](continue.md) to pick the next phase.
 |-------|--------|-----------|-----------------|-------|
 | 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | — | No (shared config; serial) | done |
 | 1 — Readiness gating | [phase-1-readiness.md](phase-1-readiness.md) | 0 | No (analyzer-bound, serial) | done |
-| 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | pr-open |
-| 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | not-started |
+| 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | done |
+| 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | in-progress |
 | 5 — Doc-RAG | [phase-5-doc-rag.md](phase-5-doc-rag.md) | 0 | **Yes** — off the LSP path; may run parallel to 3+4 | not-started |
 
 ## Dependency graph (what the orchestrator may fan out)
@@ -131,3 +131,27 @@ Read by [continue.md](continue.md) to pick the next phase.
   check — a dead-but-still-referenced rust-analyzer process reports `ready` and surfaces as `error`
   (contract preserved: never a misleading `ok`/empty), but Phase 4 should reset `state` on process
   death to return `not_ready` instead.
+- 2026-06-20 Phase 2 → **done**. **PR #4 merged** to `main` (merge commit `536b88d`) after CI
+  ran green; `origin/main` now carries the Phase 2 `find_symbol` code + the Phase 1 done-marking.
+  Local `main` synced (fast-forward, already up to date). DoD gates re-verified green on `main`:
+  `ruff check` clean, `ruff format --check` (15 files formatted), `ty check` clean, **76 fast
+  tests pass** (7 integration deselected). Name→position resolution is live on `main`. Resumed at
+  the `pr-open` gate per continue.md step 3 (PR open+merged → gate satisfied). **Next eligible:**
+  Phase 3+4 (nav + operational tools) and Phase 5 (doc-RAG) — both unlock now (5 needs only Phase
+  0; 3+4 needs Phase 2). Stopping at the phase boundary; re-issue continue to start.
+- 2026-06-20 Phase 3+4 → **in-progress** (branch `phase-3-4-tools`). Nav + operational tools.
+  **Concurrency decision:** Phase 5 NOT run alongside — `refresh` is a shared module (Phase 4's
+  `refresh` re-indexes the analyzer; Phase 5's doc store is "rebuilt wholesale by `refresh`"),
+  which per continue.md step 3 forbids concurrent execution; Phase 5 lands sequentially afterward
+  and extends `refresh`. Build contracts confirmed against installed multilspy 0.0.15:
+  `request_document_symbols(rel) -> (flat_list, tree)` (use `[0]`); `request_definition/references(
+  rel, line, column) -> List[Location]`; `request_hover(rel, line, column) -> Optional[Hover]` —
+  all take 0-indexed line/column (via `external_to_lsp`); `Hover.contents` =
+  MarkupContent|MarkedString|list (normalize to markdown str); `Location` may carry `relativePath`
+  here (prefer it, else derive from `uri`). **Partition (file-ownership, conflict-free):** Wave 1
+  foundation (2 parallel, disjoint files) — (A) `analyzer.py`: 4 guarded LSP delegates + `restart()`
+  (sets `state=indexing` FIRST, closing the carried Phase-1/2 seam) + `indexed_commit` capture; (B)
+  `server.py`→thin + new `core.py` (mcp, lifespan, `require_ready`, shared mapping helpers) + `tools/`
+  auto-discovery pkg + move existing tools. Wave 2 (6 parallel worktrees, analyzer-free) — one file
+  per tool: `document_symbols`, `goto_definition`, `find_references`, `hover`, `status`, `refresh`.
+  Integration gate serial once. This entry also carries the Phase 2 → done flip from the prior run.
