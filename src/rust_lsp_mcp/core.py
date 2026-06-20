@@ -27,8 +27,10 @@ from mcp.server.fastmcp import FastMCP
 from multilspy.multilspy_types import SymbolKind
 
 from rust_lsp_mcp.analyzer import AnalyzerManager, analyzer_lifespan
+from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store
 from rust_lsp_mcp.envelope import not_ready
 from rust_lsp_mcp.positions import lsp_to_external
+from rust_lsp_mcp.settings import get_settings
 
 _log = logging.getLogger(__name__)
 
@@ -48,9 +50,19 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ign
     async with analyzer_lifespan(app) as ctx:
         _manager = ctx["manager"]
         try:
+            # Doc-store init runs after the analyzer context is up.
+            # Failures are logged and swallowed — nav tools must still work.
+            try:
+                init_doc_store(get_settings())
+            except Exception:
+                _log.exception(
+                    "doc_store: init failed — search_docs will be unavailable; "
+                    "analyzer/nav tools continue normally"
+                )
             yield ctx
         finally:
             _manager = None
+            clear_doc_store()
 
 
 # ---------------------------------------------------------------------------

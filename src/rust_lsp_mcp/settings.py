@@ -56,12 +56,20 @@ class Settings(BaseSettings):
     # ChromaDB PersistentClient storage path (bind mount).
     chroma_path: str = "/workspaces/chroma"
 
-    # ONNX embedding-model cache (bind-mounted to ~/.cache/chroma in container).
+    # ONNX embedding-model cache bind-mount target (informational only).
+    # ChromaDB hardcodes the model path to Path.home()/.cache/chroma and does NOT
+    # read this value.  This field documents the bind-mount target so the path is
+    # visible here for devcontainer / docker-compose configuration reference.
     chroma_model_cache: str = "/home/vscode/.cache/chroma"
 
     # Glob patterns for markdown files to index (comma-separated).
     # Default indexes all *.md in the ripgrep source repo.
     doc_glob_patterns: str = "**/*.md"
+
+    # Comma-separated glob patterns (relative to ripgrep_src) to EXCLUDE from the doc
+    # index, even if matched by doc_glob_patterns.  Default excludes CHANGELOG.md, whose
+    # hundreds of changelog bullets otherwise flood semantic search (plan-decided remedy).
+    doc_exclude_patterns: str = "**/CHANGELOG.md"
 
 
 def get_settings() -> Settings:

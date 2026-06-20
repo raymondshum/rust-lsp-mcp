@@ -23,8 +23,8 @@ Read by [continue.md](continue.md) to pick the next phase.
 | 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | — | No (shared config; serial) | done |
 | 1 — Readiness gating | [phase-1-readiness.md](phase-1-readiness.md) | 0 | No (analyzer-bound, serial) | done |
 | 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | done |
-| 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | pr-open |
-| 5 — Doc-RAG | [phase-5-doc-rag.md](phase-5-doc-rag.md) | 0 | **Yes** — off the LSP path; may run parallel to 3+4 | not-started |
+| 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | done |
+| 5 — Doc-RAG | [phase-5-doc-rag.md](phase-5-doc-rag.md) | 0 | **Yes** — off the LSP path; may run parallel to 3+4 | pr-open |
 
 ## Dependency graph (what the orchestrator may fan out)
 
@@ -181,3 +181,62 @@ Read by [continue.md](continue.md) to pick the next phase.
   mid-reindex then repopulated. **Seam for Phase 5:** `refresh` will gain a doc-store rebuild call
   (comment marker left in `tools/refresh.py`). PR also carries the Phase 2 → done tracker flip.
   Awaiting human merge → then Phase 5 unlocks (Phase 5 needs only Phase 0; it extends `refresh`).
+- 2026-06-20 Phase 3+4 → **done**. **PR #5 merged** to `main` (merge commit `43fdf42`) after CI
+  ran green; `origin/main` now carries the Phase 3+4 nav + operational tools + the Phase 2
+  done-marking. Local `main` synced (HEAD == origin/main == `43fdf42`, clean tree). DoD gates
+  re-verified green on `main`: `ruff check` clean, `ruff format --check` (34 files formatted),
+  `ty check` clean, **262 fast tests pass** (15 integration deselected). Nav + operational tools
+  are live on `main`. Resumed at the `pr-open` gate per continue.md step 3 (PR open+merged → gate
+  satisfied). **Next eligible:** Phase 5 (doc-RAG) — the only remaining phase; needs only Phase 0
+  (done) and extends `refresh` (the comment marker seam left in `tools/refresh.py`). This done-flip
+  rides in Phase 5's PR next run (direct pushes to `main` are blocked). Stopping at the phase
+  boundary; re-issue continue to start Phase 5.
+- 2026-06-20 Phase 5 → **in-progress** (branch `phase-5-doc-rag`). Documentation RAG —
+  `search_docs` over ChromaDB. **Concurrency:** the only remaining phase; analyzer-free
+  throughout, so the live-analyzer serialization never binds (the integration gate is a Chroma
+  build over ripgrep `*.md`, not a rust-analyzer run). **No `uv add`** — chromadb 1.5.9 already
+  declared+installed (Phase 0). Runtime UNVERIFIED infra re-confirmed live: chromadb 1.5.9;
+  `ONNXMiniLM_L6_V2.DOWNLOAD_PATH == /home/vscode/.cache/chroma/onnx_models/all-MiniLM-L6-v2`
+  (matches `chroma_model_cache`); `Path.home() == /home/vscode`; both `/home/vscode/.cache/chroma`
+  (model cache, download-once) and `/workspaces/chroma` (PersistentClient store) are live bind
+  mounts; cosine via `configuration={"hnsw":{"space":"cosine"}}` accepted. **Partition (file-
+  ownership, conflict-free):** Wave 1 — `doc_chunking.py` (structure-aware chunker, the risk core)
+  + fast tests. Wave 2 (2 parallel worktrees, disjoint) — (B) `doc_store.py` (Chroma cosine store
+  + singleton) + `core.py` lifespan wiring + fast tests + integration gate; (C) `tools/search_docs.py`
+  + `tools/refresh.py` seam wiring + fast tests. This entry also carries the Phase 3+4 → done flip
+  from the prior run (direct pushes to `main` are blocked).
+- 2026-06-20 Phase 5 → **pr-open** (PR #6). Documentation RAG built, reviewed, QA'd, red-teamed
+  (full + re-verify) — all gates green. Fan-out: Wave 1 chunker (risk core) → Wave 2 doc_store+lifespan
+  (B) ∥ search_docs+refresh (C), coordinated by an orchestrator-owned `doc_store.py` interface stub so
+  the two waves never co-edited a file. **Worktree base-mismatch handled:** C's worktree branched from
+  `main` (missing Wave 1 + stub); merged B normally and applied only C's 4 intended files onto the
+  integration branch (avoided reverting Wave 1). **Shipped:** `doc_chunking.py` (structure-aware
+  chunker: header-tree + breadcrumb, ATX **and setext** headers, YAML front-matter, backtick
+  preservation, three-level size cascade paragraph→line→char keeping every chunk under the 256-token
+  MiniLM window); `doc_store.py` (Chroma `PersistentClient`, cosine, wholesale `rebuild()` with
+  is_ready gate + `build_complete` metadata sentinel for crash-safe build-once adopt, glob include +
+  **CHANGELOG exclude**); `core.py` lifespan init/teardown (doc-store failure can't crash nav tools);
+  `search_docs` tool (`not_ready`/`not_found`/`ok`/`error` envelope, offloaded to a thread); `refresh`
+  wholesale doc rebuild after analyzer restart (error envelope on rebuild failure). Settings:
+  `doc_glob_patterns` (default `**/*.md`) + `doc_exclude_patterns` (default `**/CHANGELOG.md`) +
+  env.sample entry. Gates: ruff/format/ty clean; **410 fast tests**; **32 integration tests** (15
+  analyzer + 10 doc-RAG live over ripgrep `*.md` + 7 real-tokenizer/adversarial). Review verdict
+  `minor` (3 fixed: build-complete sentinel closing the adopt-path readiness gap; dead-setting note;
+  adopt-test EF). **Adversarial `breaks-found` → both rework rounds used (cap reached, contract
+  resolved):** round 1 closed 3 chunker breaks — (1 HIGH) `estimate_tokens` non-conservative vs real
+  WordPiece (21% of corpus chunks silently truncated; new CJK-aware estimator → real corpus 0/822 over
+  256, worst 193), (2) mid-line over-cap token emitted whole, (3) setext headers dropped (CHANGELOG
+  collapsed to one breadcrumb) — plus a refresh error-envelope nit; round-2 re-verify confirmed those
+  closed and found 2 symmetric over-cap holes (line-splitter mid-flush; punctuation/CJK worst-case
+  char budget) → closed, with the **real all-MiniLM tokenizer baked into the integration gate** as the
+  true truncation check (estimate≤cap tests can't catch it). **Readiness invariant held under every
+  attack** (no misleading empty/partial mid-rebuild; cosine/model-cache/refresh-wedging/sentinel all
+  clean). **QA round 1:** the setext fix made CHANGELOG cleanly chunked, flooding the "ignore files"
+  query → applied the plan's pre-decided CHANGELOG exclusion (ignore-files query now tops GUIDE.md; 0
+  CHANGELOG chunks in the default store). **Accepted residual (documented, synthetic-only):** a header
+  title that is itself >256 tokens can't be body-split — absent from real docs. **Runtime UNVERIFIED
+  closed live:** chromadb 1.5.9 cosine via `configuration={"hnsw":{"space":"cosine"}}`; default EF
+  requires OMITTING `embedding_function` (passing `None` disables it); model cache lands on the
+  `/home/vscode/.cache/chroma` bind mount (download-once, no re-download on rebuild); retrieval is
+  topically sensible over ripgrep markdown. PR also carries the Phase 3+4 → done tracker flip.
+  Awaiting human merge — Phase 5 is the final phase; on merge the build is complete.
