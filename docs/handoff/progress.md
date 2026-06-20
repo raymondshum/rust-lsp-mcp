@@ -22,7 +22,7 @@ Read by [continue.md](continue.md) to pick the next phase.
 |-------|--------|-----------|-----------------|-------|
 | 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | — | No (shared config; serial) | done |
 | 1 — Readiness gating | [phase-1-readiness.md](phase-1-readiness.md) | 0 | No (analyzer-bound, serial) | done |
-| 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | in-progress |
+| 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | pr-open |
 | 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | not-started |
 | 5 — Doc-RAG | [phase-5-doc-rag.md](phase-5-doc-rag.md) | 0 | **Yes** — off the LSP path; may run parallel to 3+4 | not-started |
 
@@ -107,3 +107,27 @@ Read by [continue.md](continue.md) to pick the next phase.
   `analyzer.py`) gets exposed on `AnalyzerManager` so the gated tool can reach it. This tracker
   entry also finalizes Phase 1 → done (the flip rides in Phase 2's PR, mirroring how Phase 0's
   done-flip rode in PR #3, since direct pushes to `main` are blocked).
+- 2026-06-20 Phase 2 → **pr-open** (PR #__PR__). `find_symbol` built, reviewed, QA'd,
+  red-teamed (full pass + focused re-verify) — all gates green. Shipped: `positions.py` (the
+  single 1↔0-indexed boundary helper, both directions, line+character); `find_symbol(name)`
+  async tool (gate → `request_workspace_symbol` → map to `{name, kind, file, line, character,
+  container}`, 1-indexed, workspace-relative `file`); `AnalyzerManager._lsp` exposed via a
+  guarded `request_workspace_symbol` delegate + `is_ready` property. Reuses Phase 1 envelope +
+  gate. **Zero/None/all-skipped → `not_found`** (never `ok`+empty). Gates: ruff/format/ty clean;
+  **76 fast tests**; **7 integration tests** resolve real ripgrep symbols (positions round-trip
+  into the exact source location, verified live on ~50 symbols; overloads surface as multi-hit).
+  **Runtime UNVERIFIED closed:** (1) multilspy 0.0.15 does NOT populate `relativePath`/`absolutePath`
+  for `workspace_symbol` — only `uri`+`range`; `file` is derived via a load-bearing
+  `_uri_to_relative_path` (URL-decoded, `normpath`-hardened, out-of-repo → skipped). (2)
+  `containerName` is **always absent** for workspace-symbol results → `container: null`; Phase 3
+  must not lean on it (may differ for `document_symbols`/`textDocument/documentSymbol`).
+  Review `minor` (3 nits fixed: top-level import, URL-decode, URI-fallback fast test).
+  Adversarial `breaks-found` → **1 confirmed break fixed** (rework round 1/2): teardown/context-loss
+  window (analyzer dies mid-session or post-shutdown; `_lsp` cleared but `state` stale-`ready`) made
+  `find_symbol` return `error` and touch the dead delegate — fixed by gating on `is_ready`
+  (`state==ready AND _lsp is not None`); re-verified `break-closed` with live happy-path intact.
+  **Seams left for Phase 4:** (a) `state` still never resets off `ready` on teardown (existing); a
+  `restart()` must set `state=indexing` first. (b) `is_ready` is an identity check, not a liveness
+  check — a dead-but-still-referenced rust-analyzer process reports `ready` and surfaces as `error`
+  (contract preserved: never a misleading `ok`/empty), but Phase 4 should reset `state` on process
+  death to return `not_ready` instead.
