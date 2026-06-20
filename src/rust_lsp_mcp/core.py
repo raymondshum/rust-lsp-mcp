@@ -253,6 +253,17 @@ def symbol_to_external(
         line = ext.line
         character = ext.character
 
+    # No usable file path (no location path derivable and no default_file given):
+    # skip rather than emit a misleading file=None entry.  This preserves
+    # find_symbol's original "no location → skip" behavior; document_symbols
+    # always passes a default_file so it is unaffected.
+    if not file_path:
+        _log.debug(
+            "symbol_to_external: candidate %r has no usable file path — skipped",
+            sym_name,
+        )
+        return None
+
     return {
         "name": sym_name,
         "kind": kind_name(sym.get("kind")),

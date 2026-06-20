@@ -20,17 +20,12 @@ Entry point:
 """
 
 import rust_lsp_mcp.tools  # noqa: F401 — importing the package registers all tools
+from rust_lsp_mcp.core import mcp
 
-# Re-export helpers so existing tests that monkeypatch ``rust_lsp_mcp.server._manager``,
-# ``rust_lsp_mcp.server.require_ready``, ``rust_lsp_mcp.server.find_symbol``, etc. continue
-# to work without modification.
-from rust_lsp_mcp.core import (  # noqa: F401
-    _manager,
-    get_manager,
-    mcp,  # noqa: F401 — re-exported for legacy monkeypatching
-    require_ready,
-)
-from rust_lsp_mcp.tools.diagnostics import analyzer_status, probe  # noqa: F401
+# ``find_symbol`` is re-exported because the Phase 2 integration test reaches it
+# via ``rust_lsp_mcp.server.find_symbol``.  New code should import tools from
+# ``rust_lsp_mcp.tools.*`` directly; the canonical manager/gate live in
+# ``rust_lsp_mcp.core`` (tests monkeypatch ``rust_lsp_mcp.core._manager``).
 from rust_lsp_mcp.tools.find_symbol import find_symbol  # noqa: F401
 
 
