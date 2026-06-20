@@ -52,6 +52,10 @@ class DocStore:
     def __init__(self, settings: Settings, embedding_function: Any | None = None) -> None:
         self._settings = settings
         self._ef = embedding_function
+        # NOTE: ChromaDB hardcodes the ONNX model cache to Path.home()/.cache/chroma
+        # regardless of any setting.  settings.chroma_model_cache documents the
+        # bind-mount target but is NOT injected here — it is configured at the
+        # container level (see devcontainer.json / docker-compose bind mounts).
         self._client = chromadb.PersistentClient(path=settings.chroma_path)
         self._collection: Any = None
         self._ready: bool = False
@@ -137,6 +141,9 @@ class DocStore:
 
         # Handle empty corpus without crashing.
         if total == 0:
+            # Write completion sentinel so the adopt branch recognises an
+            # intentionally-empty corpus as a completed (not interrupted) build.
+            collection.modify(metadata={"build_complete": True})
             self._ready = True
             return 0
 
@@ -149,7 +156,12 @@ class DocStore:
                 metadatas=cast(Metadatas, metadatas[batch_start:batch_end]),
             )
 
-        # Only mark ready after ALL adds complete.
+        # Write completion sentinel BEFORE flipping is_ready — a hard-killed build
+        # will lack this sentinel, causing init_doc_store to rebuild rather than
+        # adopt a silently-partial collection.
+        collection.modify(metadata={"build_complete": True})
+
+        # Only mark ready after ALL adds AND the sentinel are written.
         self._ready = True
         return total
 
@@ -232,11 +244,15 @@ def init_doc_store(settings: Settings) -> DocStore:
     global _doc_store
     store = DocStore(settings)
 
-    # Check whether a populated collection already exists (build-once persistence).
+    # Check whether a populated, fully-built collection already exists.
+    # Adopt ONLY when count() > 0 AND the build-complete sentinel is present.
+    # A collection that has rows but no sentinel = hard-killed mid-build (partial)
+    # → fall through to a full rebuild so callers never get misleading partial results.
     adopted = False
     try:
         existing = store._client.get_collection(_COLLECTION_NAME)
-        if existing.count() > 0:
+        meta = existing.metadata or {}
+        if existing.count() > 0 and meta.get("build_complete"):
             _log.info(
                 "doc_store: adopting existing collection (%d chunks) — skipping rebuild",
                 existing.count(),
@@ -244,6 +260,13 @@ def init_doc_store(settings: Settings) -> DocStore:
             store._collection = existing
             store._ready = True
             adopted = True
+        elif existing.count() > 0:
+            _log.info(
+                "doc_store: existing collection has %d chunks but missing build_complete sentinel"
+                " (interrupted build) — will rebuild",
+                existing.count(),
+            )
+        # count() == 0 with no sentinel also falls through to rebuild.
     except NotFoundError:
         # No existing collection — will rebuild below.
         pass

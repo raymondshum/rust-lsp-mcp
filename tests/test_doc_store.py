@@ -334,38 +334,101 @@ class TestSingletonLifecycle:
         assert get_doc_store() is None
 
     def test_init_doc_store_adopt_existing_collection(self, tmp_path: pathlib.Path) -> None:
-        """If a populated collection already exists, init_doc_store adopts it (no rebuild)."""
+        """Populated collection WITH build_complete sentinel is adopted (no rebuild)."""
         corpus = tmp_path / "corpus"
         _write_corpus(corpus)
         settings = _make_settings(tmp_path, corpus)
 
         clear_doc_store()
-        # First init: builds from scratch.
+        # First init: builds from scratch, writes build_complete sentinel.
         store1 = _init_with_fake_ef(settings, tmp_path)
         count1 = store1._collection.count()
         assert count1 > 0
         assert store1.is_ready is True
+        # Verify the sentinel was written.
+        meta = store1._collection.metadata or {}
+        assert meta.get("build_complete") is True, (
+            "rebuild() must write build_complete sentinel before marking ready"
+        )
 
         clear_doc_store()
-        # Second init with same chroma_path: should ADOPT the existing collection.
+        # Second init with same chroma_path: should ADOPT (sentinel present).
         store2 = _init_with_fake_ef(settings, tmp_path)
         assert store2.is_ready is True
         assert store2._collection.count() == count1
 
         clear_doc_store()
 
+    def test_interrupted_build_triggers_rebuild(self, tmp_path: pathlib.Path) -> None:
+        """Regression: collection with rows but NO build_complete sentinel is NOT adopted.
+
+        Simulates a hard-killed mid-build: rows exist but sentinel was never
+        written.  init_doc_store must rebuild rather than serve partial results.
+        This exercises the readiness invariant (no misleading partial answers).
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        # Simulate an interrupted build: create collection and add rows, but
+        # deliberately skip collection.modify(metadata={"build_complete": True}).
+        fake_ef = FakeEmbeddingFunction()
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        partial_col = client.create_collection(
+            "ripgrep_docs",
+            embedding_function=fake_ef,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+        partial_col.add(ids=["partial-1"], documents=["orphaned chunk from interrupted build"])
+        # Confirm no sentinel is present.
+        assert (partial_col.metadata or {}).get("build_complete") is None
+
+        # Now call _init_with_fake_ef (which mirrors init_doc_store sentinel logic).
+        clear_doc_store()
+        store = _init_with_fake_ef(settings, tmp_path)
+
+        # Must be ready (rebuild ran to completion).
+        assert store.is_ready is True
+
+        # The partial orphan document should NOT appear — collection was rebuilt.
+        # After rebuild the corpus chunks should be present (not the "orphaned chunk").
+        results = store.search("orphaned chunk from interrupted build", n_results=5)
+        orphan_texts = [r["text"] for r in results if "orphaned chunk" in r["text"]]
+        assert orphan_texts == [], (
+            "Interrupted-build orphan survived; init_doc_store adopted instead of rebuilding"
+        )
+
+        # The rebuilt collection should have the sentinel.
+        meta = store._collection.metadata or {}
+        assert meta.get("build_complete") is True, (
+            "Sentinel must be present after rebuild triggered by interrupted-build detection"
+        )
+
+        clear_doc_store()
+
 
 def _init_with_fake_ef(settings: Settings, tmp_path: pathlib.Path) -> DocStore:
-    """Helper: init DocStore with a fake EF (bypasses model download)."""
-    store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+    """Helper: init DocStore with a fake EF (bypasses model download).
+
+    Mirrors the init_doc_store adopt-branch logic, including:
+    - passing the fake EF to get_collection so adopted collections use FakeEF
+      (not DefaultEmbeddingFunction) — keeps tests fully offline.
+    - checking the build_complete sentinel before adopting (Finding 1 / Finding 3).
+    """
+    fake_ef = FakeEmbeddingFunction()
+    store = DocStore(settings, embedding_function=fake_ef)
 
     from chromadb.errors import NotFoundError
 
-    # Mirror init_doc_store logic but inject the fake EF.
+    # Mirror init_doc_store logic but inject the fake EF on both paths.
     adopted = False
     try:
-        existing = store._client.get_collection("ripgrep_docs")
-        if existing.count() > 0:
+        # Pass embedding_function so the adopted collection uses FakeEF, not
+        # DefaultEF — without this the adopt path would silently trigger a real
+        # model download, breaking offline test isolation.
+        existing = store._client.get_collection("ripgrep_docs", embedding_function=fake_ef)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        meta = existing.metadata or {}
+        if existing.count() > 0 and meta.get("build_complete"):
             store._collection = existing
             store._ready = True
             adopted = True

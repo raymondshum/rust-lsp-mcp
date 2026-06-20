@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     # ChromaDB PersistentClient storage path (bind mount).
     chroma_path: str = "/workspaces/chroma"
 
-    # ONNX embedding-model cache (bind-mounted to ~/.cache/chroma in container).
+    # ONNX embedding-model cache bind-mount target (informational only).
+    # ChromaDB hardcodes the model path to Path.home()/.cache/chroma and does NOT
+    # read this value.  This field documents the bind-mount target so the path is
+    # visible here for devcontainer / docker-compose configuration reference.
     chroma_model_cache: str = "/home/vscode/.cache/chroma"
 
     # Glob patterns for markdown files to index (comma-separated).
