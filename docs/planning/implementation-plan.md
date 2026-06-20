@@ -6,8 +6,10 @@
 (or source inspection) and flipped to `VERIFIED` with a cached `docs/reference/`
 entry. The only items still `UNVERIFIED` are explicitly **runtime-only** (confirmable
 only against the live analyzer) or **intentionally deferred** (lowest-priority
-Dockerfile), each annotated inline. Ready to hand to Claude Code for implementation
-in risk-first order.
+Dockerfile), each annotated inline. **Execution handoff is scaffolded** in
+[docs/handoff/](../handoff/index.md) (durable per-phase prompts, orchestrator-owned
+progress tracker, `continue.md` dispatcher, adversarial review) — kick off with
+"Continue the build per docs/handoff/continue.md."
 
 **Build order is risk-first:** stand up the environment, then prove the two
 highest-risk behaviors against a warm analyzer, then layer the remaining tools,

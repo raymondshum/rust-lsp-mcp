@@ -69,9 +69,11 @@ reopened without new information**.
 
 ## How to resume
 
-The core-service grilling is **done**. Next step is the **plan-verification pass**:
-walk every `UNVERIFIED` item in [implementation-plan.md](implementation-plan.md) and
-the `docs/reference/` notes, confirm exact commands/versions/flags/signatures against
-current docs via Context7, flip them to `VERIFIED` (with a cached reference), and only
-then hand the plan to Claude Code for implementation in the plan's risk-first order
-(Phase 0 → readiness → name→position → tools → doc-RAG).
+The core-service grilling and the **plan-verification pass** are **done**. Execution
+scaffolding now exists: Claude Code runs the build via
+[docs/handoff/](../handoff/index.md) — durable per-phase prompts, an orchestrator-owned
+[progress.md](../handoff/progress.md) tracker, the [continue.md](../handoff/continue.md)
+dispatcher, and an adversarial review gate. Kickoff is a single recurring message to
+Claude Code: **"Continue the build per docs/handoff/continue.md."** Risk-first order
+(Phase 0 → readiness → name→position → tools → doc-RAG) is encoded in the tracker's
+dependency graph.
