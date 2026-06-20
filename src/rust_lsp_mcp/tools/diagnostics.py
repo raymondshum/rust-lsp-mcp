@@ -17,7 +17,8 @@ def analyzer_status() -> dict[str, Any]:
         - ``"indexing"`` — still warming up; gated tools return ``not_ready``.
         - ``"ready"``    — indexing complete; all tools are available.
 
-    Phase 4 will extend this with ``indexed_commit``, ``current_commit``, ``stale``.
+    This is the minimal one-field readiness check.  For the full report with
+    ``indexed_commit`` / ``current_commit`` / ``stale``, use the ``status`` tool.
     """
     manager = get_manager()
     state = manager.state if manager is not None else "indexing"

@@ -394,10 +394,14 @@ class AnalyzerManager:
 
         Sequence:
             1. Set ``self.state = STATE_INDEXING`` (must be first).
-            2. Drain the old task cleanly (same logic as ``shutdown()``).
-            3. Replace ``_shutdown_event`` and ``_ready_event`` with fresh instances
+            2. Clear ``_indexed_commit`` to None so ``status`` reports an honest
+               "unknown" during the re-index window instead of the *previous*
+               cycle's commit (which would let ``stale`` read ``false`` mid-reindex).
+               The new ``_run`` recaptures it from git HEAD before going ready.
+            3. Drain the old task cleanly (same logic as ``shutdown()``).
+            4. Replace ``_shutdown_event`` and ``_ready_event`` with fresh instances
                (the old ones are set/consumed and cannot be reused for the next cycle).
-            4. Call ``start()`` to spawn a new background ``_run`` task, which
+            5. Call ``start()`` to spawn a new background ``_run`` task, which
                recaptures ``indexed_commit`` from git HEAD.
 
         Safe to call even if ``_task`` is None (e.g. before the first ``start()``).
@@ -405,7 +409,12 @@ class AnalyzerManager:
         # Step 1: mark not-ready FIRST so callers see indexing immediately.
         self.state = STATE_INDEXING
 
-        # Step 2: drain the old task.
+        # Step 2: forget the old indexed commit — during the re-index window the
+        # previous value is no longer what's indexed; None → status reports
+        # indexed_commit=null, stale=null (honest "unknown") until _run recaptures.
+        self._indexed_commit = None
+
+        # Step 3: drain the old task.
         await self._drain_task()
 
         # Step 3: fresh events — old ones are spent.
