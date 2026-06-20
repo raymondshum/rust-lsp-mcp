@@ -67,10 +67,13 @@ async def _find_symbol_live(manager: AnalyzerManager, name: str) -> dict:
     """Call the find_symbol implementation directly with a patched manager."""
     from unittest.mock import patch
 
-    import rust_lsp_mcp.server as srv
+    import rust_lsp_mcp.core as core
+    from rust_lsp_mcp.tools.find_symbol import find_symbol
 
-    with patch.object(srv, "_manager", manager):
-        return await srv.find_symbol(name)
+    # The manager singleton now lives in core (post Phase 3+4 refactor); tools
+    # read it via get_manager().  Patch it there.
+    with patch.object(core, "_manager", manager):
+        return await find_symbol(name)
 
 
 # ---------------------------------------------------------------------------
