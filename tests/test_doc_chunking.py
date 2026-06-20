@@ -49,17 +49,16 @@ class TestEstimateTokens:
         assert estimate_tokens("") == 0
 
     def test_single_word(self) -> None:
-        # One word: char estimate = ~1 char / 4 ≈ 0.25; word estimate = 1 * 1.3 = 1.3 → 2.
+        # One word: char estimate = len/2 = 2.5 → 3; word estimate = 1 * 1.5 = 1.5 → 2.
+        # max(3, 2) = 3.
         result = estimate_tokens("hello")
         assert result >= 1
 
     def test_conservative_vs_character_only(self) -> None:
-        # A dense string of single-char words (like "a b c d") should have
-        # word-based estimate dominate character-based.
-        text = " ".join(["a"] * 100)  # 100 words, ~200 chars
-        char_est = math.ceil(len(text) / 4)
-        word_est = math.ceil(100 * 1.3)
-        assert estimate_tokens(text) == max(char_est, word_est)
+        # The estimate must be >= ceil(non_cjk_len / 2) for pure ASCII text.
+        text = " ".join(["a"] * 100)  # 100 words, ~200 chars, all ASCII
+        expected_floor = math.ceil(len(text) / 2)
+        assert estimate_tokens(text) >= expected_floor
 
     def test_long_prose_returns_positive(self) -> None:
         text = "This is a sentence. " * 50
@@ -69,17 +68,36 @@ class TestEstimateTokens:
         assert isinstance(estimate_tokens("hello world"), int)
 
     def test_never_underestimates_character_heuristic(self) -> None:
-        # The result must be >= ceil(len(text)/4) for any non-empty text.
+        # For pure ASCII text, the result must be >= ceil(len(text) / 2).
         for text in ["a", "hello", "word " * 20, "x" * 1000]:
-            expected_floor = math.ceil(len(text) / 4)
+            expected_floor = math.ceil(len(text) / 2)
             assert estimate_tokens(text) >= expected_floor, f"Failed for {text!r}"
 
     def test_never_underestimates_word_heuristic(self) -> None:
-        # The result must be >= ceil(word_count * 1.3).
+        # The result must be >= ceil(word_count * 1.5).
         text = "one two three four five"
         words = len(text.split())
-        expected_floor = math.ceil(words * 1.3)
+        expected_floor = math.ceil(words * 1.5)
         assert estimate_tokens(text) >= expected_floor
+
+    def test_cjk_counted_at_one_token_per_char(self) -> None:
+        # Each CJK character should count as approximately 1 token.
+        # 100 CJK chars → estimate >= 100.
+        cjk_text = "字" * 100
+        result = estimate_tokens(cjk_text)
+        assert result >= 100, (
+            f"CJK text (100 chars) estimated at {result} tokens; expected >= 100 "
+            "(each CJK char ≈ 1 WordPiece token)"
+        )
+
+    def test_cjk_estimate_exceeds_ascii_estimate_for_same_byte_length(self) -> None:
+        # A 100-char CJK string should estimate more tokens than a 100-char ASCII string,
+        # because CJK chars are each 1 token while ASCII is ~0.5 tokens/char.
+        cjk_text = "字" * 100
+        ascii_text = "a" * 100
+        assert estimate_tokens(cjk_text) > estimate_tokens(ascii_text), (
+            "CJK estimate should exceed ASCII estimate for equal character counts"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -719,3 +737,280 @@ class TestFenceLengthTracking:
         chunks = chunk_markdown(md, "doc.md")
         real_header_chunks = [c for c in chunks if "Real Header" in c.breadcrumb]
         assert len(real_header_chunks) == 1
+
+
+# ---------------------------------------------------------------------------
+# Break 2 regression: oversized mid-line token must be char-split
+# ---------------------------------------------------------------------------
+
+
+class TestHardSplitMidLineOvercapToken:
+    """Regression for Break 2: _hard_split_text must char-split a single
+    over-cap token that appears mid-line (not only at the final flush).
+
+    Before the fix, the mid-loop flush emitted a giant space-free token whole
+    without going through the char-level last resort, producing a chunk with
+    estimate_tokens > BODY_TOKEN_CAP.
+    """
+
+    def test_overcap_token_then_trailing_word_all_chunks_under_cap(self) -> None:
+        """An over-cap space-free token followed by a trailing word must be split.
+
+        Repro: ``chunk_markdown("# H\\n\\n" + "A"*2000 + " tail\\n", "x.md")``
+        produced a 503-est-token chunk because 'A'*2000 was flushed whole as a
+        mid-loop flush (not the final flush) and the char-split path was skipped.
+        """
+        bigword = "A" * 2000
+        md = f"# H\n\n{bigword} tail\n"
+        chunks = chunk_markdown(md, "x.md")
+        assert len(chunks) >= 1, "Expected at least one chunk"
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} tokens (cap={BODY_TOKEN_CAP}). "
+                f"First 80 chars: {chunk.text[:80]!r}"
+            )
+
+    def test_leading_word_then_overcap_token_then_trailing(self) -> None:
+        """'x ' + giant_token + ' y' on one line — all chunks under cap."""
+        bigword = "B" * 3000
+        md = f"# H\n\nx {bigword} y\n"
+        chunks = chunk_markdown(md, "x.md")
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Chunk {chunk.id!r} has {tok} est-tokens (cap={BODY_TOKEN_CAP})."
+            )
+
+    def test_table_giant_cell_all_chunks_under_cap(self) -> None:
+        """A markdown table row with a huge cell must not produce an over-cap chunk.
+
+        The ``|`` markers after the giant cell cause a mid-loop flush in
+        ``_hard_split_text``; the giant cell must be char-split, not emitted whole.
+        """
+        table = "# T\n\n| col |\n|---|\n| " + "x" * 3000 + " |\n"
+        chunks = chunk_markdown(table, "table.md")
+        for chunk in chunks:
+            tok = estimate_tokens(chunk.text)
+            assert tok <= BODY_TOKEN_CAP, (
+                f"Table chunk {chunk.id!r} has {tok} est-tokens (cap={BODY_TOKEN_CAP})."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Break 3 regressions: setext headers (=== / ---)
+# ---------------------------------------------------------------------------
+
+
+class TestSetextHeaders:
+    """Regressions for Break 3: setext (underline-style) headers.
+
+    ripgrep's CHANGELOG.md uses setext headers throughout.  Before the fix,
+    all 156 chunks collapsed to a single 'CHANGELOG.md' breadcrumb.
+    """
+
+    # ------------------------------------------------------------------
+    # Basic recognition
+    # ------------------------------------------------------------------
+
+    def test_setext_h1_produces_correct_breadcrumb(self) -> None:
+        """A ``===`` underline creates an h1 breadcrumb with the title."""
+        md = "Title\n=====\n\nbody text\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert any("Title" in c.breadcrumb for c in chunks), (
+            f"Expected breadcrumb containing 'Title', got: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_setext_h2_produces_correct_breadcrumb(self) -> None:
+        """A ``---`` underline creates an h2 breadcrumb with the title."""
+        md = "Parent\n======\n\nSubtitle\n--------\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        breadcrumbs = [c.breadcrumb for c in chunks]
+        assert any("Subtitle" in bc for bc in breadcrumbs), (
+            f"Expected breadcrumb with 'Subtitle', got: {breadcrumbs}"
+        )
+
+    def test_setext_underline_not_in_chunk_body(self) -> None:
+        """The ``=====`` or ``------`` underline line must NOT appear in chunk text."""
+        md = "Title\n=====\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        all_text = " ".join(c.text for c in chunks)
+        assert "=====" not in all_text, (
+            "Setext underline '=====' was included in chunk body (should be consumed)."
+        )
+
+    def test_setext_h2_underline_not_in_chunk_body(self) -> None:
+        """The ``-----`` underline line must NOT appear in chunk text."""
+        md = "Subtitle\n---------\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        all_text = " ".join(c.text for c in chunks)
+        assert "-----" not in all_text, (
+            "Setext underline '-----' was included in chunk body (should be consumed)."
+        )
+
+    def test_setext_h1_then_h2_breadcrumb_hierarchy(self) -> None:
+        """Setext h1 followed by setext h2 builds a nested breadcrumb."""
+        md = "BigTitle\n========\n\nSubtitle\n--------\n\ncontent\n"
+        chunks = chunk_markdown(md, "d.md")
+        # The content chunk should be under both BigTitle and Subtitle.
+        content_bc = [c.breadcrumb for c in chunks if "content" in c.text]
+        assert content_bc, "No chunk with 'content' found"
+        assert "BigTitle" in content_bc[0], f"Missing BigTitle in {content_bc}"
+        assert "Subtitle" in content_bc[0], f"Missing Subtitle in {content_bc}"
+
+    # ------------------------------------------------------------------
+    # Non-misfires: things that must NOT become setext headers
+    # ------------------------------------------------------------------
+
+    def test_thematic_break_after_blank_line_is_not_setext(self) -> None:
+        """A ``---`` line after a blank line is a thematic break, not a setext header.
+
+        A blank line between a paragraph and ``---`` means there is no immediately
+        preceding text line, so ``---`` cannot be a setext underline.
+        """
+        md = "Paragraph one.\n\n---\n\nParagraph two.\n"
+        chunks = chunk_markdown(md, "d.md")
+        # All breadcrumbs should be just the filename (no header created).
+        for chunk in chunks:
+            assert chunk.breadcrumb == "d.md", (
+                f"Thematic break created a spurious header: {chunk.breadcrumb!r}"
+            )
+
+    def test_table_separator_not_setext(self) -> None:
+        """A ``|---|---|`` table separator row must NOT become a setext header."""
+        md = "# T\n\n| a | b |\n|---|---|\n| x | y |\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert len(chunks) == 1, f"Expected 1 chunk, got {len(chunks)}"
+        # The table separator must appear in the body, not be consumed as a header.
+        assert "|---|---|" in chunks[0].text, "Table separator was incorrectly consumed"
+
+    def test_setext_underline_inside_fenced_block_not_header(self) -> None:
+        """A ``===`` line inside a fenced code block must NOT become a setext header."""
+        md = (
+            "# Outer\n\n"
+            "```\n"
+            "Title inside fence\n"
+            "==================\n"  # setext-like, but inside fence
+            "more content\n"
+            "```\n\n"
+            "After.\n"
+        )
+        chunks = chunk_markdown(md, "d.md")
+        # Only one section (the ATX h1); the fence content is body, not a new header.
+        assert len(chunks) == 1, (
+            f"Expected 1 chunk, got {len(chunks)}: {[c.breadcrumb for c in chunks]}"
+        )
+        assert "==================" in chunks[0].text, (
+            "Setext-like line inside fence was incorrectly consumed"
+        )
+
+    def test_yaml_frontmatter_close_dash_not_setext(self) -> None:
+        """The closing ``---`` of a YAML frontmatter block is not a setext h2.
+
+        YAML frontmatter: first line is ``---``, content follows, then another ``---``
+        closes it.  The closing ``---`` looks like a setext h2 for the last frontmatter
+        line, but must be treated as the end of the frontmatter block instead.
+        """
+        md = "---\ntitle: My Doc\nauthor: Foo\n---\n\n# Real Header\n\nContent.\n"
+        chunks = chunk_markdown(md, "d.md")
+        # Only 'Real Header' should be a header; 'author: Foo' must NOT be one.
+        breadcrumbs = {c.breadcrumb for c in chunks}
+        assert not any("author" in bc for bc in breadcrumbs), (
+            f"YAML frontmatter close was misidentified as setext header: {breadcrumbs}"
+        )
+        assert any("Real Header" in bc for bc in breadcrumbs), (
+            f"Real ATX header missing after frontmatter: {breadcrumbs}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Integration tier: real-tokenizer gate (excluded from CI)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestRealTokenizerGate:
+    """Integration tests that load the real all-MiniLM-L6-v2 tokenizer and verify
+    that no chunk from the ripgrep corpus exceeds the 256-token MiniLM window.
+
+    These tests are excluded from CI (``pytest -m "not integration"``).
+    Run locally with ``pytest -m integration tests/test_doc_chunking.py``.
+
+    Skip gracefully if the ``tokenizers`` package or the model cache is absent.
+    """
+
+    _TOKENIZER_PATH = "/home/vscode/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/tokenizer.json"
+    _RIPGREP_ROOT = "/workspaces/ripgrep"
+    _WINDOW = 256  # MiniLM token budget (including [CLS] and [SEP] → effective 254 content)
+
+    @staticmethod
+    def _load_tok():  # type: ignore[return]
+        """Load the real tokenizer; skip the test if unavailable."""
+        import os
+
+        tokenizers = pytest.importorskip("tokenizers", reason="tokenizers package not installed")
+        tok_path = TestRealTokenizerGate._TOKENIZER_PATH
+        if not os.path.exists(tok_path):
+            pytest.skip(f"Tokenizer cache not found: {tok_path}")
+        tok = tokenizers.Tokenizer.from_file(tok_path)
+        tok.no_truncation()
+        return tok
+
+    @staticmethod
+    def _real_tokens(tok, text: str) -> int:
+        """Count non-padding content tokens (excluding [CLS] and [SEP])."""
+        tokens = tok.encode(text).tokens
+        return sum(1 for t in tokens if t not in ("[PAD]", "[CLS]", "[SEP]"))
+
+    def test_ripgrep_corpus_no_chunk_exceeds_256_real_tokens(self) -> None:
+        """Every chunk from the ripgrep corpus must be ≤ 256 real MiniLM tokens.
+
+        This is the TRUE truncation gate that estimate_tokens alone cannot catch.
+        The estimate is conservative but not perfect; this test verifies the real
+        invariant holds for the actual target corpus.
+        """
+        import os
+        from pathlib import Path
+
+        if not os.path.isdir(self._RIPGREP_ROOT):
+            pytest.skip(f"ripgrep source not found at {self._RIPGREP_ROOT}")
+
+        tok = self._load_tok()
+
+        over_window: list[tuple[str, int]] = []
+        total = 0
+        worst = 0
+
+        for md_path in Path(self._RIPGREP_ROOT).rglob("*.md"):
+            text = md_path.read_text(encoding="utf-8", errors="replace")
+            rel = str(md_path.relative_to(self._RIPGREP_ROOT))
+            for chunk in chunk_markdown(text, rel):
+                total += 1
+                real = self._real_tokens(tok, chunk.text)
+                worst = max(worst, real)
+                if real > self._WINDOW:
+                    over_window.append((chunk.id, real))
+
+        assert over_window == [], (
+            f"{len(over_window)} chunk(s) exceed {self._WINDOW} REAL MiniLM tokens "
+            f"(total={total}, worst={worst}). First offenders: {over_window[:5]}"
+        )
+
+    def test_cjk_fixture_under_256_real_tokens(self) -> None:
+        """CJK fixture (\"字\" * 700 under a header) must produce chunks ≤ 256 real tokens.
+
+        CJK characters each expand to one WordPiece token.  The old estimator
+        (len/4) severely under-counted them; this test verifies the new estimator
+        correctly caps CJK-heavy chunks within the MiniLM window.
+        """
+        tok = self._load_tok()
+        body = "字" * 700
+        md = f"# 配置\n\n{body}\n"
+        chunks = chunk_markdown(md, "cjk_doc.md")
+        assert chunks, "Expected at least one chunk from CJK fixture"
+        for chunk in chunks:
+            real = self._real_tokens(tok, chunk.text)
+            assert real <= self._WINDOW, (
+                f"CJK chunk {chunk.id!r} has {real} real tokens "
+                f"(window={self._WINDOW}). text[:60]={chunk.text[:60]!r}"
+            )

@@ -218,3 +218,26 @@ class TestRefreshDocStoreWiring:
         assert call_log == ["restart", "rebuild"], (
             f"Expected restart before rebuild, got: {call_log}"
         )
+
+    def test_rebuild_raises_returns_error_envelope(self) -> None:
+        """When rebuild() raises, refresh must return an error envelope (not propagate).
+
+        The analyzer restart has already fired by the time rebuild() runs, so the
+        error message must make clear that re-indexing is underway even though the
+        doc-store rebuild failed.  refresh() must NOT raise; the exception must be
+        caught and surfaced as a structured error envelope.
+        """
+        mgr = _FakeManager()
+        store = MagicMock()
+        store.rebuild.side_effect = RuntimeError("embedding model unavailable")
+
+        result = _run_refresh_with_store(mgr, store)
+
+        assert result["status"] == STATUS_ERROR
+        assert "message" in result
+        # Message must mention the doc rebuild failure
+        assert "documentation rebuild failed" in result["message"].lower() or (
+            "doc" in result["message"].lower() and "rebuild" in result["message"].lower()
+        )
+        # restart() must still have been called before the failure
+        mgr.restart.assert_awaited_once()

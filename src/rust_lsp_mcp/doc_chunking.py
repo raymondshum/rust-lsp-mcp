@@ -3,9 +3,10 @@
 Converts markdown text into ``DocChunk`` objects suitable for embedding with
 sentence-transformers (MiniLM, 256-token window).  Two-stage split:
 
-1. **Header-tree split** — splits on ATX headers (``#`` … ``######``), tracks
-   fenced-code blocks to skip ``#`` lines inside them, emits one chunk per leaf
-   section with a breadcrumb built from ancestor headers.
+1. **Header-tree split** — splits on ATX headers (``#`` … ``######``) and
+   setext headers (text underlined with ``===`` or ``---``), tracks fenced-code
+   blocks to skip ``#`` lines inside them, emits one chunk per leaf section with
+   a breadcrumb built from ancestor headers.
 
 2. **Size-split** — any chunk whose total ``text`` (breadcrumb + body) exceeds
    the token cap is further split, using a three-level fallback cascade:
@@ -26,20 +27,39 @@ sentence-transformers (MiniLM, 256-token window).  Two-stage split:
 
 Token estimation
 ----------------
-We use a conservative two-metric heuristic::
+We use a conservative multi-metric heuristic that correctly handles:
 
-    estimate_tokens(text) = ceil(max(len(text) / 4, word_count * 1.3))
+- **CJK / multibyte text**: each CJK codepoint (Unified Ideographs, Extension A,
+  CJK Symbols/Punctuation, Hiragana, Katakana, Fullwidth Forms) is counted at
+  1.0 token because MiniLM's WordPiece treats each CJK character as its own token.
+  The old ``len/4`` formula counted 3-byte CJK chars at 0.75 tokens — a severe
+  under-estimate.
 
-Both metrics tend to *over*-estimate for typical English prose.  Over-estimating
-is safe: the worst outcome is a chunk being split one level finer than necessary.
-Under-estimating would cause silent truncation by the MiniLM embedder, which is
-the primary correctness risk for this phase.
+- **Code / punctuation-heavy text**: WordPiece splits aggressively on special
+  characters (``<``, ``>``, ``&``, ``::``, ``[``, ``]``, etc.), producing far more
+  tokens than words.  We use ``len(non_cjk) / 2`` as the char-based estimate,
+  which over-estimates by ~2× for typical English prose but is necessary to cover
+  observed real/char ratios up to 0.52 for code-heavy corpus chunks.
+
+Both metrics intentionally *over*-estimate.  The formula is::
+
+    estimate_tokens(text) = ceil(
+        max(
+            cjk_count * 1.0 + len(non_cjk_text) / 2.0,   # char-based
+            word_count * 1.5                                # word-based
+        )
+    )
 
 Cap
 ---
 ``BODY_TOKEN_CAP = 200`` body tokens.  The total ``text`` field (breadcrumb +
 ``\\n\\n`` + body) is checked against this same cap; breadcrumbs are typically
 10–25 tokens so the total stays comfortably under 256.
+
+With the improved estimator, the effective maximum chunk length for pure ASCII
+code text is ~400 characters.  At the worst observed real-token/char ratio of
+0.52 on the ripgrep corpus, this produces at most ~208 real tokens — safely
+under the 256-token MiniLM window with 48-token margin.
 """
 
 import math
@@ -95,13 +115,38 @@ class DocChunk:
 # Token estimator
 # ---------------------------------------------------------------------------
 
+# CJK Unicode ranges: each codepoint ≈ 1 MiniLM WordPiece token.
+# Covers CJK Unified Ideographs, Extension A, Extension B, CJK Symbols and
+# Punctuation, Hiragana, Katakana, and Halfwidth/Fullwidth Forms.
+_CJK_RANGES: tuple[tuple[int, int], ...] = (
+    (0x3000, 0x303F),  # CJK Symbols and Punctuation
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
+    (0x3400, 0x4DBF),  # CJK Extension A
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs (main block)
+    (0xFF00, 0xFFEF),  # Halfwidth and Fullwidth Forms
+    (0x20000, 0x2A6DF),  # CJK Extension B
+)
+
+
+def _is_cjk(cp: int) -> bool:
+    """Return True if code-point *cp* falls in a CJK range (≈ 1 WP token each)."""
+    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
+
 
 def estimate_tokens(text: str) -> int:
     """Conservative token-count estimate for a MiniLM embedding window.
 
     Uses the larger of two fast heuristics:
-    - ``len(text) / 4``  — character-based (works well for ASCII/code-heavy text).
-    - ``word_count * 1.3`` — word-based (works better for short dense text).
+
+    - **Char-based**: ``cjk_count * 1.0 + non_cjk_len / 2.0``
+      CJK characters are each 1 WordPiece token; non-CJK characters are
+      estimated at 2 chars per token (len/2), which is conservative for
+      code-heavy and punctuation-heavy text where WordPiece may split a
+      4-char token into 2–3 sub-tokens.
+
+    - **Word-based**: ``word_count * 1.5``
+      Provides a floor for short, dense text where the char estimate is too low.
 
     Both metrics intentionally *over*-estimate.  Over-estimation is safe
     (it causes at most an extra split); under-estimation risks silent truncation
@@ -115,8 +160,10 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
-    char_estimate = len(text) / 4.0
-    word_estimate = len(text.split()) * 1.3
+    cjk_count = sum(1 for c in text if _is_cjk(ord(c)))
+    non_cjk_len = len(text) - cjk_count
+    char_estimate = cjk_count * 1.0 + non_cjk_len / 2.0
+    word_estimate = len(text.split()) * 1.5
     return math.ceil(max(char_estimate, word_estimate))
 
 
@@ -130,10 +177,52 @@ _HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)")
 # Regex for fenced-code block delimiters (``` or ~~~, optionally followed by info string).
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 
+# Regex for setext underline: a line of one or more ``=`` chars (h1) or ``-`` chars (h2),
+# optionally preceded/followed by spaces, with nothing else.
+_SETEXT_H1_RE = re.compile(r"^=+\s*$")
+_SETEXT_H2_RE = re.compile(r"^-+\s*$")
+
+# Regex for table separator rows: ``| --- | --- |`` style lines.
+# These look like setext underlines when the row is ``|---|---|`` but must not fire
+# as setext headers.  We detect them by the presence of ``|`` on the line.
+_TABLE_SEP_RE = re.compile(r"^\|")
+
 
 def _is_fence_delimiter(line: str) -> bool:
     """Return True if *line* opens or closes a fenced code block."""
     return bool(_FENCE_RE.match(line.rstrip()))
+
+
+def _could_be_setext_preceding(line: str) -> bool:
+    """Return True if *line* can be the text line before a setext underline.
+
+    A setext header text line must be:
+    - Non-blank (has non-whitespace content).
+    - Not itself a list item (``- …``, ``* …``, ``+ …``, ``N. …``).
+    - Not a table row (starts with ``|``).
+    - Not an ATX header (starts with ``#``).
+    - Not a thematic break (``---``, ``***``, ``___`` on their own line).
+
+    We do NOT check whether it's inside a fence here; that is handled by the
+    caller, which already tracks fence state.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # ATX header
+    if stripped.startswith("#"):
+        return False
+    # Table row
+    if stripped.startswith("|"):
+        return False
+    # List item (unordered: ``- ``, ``* ``, ``+ ``)
+    if re.match(r"^[-*+]\s", stripped):
+        return False
+    # Ordered list item (``1. ``, ``10. ``, etc.)
+    if re.match(r"^\d+\.\s", stripped):
+        return False
+    # Thematic break: ``---``, ``***``, ``___`` (3+ same char, only that char and spaces)
+    return not re.match(r"^[-*_]{3,}\s*$", stripped)
 
 
 def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
@@ -141,6 +230,16 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
 
     Lines inside fenced code blocks are treated as content and never
     interpreted as headers, even if they start with ``#``.
+
+    Recognizes two header syntaxes:
+
+    - **ATX headers**: lines starting with ``#`` … ``######``.
+    - **Setext headers**: a non-blank paragraph text line immediately followed
+      by a line of ``=`` (→ h1) or ``-`` (→ h2).  The underline line is consumed
+      (not emitted as body).  Setext underlines inside fenced code blocks, after
+      blank lines (thematic breaks), after table rows, after list items, and
+      after ATX headers are NOT treated as setext headers — only after a valid
+      text line.
 
     The very first section (text before the first header) is represented as
     ``(0, "", body)`` — level 0 means "preamble, no header".
@@ -167,12 +266,42 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
     fence_char: str = ""  # the opening fence character (` or ~)
     fence_len: int = 0  # the length of the opening fence sequence
 
+    # YAML frontmatter: a leading ``---`` block at the very start of the document.
+    # We track whether we are inside one and suppress setext detection inside it.
+    # Detection: if the very first non-empty line is exactly ``---``, we're in frontmatter.
+    # Frontmatter ends at the next ``---`` or ``...`` line.
+    in_frontmatter: bool = False
+    frontmatter_possible: bool = True  # can still open frontmatter (no non-empty line seen)
+
+    # For setext detection we need to look at the previous body line.
+    # We keep track of the most recently emitted body line (stripped) so we can
+    # check whether the NEXT line is a setext underline for it.
+    prev_body_stripped: str = ""  # stripped content of last body line added
+    prev_body_raw: str = ""  # raw (with newline) of last body line added
+
     def _flush() -> None:
         body = "".join(current_body_lines).strip("\n")
         sections.append((current_level, current_title, body))
 
     for line in lines:
         stripped = line.rstrip("\n").rstrip("\r")
+
+        # YAML frontmatter: detect a leading ``---`` block and treat it as opaque body.
+        # A frontmatter block begins when the very first non-empty line is exactly ``---``.
+        if frontmatter_possible and stripped:
+            frontmatter_possible = False  # Only the first non-empty line can open frontmatter.
+            if stripped == "---":
+                in_frontmatter = True
+                current_body_lines.append(line)
+                # Don't update prev_body_stripped: frontmatter cannot be a setext title.
+                continue
+        if in_frontmatter:
+            # Inside YAML frontmatter: pass through verbatim.
+            # Close on ``---`` or ``...`` (YAML document end marker).
+            current_body_lines.append(line)
+            if stripped in ("---", "..."):
+                in_frontmatter = False
+            continue
 
         # Fence tracking: only open a new fence when we are not already in one.
         if _is_fence_delimiter(stripped):
@@ -188,6 +317,8 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
                     fence_len = 3
                 in_fence = True
                 current_body_lines.append(line)
+                prev_body_stripped = stripped
+                prev_body_raw = line
             else:
                 # Potential closing fence: must use the same delimiter character
                 # AND have length >= the opening fence length (CommonMark §4.5).
@@ -197,12 +328,45 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
                     fence_char = ""
                     fence_len = 0
                 current_body_lines.append(line)
+                prev_body_stripped = stripped
+                prev_body_raw = line
             continue
 
         # Inside a fence: never split on headers.
         if in_fence:
             current_body_lines.append(line)
+            prev_body_stripped = stripped
+            prev_body_raw = line
             continue
+
+        # --- Setext header detection ---
+        # A setext underline is ``=+`` (h1) or ``-+`` (h2) on its own line,
+        # preceded by a valid non-blank paragraph text line.
+        # We check this BEFORE ATX, because the underline might otherwise be
+        # misidentified as a thematic break.
+        if prev_body_stripped and _could_be_setext_preceding(prev_body_stripped):
+            setext_level = 0
+            if _SETEXT_H1_RE.match(stripped):
+                setext_level = 1
+            elif _SETEXT_H2_RE.match(stripped) and not _TABLE_SEP_RE.match(stripped):
+                setext_level = 2
+
+            if setext_level:
+                # The previous body line becomes the setext header title.
+                title = prev_body_stripped.strip()
+                # Remove the previous line from the current body accumulation.
+                # It was the last line added to current_body_lines.
+                if current_body_lines and current_body_lines[-1] == prev_body_raw:
+                    current_body_lines.pop()
+                # Flush whatever came before this header.
+                _flush()
+                current_level = setext_level
+                current_title = title
+                current_body_lines = []
+                prev_body_stripped = ""
+                prev_body_raw = ""
+                # The underline line is consumed — not added to body.
+                continue
 
         # Check for ATX header.
         m_hdr = _HEADER_RE.match(stripped)
@@ -211,8 +375,12 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
             current_level = len(m_hdr.group(1))
             current_title = m_hdr.group(2).strip()
             current_body_lines = []
+            prev_body_stripped = ""
+            prev_body_raw = ""
         else:
             current_body_lines.append(line)
+            prev_body_stripped = stripped
+            prev_body_raw = line
 
     # Flush the last section.
     _flush()
@@ -263,6 +431,12 @@ def _hard_split_text(
     - Try to split on whitespace (words), packing greedily.
     - If even a single word exceeds the cap, split by fixed character count.
 
+    **Break 2 fix**: an oversized space-free token that is NOT the last word in a line
+    must also be char-split.  Previously only the final flush checked for a single-word
+    oversize; the mid-loop flush emitted big tokens whole.  Now, after any flush that
+    leaves ``accumulated_words`` as a single over-cap token, we char-split it immediately
+    before continuing to accumulate the next word.
+
     No overlap is applied at this level.
 
     Args:
@@ -292,6 +466,23 @@ def _hard_split_text(
         )
         return chunks, ordinal + 1
 
+    def _char_split_single_word(word: str) -> None:
+        """Emit *word* (which alone exceeds the cap) via character-level slicing."""
+        nonlocal ordinal
+        chars_per_slice = max(1, body_budget * 2)
+        raw = word
+        while raw:
+            slice_text = f"{prefix}{raw[:chars_per_slice]}"
+            # Tighten until it fits (handles edge cases where heuristic is off).
+            while estimate_tokens(slice_text) > BODY_TOKEN_CAP and len(raw[:chars_per_slice]) > 1:
+                chars_per_slice = max(1, chars_per_slice - 1)
+                slice_text = f"{prefix}{raw[:chars_per_slice]}"
+            chunks.append(
+                DocChunk(id=f"{file}::{ordinal}", text=slice_text, file=file, breadcrumb=breadcrumb)
+            )
+            ordinal += 1
+            raw = raw[chars_per_slice:]
+
     # Try word-level splitting first.
     words = text_piece.split(" ")
     accumulated_words: list[str] = []
@@ -301,38 +492,39 @@ def _hard_split_text(
         candidate_text = f"{prefix}{candidate}"
         if estimate_tokens(candidate_text) > BODY_TOKEN_CAP and accumulated_words:
             # Flush current accumulation.
-            piece_text = f"{prefix}{' '.join(accumulated_words)}"
-            chunks.append(
-                DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
-            )
-            ordinal += 1
+            # Break 2 fix: if the accumulated content is a single over-cap word,
+            # char-split it instead of emitting it whole.
+            flushed_piece = " ".join(accumulated_words)
+            flushed_text = f"{prefix}{flushed_piece}"
+            if estimate_tokens(flushed_text) > BODY_TOKEN_CAP and len(accumulated_words) == 1:
+                _char_split_single_word(flushed_piece)
+            else:
+                chunks.append(
+                    DocChunk(
+                        id=f"{file}::{ordinal}",
+                        text=flushed_text,
+                        file=file,
+                        breadcrumb=breadcrumb,
+                    )
+                )
+                ordinal += 1
+            # Set up next accumulation starting with the current word.
             accumulated_words = [word]
+            # Also char-split the new word immediately if it alone exceeds the cap.
+            single_text = f"{prefix}{word}"
+            if estimate_tokens(single_text) > BODY_TOKEN_CAP:
+                _char_split_single_word(word)
+                accumulated_words = []
         else:
             accumulated_words.append(word)
 
     if accumulated_words:
         piece = " ".join(accumulated_words)
         piece_text = f"{prefix}{piece}"
-        # If even a single word is over the cap, slice by raw characters.
+        # If even the remaining accumulation is over the cap and it's a single word,
+        # char-split it as a last resort.
         if estimate_tokens(piece_text) > BODY_TOKEN_CAP and len(accumulated_words) == 1:
-            # Character-level last resort: use body_budget * 4 chars per slice (conservative).
-            chars_per_slice = max(1, body_budget * 4)
-            raw = piece
-            while raw:
-                slice_text = f"{prefix}{raw[:chars_per_slice]}"
-                # Tighten until it fits (handles edge cases where heuristic is off).
-                while (
-                    estimate_tokens(slice_text) > BODY_TOKEN_CAP and len(raw[:chars_per_slice]) > 1
-                ):
-                    chars_per_slice = max(1, chars_per_slice - 1)
-                    slice_text = f"{prefix}{raw[:chars_per_slice]}"
-                chunks.append(
-                    DocChunk(
-                        id=f"{file}::{ordinal}", text=slice_text, file=file, breadcrumb=breadcrumb
-                    )
-                )
-                ordinal += 1
-                raw = raw[chars_per_slice:]
+            _char_split_single_word(piece)
         else:
             chunks.append(
                 DocChunk(id=f"{file}::{ordinal}", text=piece_text, file=file, breadcrumb=breadcrumb)
@@ -563,11 +755,11 @@ def chunk_markdown(text: str, rel_path: str) -> list[DocChunk]:
 
     Two-stage split:
 
-    1. **Header-tree split**: splits on ATX headers, tracks fence state to
-       avoid treating ``#`` lines inside code blocks as headers.  Builds a
-       breadcrumb from the ancestor header chain for each section.  The preamble
-       (text before the first header) gets a breadcrumb equal to the file
-       basename alone.
+    1. **Header-tree split**: splits on ATX and setext headers, tracks fence
+       state to avoid treating ``#`` lines inside code blocks as headers.
+       Builds a breadcrumb from the ancestor header chain for each section.
+       The preamble (text before the first header) gets a breadcrumb equal to
+       the file basename alone.
 
     2. **Size-split**: any chunk whose total ``text`` exceeds ``BODY_TOKEN_CAP``
        tokens is further split using a three-level cascade (paragraph →
