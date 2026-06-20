@@ -1,0 +1,43 @@
+{
+  // ---------------------------------------------------------------------------
+  // Python / uv
+  // ---------------------------------------------------------------------------
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+
+  // ---------------------------------------------------------------------------
+  // Ruff (format + lint on save)
+  // Source: docs/reference/ruff-config.md
+  // ---------------------------------------------------------------------------
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+
+  // ---------------------------------------------------------------------------
+  // ty (type checker)
+  // Source: docs/reference/ty-vscode-setup.md
+  // The ty extension disables Pylance automatically; no manual override needed.
+  // ---------------------------------------------------------------------------
+  "ty.diagnosticMode": "workspace",
+
+  // ---------------------------------------------------------------------------
+  // rust-analyzer (redirect RA's cargo-check output to the bind-mount target dir)
+  // ---------------------------------------------------------------------------
+  "rust-analyzer.cargo.targetDir": "/workspaces/cargo-target/rust-analyzer",
+
+  // ---------------------------------------------------------------------------
+  // Testing (pytest)
+  // Source: docs/reference/pytest-markers.md
+  // ---------------------------------------------------------------------------
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "tests",
+    // Default panel run: fast tier only (exclude integration).
+    "-m",
+    "not integration"
+  ]
+}
