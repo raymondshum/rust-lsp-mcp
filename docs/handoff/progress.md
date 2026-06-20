@@ -70,7 +70,15 @@ Read by [continue.md](continue.md) to pick the next phase.
   through). Branch `phase0-gate-fix` is committed and ready (test fixes + this tracker).
   **Human action:** install `gh` (or merge `phase0-gate-fix` to `main` manually), confirm
   CI green, then re-issue continue — Phase 0 → done unblocks Phase 1.
-- 2026-06-20 Phase 1 → **pr-open** (PR #__PR__). Readiness gating built, reviewed, QA'd,
+- 2026-06-20 Phase 0 → **done** (blocker cleared by human). `gh` now installed +
+  authenticated (commit `8acd639` added the gh CLI feature + disabled container signing);
+  `phase0-gate-fix` merged to `main` via **PR #2** (`c6c977c`). DoD gate re-verified green
+  on `main`: `ruff check` clean, `ruff format --check` (7 files formatted), `ty check`
+  clean, 11 fast tests pass (incl. env-sample honesty). Resumed at the `pr-open` gate per
+  continue.md step 3 — PR open+merged, so the gate is satisfied. Phase 1 (readiness gating)
+  is now the next eligible phase. Stopping at the phase boundary; re-issue continue to start
+  Phase 1.
+- 2026-06-20 Phase 1 → **pr-open** (PR #3). Readiness gating built, reviewed, QA'd,
   red-teamed — all gates green. Single serial analyzer-bound build (no fan-out). Shipped:
   `PatchedRustAnalyzer` (overrides `setup_runtime_dependencies` → `settings.rust_analyzer_bin`,
   instantiated directly, not via `create()`); `AnalyzerManager` runs multilspy `start_server()`
@@ -87,11 +95,3 @@ Read by [continue.md](continue.md) to pick the next phase.
   `state = STATE_INDEXING` as its first action before tearing down the old live context.
   Awaiting human merge → then Phase 2 (+5) unlock. (PR also carries the Phase 0 done-marking
   tracker commit, which couldn't be pushed to `main` directly.)
-- 2026-06-20 Phase 0 → **done** (blocker cleared by human). `gh` now installed +
-  authenticated (commit `8acd639` added the gh CLI feature + disabled container signing);
-  `phase0-gate-fix` merged to `main` via **PR #2** (`c6c977c`). DoD gate re-verified green
-  on `main`: `ruff check` clean, `ruff format --check` (7 files formatted), `ty check`
-  clean, 11 fast tests pass (incl. env-sample honesty). Resumed at the `pr-open` gate per
-  continue.md step 3 — PR open+merged, so the gate is satisfied. Phase 1 (readiness gating)
-  is now the next eligible phase. Stopping at the phase boundary; re-issue continue to start
-  Phase 1.
