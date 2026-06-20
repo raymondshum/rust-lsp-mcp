@@ -20,7 +20,7 @@ Read by [continue.md](continue.md) to pick the next phase.
 
 | Phase | Prompt | Depends on | Parallelizable? | State |
 |-------|--------|-----------|-----------------|-------|
-| 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | — | No (shared config; serial) | awaiting-container-build |
+| 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | — | No (shared config; serial) | blocked: gate-fix PR can't be opened (no `gh`) |
 | 1 — Readiness gating | [phase-1-readiness.md](phase-1-readiness.md) | 0 | No (analyzer-bound, serial) | not-started |
 | 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | not-started |
 | 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | not-started |
@@ -50,3 +50,23 @@ Read by [continue.md](continue.md) to pick the next phase.
   + Dockerfile, 5 bind mounts, pyproject src layout + both launch paths, settings layer +
   env.sample + init.sh, ruff/ty + `.vscode/`, pytest tiers, setup/teardown, CI + env-honesty
   check, `.gitignore`. Uncommitted, pending human review + container build).
+- 2026-06-20 Phase 0 Beat B done in-container (reconciliation: Beat A was merged to `main`
+  via PR #1 but this tracker was never advanced). Verified: `uv sync` reproducible; both
+  launch paths boot (`uv run rust-lsp-mcp` / `python -m rust_lsp_mcp`, stub exits 0); 11
+  fast tests pass; **analyzer path confirmed** — `rustup which rust-analyzer` =
+  `/usr/local/rustup/toolchains/stable-aarch64-unknown-linux-gnu/bin/rust-analyzer`; on
+  PATH = `/usr/local/cargo/bin/rust-analyzer` (v1.96.0); settings default
+  `rust_analyzer_bin` matches the PATH location (correct for Phase 1's override).
+- 2026-06-20 Phase 0 DoD gate was **RED on merged PR #1** (CI bypassed): ruff I001
+  (unsorted imports in `tests/test_env_sample_honesty.py`) + ty `unknown-argument` on
+  `Settings(_env_file=None)` (the `# type: ignore[call-arg]` was a mypy code ty ignores).
+  Fixed on branch `phase0-gate-fix`: ruff `--fix`/format + `# ty: ignore[unknown-argument]`.
+  All gates now green locally (ruff check/format, ty, fast tests). Adversarial light pass:
+  config honest — all 5 caches on bind mounts, CI runs only `-m "not integration"` with no
+  `.env`. Non-blocking minors: docstrings reference a non-existent `scripts/check-env-sample.py`;
+  env-honesty test checks only the forward direction (no orphan-key check).
+- 2026-06-20 Phase 0 → **blocked**: gate-fix PR cannot be opened — `gh` is not installed in
+  the container (PR #1 was likely merged manually, which is how its red gate slipped
+  through). Branch `phase0-gate-fix` is committed and ready (test fixes + this tracker).
+  **Human action:** install `gh` (or merge `phase0-gate-fix` to `main` manually), confirm
+  CI green, then re-issue continue — Phase 0 → done unblocks Phase 1.

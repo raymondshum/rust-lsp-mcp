@@ -25,7 +25,7 @@ def test_settings_defaults() -> None:
     from rust_lsp_mcp.settings import Settings
 
     # Instantiate with no env_file to avoid picking up any local .env.
-    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
     assert s.ripgrep_src == "/workspaces/ripgrep"
     assert s.cargo_target_dir == "/workspaces/cargo-target"
     assert s.cargo_home == "/workspaces/cargo-home"
