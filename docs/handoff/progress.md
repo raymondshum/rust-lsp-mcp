@@ -12,8 +12,9 @@ Read by [continue.md](continue.md) to pick the next phase.
 
 ## Gate-zero (handoff self-review)
 
-`gate-zero: not-run` — adversarial pass over `docs/handoff/` (incl. `continue.md`) must
-be `passed` before any phase starts. Orchestrator flips it and records the date.
+`gate-zero: passed (2026-06-19)` — adversarial pass over `docs/handoff/` (incl.
+`continue.md`) must be `passed` before any phase starts. Values: `not-run` | `passed` |
+`blocked: <reason>`. Orchestrator flips it and records the date in the log below.
 
 ## Phase status
 
@@ -43,4 +44,5 @@ be `passed` before any phase starts. Orchestrator flips it and records the date.
 
 > One line per state transition: `<date> Phase N → <state> (PR #/notes)`.
 
-- _(empty — build not yet started)_
+- 2026-06-19 Gate-zero → passed (adversarial pass over `docs/handoff/`; 3 must-fixes +
+  4 minors applied to `continue.md` and `progress.md`). Build not yet started.
