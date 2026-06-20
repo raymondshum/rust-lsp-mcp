@@ -1,0 +1,90 @@
+[← Back to the README](../../README.md) · [Documentation index](index.md)
+
+# Configuration reference
+
+## How settings work
+
+All settings have sensible defaults built into the code, so the server runs with no
+configuration at all. The defaults point at the standard locations inside the
+development container, which means you can start the server immediately after
+container setup without creating any files.
+
+You can override any setting in two ways:
+
+- **`.env` file** — create a file named `.env` in the project root. A template named
+  `env.sample` is provided; copy it to `.env` and edit the values you want to change.
+  The development container does this copy automatically on first start.
+- **Environment variable** — set a variable in the shell before starting the server.
+
+Order of precedence, strongest last:
+
+> built-in defaults &lt; `.env` file &lt; environment variables
+
+Every setting's environment-variable name is the setting name written in capitals with
+the prefix `RLM_`. For example, the setting `chroma_path` is set with `RLM_CHROMA_PATH`.
+
+The server loads the `.env` file itself at startup — no external loader or shell
+sourcing step is needed. Settings are handled by the
+[`pydantic-settings`](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+library.
+
+---
+
+## All settings
+
+| Environment variable | Default | What it does |
+|---|---|---|
+| `RLM_RIPGREP_SRC` | `/workspaces/ripgrep` | Folder of the Rust project to navigate and whose Markdown files are searched. This is the sample ripgrep codebase inside the container. |
+| `RLM_CARGO_TARGET_DIR` | `/workspaces/cargo-target` | Where Rust build output is stored. Kept on a persistent mount so it is reused across container rebuilds rather than rebuilt every time. |
+| `RLM_CARGO_HOME` | `/workspaces/cargo-home` | Where Rust's package downloads are cached (Cargo's registry and git checkouts). |
+| `RLM_RUST_ANALYZER_TARGET_DIR` | `/workspaces/cargo-target/rust-analyzer` | Where rust-analyzer keeps its own build output, separate from the main Cargo target directory. |
+| `RLM_RUST_ANALYZER_BIN` | `/usr/local/cargo/bin/rust-analyzer` | Path to the rust-analyzer program inside the container. You can confirm the correct path with `rustup which rust-analyzer`. |
+| `RLM_CHROMA_PATH` | `/workspaces/chroma` | Folder where the documentation search database is stored. Kept on a persistent mount so the index survives container rebuilds. |
+| `RLM_CHROMA_MODEL_CACHE` | `/home/vscode/.cache/chroma` | **Informational only.** The documentation-search library always stores its downloaded embedding model under the user's home cache folder and ignores this setting. It is listed here only to document which folder the container persists so the model is not re-downloaded after a rebuild. Changing this value has no effect on where the model is actually stored. |
+| `RLM_DOC_GLOB_PATTERNS` | `**/*.md` | Which Markdown files to include in documentation search, written as comma-separated path patterns relative to the project folder. The default includes every Markdown file anywhere in the project. |
+| `RLM_DOC_EXCLUDE_PATTERNS` | `**/CHANGELOG.md` | Which files to exclude even if they matched the include patterns above. The default leaves out `CHANGELOG.md`, whose long list of version-by-version change notes would otherwise crowd out more useful documentation in search results. |
+
+---
+
+## A note on persistence ("download once")
+
+Several of the folders listed above live on **persistent mounts** — storage that is
+attached to the container but lives outside it, so it survives a full container
+rebuild. This matters for two expensive one-time operations:
+
+- **The documentation-search embedding model** (about 80 MB) is downloaded the first
+  time the documentation index is built and then read from the local cache on every
+  subsequent start. It lives under `RLM_CHROMA_MODEL_CACHE`.
+- **Rust build output** (potentially hundreds of megabytes) is compiled once and
+  reused. It lives under `RLM_CARGO_TARGET_DIR` and `RLM_CARGO_HOME`.
+
+Neither is re-fetched or recompiled unless you delete the mount. For details on how
+the mounts are configured, see the [Development setup](development.md) page.
+
+---
+
+## Example `.env`
+
+The following example points the server at a different Rust project and limits
+documentation search to files under a `docs/` folder:
+
+```dotenv
+# Point at your own Rust project instead of the bundled ripgrep fixture
+RLM_RIPGREP_SRC=/home/user/projects/my-rust-app
+
+# Only index Markdown files that live under a docs/ directory
+RLM_DOC_GLOB_PATTERNS=docs/**/*.md
+```
+
+With these two lines in `.env`, the LSP navigation tools will operate on
+`my-rust-app` and documentation search will only surface files from that project's
+`docs/` subtree, ignoring any stray Markdown files at the root level.
+
+All other settings continue to use their built-in defaults.
+
+---
+
+## Related pages
+
+- [Development setup](development.md) — container setup, persistent mounts, and first-run steps.
+- [Architecture](architecture.md) — how the server components fit together.
