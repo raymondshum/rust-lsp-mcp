@@ -14,14 +14,15 @@ Responsibilities:
          after the context is live (i.e. rust-analyzer reports quiescent).
        - Provides a clean ``shutdown()`` coroutine for teardown.
 
-Refresh seam:
-    A future ``refresh`` operation can call ``manager.restart()`` (not implemented
-    here) which would: set state back to ``"indexing"``, cancel/await the existing
-    background task, then re-enter ``start_server()`` in a new task.  The
-    ``start_server()`` context manager blocks until quiescent on each entry, so
-    gating is automatically correct across refreshes.  The flag must be reset to
-    ``"indexing"`` *before* the new task starts so no window exists where callers
-    see a stale ``"ready"``.
+Refresh seam (Phase 4, NOT implemented here):
+    Refresh is **not** implemented in Phase 1.  ``state`` is written only in
+    ``__init__`` (→ ``"indexing"``) and in ``_run`` once the context is live
+    (→ ``"ready"``); it is **never** reset to ``"indexing"`` on teardown or
+    shutdown.  A future Phase-4 ``restart()`` MUST set ``state = STATE_INDEXING``
+    as its **first** action — before cancelling or awaiting the old task — so
+    that callers never observe a stale ``"ready"`` during re-indexing.  Omitting
+    that reset would create a window where the invariant "state is ``ready`` only
+    when the LSP context is live" is violated.
 
 Instantiation note (verified against multilspy 0.0.15 source):
     ``LanguageServer.create()`` hard-codes ``RustAnalyzer`` for ``Language.RUST``
@@ -146,9 +147,15 @@ class AnalyzerManager:
 
         Signals the shutdown event so ``_run`` exits its ``start_server()``
         context cleanly (triggering the server's own shutdown/stop sequence).
+
+        Exception draining: if the task has already finished (e.g. it raised
+        unexpectedly), its exception is retrieved here so asyncio does not emit
+        a "Task exception was never retrieved" warning at GC time.
         """
         self._shutdown_event.set()
-        if self._task is not None and not self._task.done():
+        if self._task is None:
+            return
+        if not self._task.done():
             try:
                 await asyncio.wait_for(self._task, timeout=10.0)
             except TimeoutError:
@@ -156,6 +163,17 @@ class AnalyzerManager:
                 self._task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._task
+        # Drain any stored exception so GC does not warn about an un-retrieved
+        # task exception.  This covers: (a) task already done when we arrived,
+        # (b) task finished normally during wait_for above, (c) task that was
+        # already cancelled before shutdown was called.
+        if self._task.done() and not self._task.cancelled():
+            exc = self._task.exception()
+            if exc is not None:
+                _log.debug(
+                    "AnalyzerManager: drained stored task exception on shutdown: %r",
+                    exc,
+                )
 
 
 # ---------------------------------------------------------------------------
