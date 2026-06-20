@@ -102,11 +102,11 @@ def _make_manager(state: str) -> AnalyzerManager:
 
 class TestRequireReady:
     def _call_require_ready(self, manager: AnalyzerManager | None) -> dict[str, Any] | None:
-        """Patch server._manager and call require_ready()."""
-        import rust_lsp_mcp.server as srv
+        """Patch core._manager and call require_ready()."""
+        import rust_lsp_mcp.core as core
 
-        with patch.object(srv, "_manager", manager):
-            return srv.require_ready()
+        with patch.object(core, "_manager", manager):
+            return core.require_ready()
 
     def test_returns_not_ready_when_indexing(self) -> None:
         mgr = _make_manager(STATE_INDEXING)
@@ -133,10 +133,11 @@ class TestRequireReady:
 
 class TestAnalyzerStatusTool:
     def _call_analyzer_status(self, manager: AnalyzerManager | None) -> dict[str, Any]:
-        import rust_lsp_mcp.server as srv
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.diagnostics as diag
 
-        with patch.object(srv, "_manager", manager):
-            return srv.analyzer_status()
+        with patch.object(core, "_manager", manager):
+            return diag.analyzer_status()
 
     def test_reports_indexing_before_ready(self) -> None:
         mgr = _make_manager(STATE_INDEXING)
@@ -164,10 +165,11 @@ class TestAnalyzerStatusTool:
 
 class TestProbeTool:
     def _call_probe(self, manager: AnalyzerManager | None) -> dict[str, Any]:
-        import rust_lsp_mcp.server as srv
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.diagnostics as diag
 
-        with patch.object(srv, "_manager", manager):
-            return srv.probe()
+        with patch.object(core, "_manager", manager):
+            return diag.probe()
 
     def test_probe_returns_not_ready_while_indexing(self) -> None:
         mgr = _make_manager(STATE_INDEXING)

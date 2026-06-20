@@ -163,20 +163,21 @@ class TestPositionsKnownCases:
 def _run_find_symbol(
     manager: AnalyzerManager | None, query: str, lsp_result: Any
 ) -> dict[str, Any]:
-    """Patch _manager and call find_symbol; inject lsp_result for request_workspace_symbol."""
-    import rust_lsp_mcp.server as srv
+    """Patch core._manager and call find_symbol; inject lsp_result for request_workspace_symbol."""
+    import rust_lsp_mcp.core as core
+    import rust_lsp_mcp.tools.find_symbol as fs_mod
 
     async def _inner() -> dict[str, Any]:
-        with patch.object(srv, "_manager", manager):
+        with patch.object(core, "_manager", manager):
             if manager is not None and manager.state == STATE_READY:
                 with patch.object(
                     manager,
                     "request_workspace_symbol",
                     new=AsyncMock(return_value=lsp_result),
                 ):
-                    return await srv.find_symbol(query)
+                    return await fs_mod.find_symbol(query)
             else:
-                return await srv.find_symbol(query)
+                return await fs_mod.find_symbol(query)
 
     return asyncio.run(_inner())
 
@@ -199,11 +200,12 @@ class TestFindSymbolGating:
         mock_lsp = AsyncMock()
         mgr._lsp = mock_lsp
 
-        import rust_lsp_mcp.server as srv
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.find_symbol as fs_mod
 
         async def _inner() -> dict[str, Any]:
-            with patch.object(srv, "_manager", mgr):
-                return await srv.find_symbol("anything")
+            with patch.object(core, "_manager", mgr):
+                return await fs_mod.find_symbol("anything")
 
         asyncio.run(_inner())
         mock_lsp.request_workspace_symbol.assert_not_called()
@@ -524,18 +526,19 @@ class TestTeardownWindowNotReady:
 
     def test_find_symbol_returns_not_ready_in_teardown_window(self) -> None:
         """find_symbol must return not_ready (not error) when _lsp is None and state=ready."""
-        import rust_lsp_mcp.server as srv
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.find_symbol as fs_mod
 
         mgr = self._make_torn_down_manager()
         mock_delegate = AsyncMock()
 
         async def _inner() -> dict[str, Any]:
             with (
-                patch.object(srv, "_manager", mgr),
+                patch.object(core, "_manager", mgr),
                 # Do NOT patch request_workspace_symbol — we want to confirm it's not called
                 patch.object(mgr, "request_workspace_symbol", new=mock_delegate),
             ):
-                return await srv.find_symbol("anything")
+                return await fs_mod.find_symbol("anything")
 
         result = asyncio.run(_inner())
         assert result["status"] == STATUS_NOT_READY, (
@@ -545,12 +548,13 @@ class TestTeardownWindowNotReady:
 
     def test_probe_returns_not_ready_in_teardown_window(self) -> None:
         """probe must return not_ready when state=ready but _lsp is None."""
-        import rust_lsp_mcp.server as srv
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.diagnostics as diag
 
         mgr = self._make_torn_down_manager()
 
-        with patch.object(srv, "_manager", mgr):
-            result = srv.probe()
+        with patch.object(core, "_manager", mgr):
+            result = diag.probe()
 
         assert result["status"] == STATUS_NOT_READY, (
             f"Expected not_ready in teardown window, got {result!r}"
