@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    // -------------------------------------------------------------------------
+    // MCP Inspector — exercise the stdio transport by hand.
+    // Source: docs/reference/mcp-inspector.md
+    // Requires Node.js >= 22.7.5 in the container.
+    // UI serves at http://localhost:6274
+    // -------------------------------------------------------------------------
+    {
+      "label": "MCP Inspector (UI)",
+      "type": "shell",
+      "command": "npx @modelcontextprotocol/inspector -- uv run rust-lsp-mcp",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "group": "test",
+      "detail": "Launch the MCP Inspector web UI against the stdio server."
+    },
+
+    // -------------------------------------------------------------------------
+    // MCP Inspector — headless / scriptable CLI mode.
+    // -------------------------------------------------------------------------
+    {
+      "label": "MCP Inspector (CLI)",
+      "type": "shell",
+      "command": "npx @modelcontextprotocol/inspector --cli uv run rust-lsp-mcp",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "group": "test",
+      "detail": "Launch the MCP Inspector in headless CLI mode."
+    }
+  ]
+}

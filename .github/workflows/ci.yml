@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "phase*"]
+  pull_request:
+    branches: ["main"]
+
+# Cancel in-progress runs for the same ref to save free-tier quota.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-type-test:
+    name: lint + type + fast tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install uv (with cache) and pin Python 3.12.
+      # Source: docs/reference/uv-packaging-ci.md
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # Sync all dependencies (including dev).
+      - name: Install dependencies
+        run: uv sync
+
+      # Lint — fail on any ruff warning.
+      - name: ruff check
+        run: uv run ruff check .
+
+      # Format check — fail if any file would be reformatted.
+      - name: ruff format check
+        run: uv run ruff format --check .
+
+      # Type check — whole project.
+      - name: ty check
+        run: uv run ty check
+
+      # Fast tests only (integration tests need the live analyzer — local QA gate).
+      # --frozen asserts the lockfile is current.
+      - name: pytest (fast tier)
+        run: uv run --frozen pytest -m "not integration"
+
+      # env.sample honesty check: every settings variable has an env.sample entry.
+      # The test_env_sample_honesty.py suite covers this; the step below makes it
+      # explicit in the CI log even if it was already included in the pytest run.
+      # (It's idempotent — pytest deduplicates collected tests.)
+      - name: env.sample honesty check
+        run: uv run --frozen pytest tests/test_env_sample_honesty.py -v

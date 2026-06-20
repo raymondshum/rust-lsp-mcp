@@ -1,0 +1,75 @@
+{
+  "name": "rust-lsp-mcp",
+
+  // Runs on the HOST before the container is created. Docker bind mounts require the
+  // source directory to pre-exist (it won't auto-create them like named volumes), so we
+  // ensure every cache mount source exists — survives teardown and fresh clones, where
+  // these gitignored dirs are otherwise absent.
+  "initializeCommand": "mkdir -p .devcontainer/cache/ripgrep-src .devcontainer/cache/cargo-target .devcontainer/cache/cargo-home .devcontainer/cache/chroma .devcontainer/cache/chroma-model-cache",
+
+  // Use a minimal Dockerfile to layer first-party uv on top of the Python base.
+  // The rust:1 feature then adds the Rust toolchain + rust-analyzer (native linux-arm64).
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // Declarative features (installed after the Dockerfile build step).
+  "features": {
+    // rust:1 v1.5.0 — installs rustup, cargo, rust-analyzer, rust-src, rustfmt, clippy.
+    // Default components already include rust-analyzer; no extra config needed.
+    // Binary lands at: /usr/local/cargo/bin/rust-analyzer
+    "ghcr.io/devcontainers/features/rust:1": {
+      "profile": "minimal",
+      "components": "rust-analyzer,rust-src,rustfmt,clippy"
+    }
+  },
+
+  // Bind mounts: observable, gitignored, survive container rebuilds.
+  // All paths are relative to the project root (${localWorkspaceFolder}).
+  "mounts": [
+    // Ripgrep pinned source clone (written by scripts/clone-ripgrep.sh, read-only for server).
+    "source=${localWorkspaceFolder}/.devcontainer/cache/ripgrep-src,target=/workspaces/ripgrep,type=bind,consistency=cached",
+    // Cargo build output for ripgrep (CARGO_TARGET_DIR).
+    "source=${localWorkspaceFolder}/.devcontainer/cache/cargo-target,target=/workspaces/cargo-target,type=bind,consistency=cached",
+    // CARGO_HOME (registry + git caches) — shared across container rebuilds.
+    "source=${localWorkspaceFolder}/.devcontainer/cache/cargo-home,target=/workspaces/cargo-home,type=bind,consistency=cached",
+    // ChromaDB vector store (PersistentClient path).
+    "source=${localWorkspaceFolder}/.devcontainer/cache/chroma,target=/workspaces/chroma,type=bind,consistency=cached",
+    // ONNX embedding model cache (~/.cache/chroma inside the container).
+    "source=${localWorkspaceFolder}/.devcontainer/cache/chroma-model-cache,target=/home/vscode/.cache/chroma,type=bind,consistency=cached"
+  ],
+
+  // Container-level environment variables.
+  "containerEnv": {
+    // Point cargo builds at the bind-mounted target dir (ripgrep compilation output).
+    "CARGO_TARGET_DIR": "/workspaces/cargo-target",
+    // Override CARGO_HOME to use the bind-mounted registry cache.
+    "CARGO_HOME": "/workspaces/cargo-home",
+    // rust-analyzer targetDir: redirect RA's own cargo check output to keep it separate.
+    // Passed through to .vscode/settings.json via the settings key below.
+    "RA_TARGET_DIR": "/workspaces/cargo-target/rust-analyzer"
+  },
+
+  // VSCode extensions to install automatically.
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "charliermarsh.ruff",
+        "astral-sh.ty",
+        "GitHub.copilot",
+        "ms-python.python"
+      ],
+      "settings": {
+        // Point rust-analyzer's own build cache at the bind mount.
+        "rust-analyzer.cargo.targetDir": "${env:RA_TARGET_DIR}"
+      }
+    }
+  },
+
+  // On create: generate .env if absent and sync Python dependencies.
+  "postCreateCommand": "bash scripts/setup.sh",
+
+  // Workspace folder inside the container.
+  "workspaceFolder": "/workspaces/rust-lsp-mcp",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/rust-lsp-mcp,type=bind,consistency=cached"
+}

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rust-lsp-mcp"
+version = "0.1.0"
+description = "Read-only Rust code navigation over LSP, exposed via MCP."
+requires-python = ">=3.12"
+dependencies = [
+    # MCP Python SDK (FastMCP server, stdio transport).
+    "mcp==1.12.4",
+    # Multilspy: drives rust-analyzer over LSP.
+    "multilspy==0.0.15",
+    # ChromaDB: local/embedded vector store for doc RAG.
+    "chromadb==1.5.9",
+    # pydantic-settings: settings layer with code defaults + .env + env-var overrides.
+    "pydantic-settings>=2.0",
+]
+
+[project.scripts]
+# Named console script: uv run rust-lsp-mcp  /  rust-lsp-mcp (after install)
+rust-lsp-mcp = "rust_lsp_mcp:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rust_lsp_mcp"]
+
+# ---------------------------------------------------------------------------
+# uv
+# ---------------------------------------------------------------------------
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "ty>=0.0.18",
+]
+
+# ---------------------------------------------------------------------------
+# ruff (lint + format)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+# E pycodestyle · F Pyflakes · UP pyupgrade · B bugbear · SIM simplify · I isort
+
+[tool.ruff.lint.isort]
+known-first-party = ["rust_lsp_mcp"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+markers = [
+    "integration: live rust-analyzer + real ripgrep fixture (slow; local QA gate only).",
+]
+addopts = "-ra"

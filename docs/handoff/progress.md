@@ -20,7 +20,7 @@ Read by [continue.md](continue.md) to pick the next phase.
 
 | Phase | Prompt | Depends on | Parallelizable? | State |
 |-------|--------|-----------|-----------------|-------|
-| 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | — | No (shared config; serial) | not-started |
+| 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | — | No (shared config; serial) | awaiting-container-build |
 | 1 — Readiness gating | [phase-1-readiness.md](phase-1-readiness.md) | 0 | No (analyzer-bound, serial) | not-started |
 | 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | not-started |
 | 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | not-started |
@@ -46,3 +46,7 @@ Read by [continue.md](continue.md) to pick the next phase.
 
 - 2026-06-19 Gate-zero → passed (adversarial pass over `docs/handoff/`; 3 must-fixes +
   4 minors applied to `continue.md` and `progress.md`). Build not yet started.
+- 2026-06-19 Phase 0 → awaiting-container-build (Beat A authored on `phase0`: devcontainer
+  + Dockerfile, 5 bind mounts, pyproject src layout + both launch paths, settings layer +
+  env.sample + init.sh, ruff/ty + `.vscode/`, pytest tiers, setup/teardown, CI + env-honesty
+  check, `.gitignore`. Uncommitted, pending human review + container build).

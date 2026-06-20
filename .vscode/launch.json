@@ -1,0 +1,55 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    // -------------------------------------------------------------------------
+    // Run the MCP server (smoke-check / manual launch)
+    // -------------------------------------------------------------------------
+    {
+      "name": "Run: rust-lsp-mcp",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "rust_lsp_mcp",
+      "args": [],
+      "env": {},
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+
+    // -------------------------------------------------------------------------
+    // Debug: run the full test suite under the debugger
+    // Breakpoints land in the plain-Python tool functions.
+    // -------------------------------------------------------------------------
+    {
+      "name": "Debug: pytest (fast tier)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "tests",
+        "-m",
+        "not integration",
+        "-v"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    // -------------------------------------------------------------------------
+    // Debug: integration tests (local QA gate — run deliberately)
+    // -------------------------------------------------------------------------
+    {
+      "name": "Debug: pytest (integration tier)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "tests",
+        "-m",
+        "integration",
+        "-v"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}
