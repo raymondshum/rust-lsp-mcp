@@ -18,8 +18,6 @@ Implementation note: tests run async code via ``anyio.run()`` (already a
 dependency via mcp) rather than requiring pytest-asyncio.
 """
 
-import asyncio
-
 import anyio
 import pytest
 
@@ -106,7 +104,7 @@ async def _run_test_no_misleading_ok_before_ready(settings) -> None:
         with anyio.fail_after(300):
             while manager.state == STATE_INDEXING:
                 samples_while_indexing.append(_gated_call(manager))
-                await asyncio.sleep(0.1)
+                await anyio.sleep(0.1)
 
         # All samples taken while still indexing must be not_ready
         for i, sample in enumerate(samples_while_indexing):

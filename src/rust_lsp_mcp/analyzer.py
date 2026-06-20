@@ -114,7 +114,7 @@ class AnalyzerManager:
 
     async def start(self) -> None:
         """Spawn the background indexing task.  Returns immediately."""
-        self._task = asyncio.get_event_loop().create_task(self._run(), name="analyzer-lifecycle")
+        self._task = asyncio.create_task(self._run(), name="analyzer-lifecycle")
 
     async def _run(self) -> None:
         """Background task: enter start_server(), flip state, wait for shutdown."""
