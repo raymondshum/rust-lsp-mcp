@@ -24,7 +24,7 @@ Read by [continue.md](continue.md) to pick the next phase.
 | 1 — Readiness gating | [phase-1-readiness.md](phase-1-readiness.md) | 0 | No (analyzer-bound, serial) | done |
 | 2 — Name→position | [phase-2-resolution.md](phase-2-resolution.md) | 1 | No (analyzer-bound, serial) | done |
 | 3+4 — Nav + operational tools | [phase-3-4-tools.md](phase-3-4-tools.md) | 2 | **Yes** — the 5 tools fan out on the fast-test tier (faked analyzer); integration gate serial | done |
-| 5 — Doc-RAG | [phase-5-doc-rag.md](phase-5-doc-rag.md) | 0 | **Yes** — off the LSP path; may run parallel to 3+4 | pr-open |
+| 5 — Doc-RAG | [phase-5-doc-rag.md](phase-5-doc-rag.md) | 0 | **Yes** — off the LSP path; may run parallel to 3+4 | done |
 
 ## Dependency graph (what the orchestrator may fan out)
 
@@ -240,3 +240,10 @@ Read by [continue.md](continue.md) to pick the next phase.
   `/home/vscode/.cache/chroma` bind mount (download-once, no re-download on rebuild); retrieval is
   topically sensible over ripgrep markdown. PR also carries the Phase 3+4 → done tracker flip.
   Awaiting human merge — Phase 5 is the final phase; on merge the build is complete.
+- 2026-06-20 Phase 5 → **done**. **PR #6 merged** to `main` (merge commit `53c8deb`) after CI ran
+  green; `origin/main` carries the doc-RAG code + the Phase 3+4 done-marking. Local `main` synced
+  (HEAD == origin/main == `53c8deb`, clean tree); stale `phase-5-doc-rag` branch + agent worktrees
+  removed. Resumed at the `pr-open` gate per continue.md step 3 (PR open+merged → gate satisfied).
+  **Phase 5 was the final phase — the build is complete: Phases 0–5 are all `done` on `main`.** This
+  done-flip rides in its own tracker-only PR (no next phase to carry it; direct pushes to `main` are
+  blocked).
