@@ -28,6 +28,7 @@ Entry point:
 """
 
 import logging
+import os
 import pathlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -37,7 +38,7 @@ from urllib.parse import unquote, urlparse
 from mcp.server.fastmcp import FastMCP
 from multilspy.multilspy_types import SymbolKind
 
-from rust_lsp_mcp.analyzer import STATE_READY, AnalyzerManager, analyzer_lifespan
+from rust_lsp_mcp.analyzer import AnalyzerManager, analyzer_lifespan
 from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
 from rust_lsp_mcp.positions import lsp_to_external
 
@@ -53,12 +54,20 @@ def _uri_to_relative_path(uri: str, repository_root: str) -> str | None:
     path from the URI by stripping the ``file://`` prefix and computing the
     path relative to the repository root.
 
+    Security: the derived path is normalized via ``os.path.normpath`` before
+    computing ``relative_to`` so that ``..``-escape sequences (e.g.
+    ``file:///repo/../secret/x.rs``) are collapsed lexically and never produce
+    a relative path starting with ``..``.  ``os.path.normpath`` is a
+    purely-lexical operation (no filesystem access / symlink resolution).
+
     Returns ``None`` if the URI is not under the repository root.
     """
     parsed = urlparse(uri)
     if parsed.scheme != "file":
         return None
-    abs_path = pathlib.Path(unquote(parsed.path))
+    # Normalize lexically before relative_to so ".." sequences cannot escape
+    # the repo root.  os.path.normpath is pure lexical — no filesystem access.
+    abs_path = pathlib.Path(os.path.normpath(unquote(parsed.path)))
     repo_root = pathlib.Path(repository_root)
     try:
         return str(abs_path.relative_to(repo_root))
@@ -113,7 +122,7 @@ def require_ready() -> dict[str, Any] | None:
     Returns:
         ``not_ready`` envelope dict if the analyzer is not yet ready, else ``None``.
     """
-    if _manager is None or _manager.state != STATE_READY:
+    if _manager is None or not _manager.is_ready:
         return not_ready()
     return None
 
@@ -231,6 +240,12 @@ async def find_symbol(name: str) -> dict[str, Any]:
             )
             continue
 
+        # Defensive: skip candidates without a usable (non-empty) name
+        sym_name = sym.get("name")
+        if not sym_name or not sym_name.strip():
+            _log.debug("find_symbol: candidate has no usable name (name=%r) — skipped", sym_name)
+            continue
+
         rng = loc.get("range", {})
         start = rng.get("start", {})
         ext = lsp_to_external(
@@ -248,7 +263,7 @@ async def find_symbol(name: str) -> dict[str, Any]:
 
         results.append(
             {
-                "name": sym["name"],
+                "name": sym_name,
                 "kind": kind_str,
                 "file": rel_path,
                 "line": ext.line,

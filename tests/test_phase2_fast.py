@@ -34,10 +34,17 @@ from rust_lsp_mcp.positions import ExternalPosition, LspPosition, external_to_ls
 
 
 def _make_manager(state: str) -> AnalyzerManager:
-    """Create an AnalyzerManager stub with state set directly (no real task)."""
+    """Create an AnalyzerManager stub with state set directly (no real task).
+
+    When state is STATE_READY, ``_lsp`` is set to a non-None sentinel so that
+    the ``is_ready`` property (which requires BOTH state==ready AND _lsp!=None)
+    behaves correctly.  Indexing fakes leave ``_lsp`` as None — the gate must
+    block regardless of ``_lsp`` when ``state != STATE_READY``.
+    """
     mgr = AnalyzerManager.__new__(AnalyzerManager)
     mgr.state = state
-    mgr._lsp = None
+    # is_ready requires _lsp to be non-None when state==ready (Fix 1).
+    mgr._lsp = object() if state == STATE_READY else None  # type: ignore[assignment]
     mgr._repository_root = "/fake/repo"
     return mgr
 
@@ -492,3 +499,210 @@ class TestFindSymbolUriFallback:
         assert r["file"] == "src/lib.rs"
         assert r["line"] == 3
         assert r["character"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Phase 2 adversarial seam bug fixes
+# ---------------------------------------------------------------------------
+
+
+class TestTeardownWindowNotReady:
+    """Fix 1 regression: teardown window (state=ready, _lsp=None) → not_ready, not error.
+
+    Simulates the window where ``_run``'s ``finally`` has cleared ``_lsp`` but
+    ``state`` has not been reset (Phase 4's job).  Callers must see ``not_ready``
+    rather than a ``RuntimeError`` wrapped as an ``error`` envelope.
+    """
+
+    def _make_torn_down_manager(self) -> AnalyzerManager:
+        """Manager in the teardown window: state=ready, _lsp=None."""
+        mgr = AnalyzerManager.__new__(AnalyzerManager)
+        mgr.state = STATE_READY
+        mgr._lsp = None  # simulates _run's finally clearing _lsp
+        mgr._repository_root = "/fake/repo"
+        return mgr
+
+    def test_find_symbol_returns_not_ready_in_teardown_window(self) -> None:
+        """find_symbol must return not_ready (not error) when _lsp is None and state=ready."""
+        import rust_lsp_mcp.server as srv
+
+        mgr = self._make_torn_down_manager()
+        mock_delegate = AsyncMock()
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(srv, "_manager", mgr),
+                # Do NOT patch request_workspace_symbol — we want to confirm it's not called
+                patch.object(mgr, "request_workspace_symbol", new=mock_delegate),
+            ):
+                return await srv.find_symbol("anything")
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_NOT_READY, (
+            f"Expected not_ready in teardown window, got {result!r}"
+        )
+        mock_delegate.assert_not_called()
+
+    def test_probe_returns_not_ready_in_teardown_window(self) -> None:
+        """probe must return not_ready when state=ready but _lsp is None."""
+        import rust_lsp_mcp.server as srv
+
+        mgr = self._make_torn_down_manager()
+
+        with patch.object(srv, "_manager", mgr):
+            result = srv.probe()
+
+        assert result["status"] == STATUS_NOT_READY, (
+            f"Expected not_ready in teardown window, got {result!r}"
+        )
+
+
+class TestMissingNameHandling:
+    """Fix 2 regression: candidate missing 'name' key must be skipped, not crash.
+
+    A hard ``sym["name"]`` subscript on a candidate without a ``name`` key was
+    outside the try/except → unhandled ``KeyError`` → FastMCP protocol error.
+    Now the candidate is skipped (logged at DEBUG) instead.
+    """
+
+    def test_no_name_key_is_skipped(self) -> None:
+        """Candidate with no 'name' key is silently skipped, does not raise."""
+        from multilspy.multilspy_types import SymbolKind
+
+        # No 'name' key at all — previously caused KeyError
+        no_name: dict[str, Any] = {
+            "kind": SymbolKind.Function,
+            "location": {
+                "uri": "file:///fake/repo/src/lib.rs",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+            },
+        }
+        good = _sym("real_fn", SymbolKind.Function, "src/lib.rs", 0, 0)
+        mgr = _make_manager(STATE_READY)
+        result = _run_find_symbol(mgr, "fn", [no_name, good])
+
+        assert result["status"] == STATUS_OK, f"Expected ok with good candidate, got {result!r}"
+        assert len(result["results"]) == 1
+        assert result["results"][0]["name"] == "real_fn"
+
+    def test_empty_name_is_skipped(self) -> None:
+        """Candidate with empty string name is silently skipped."""
+        from multilspy.multilspy_types import SymbolKind
+
+        empty_name: dict[str, Any] = {
+            "name": "",
+            "kind": SymbolKind.Function,
+            "location": {
+                "uri": "file:///fake/repo/src/lib.rs",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+            },
+        }
+        mgr = _make_manager(STATE_READY)
+        result = _run_find_symbol(mgr, "fn", [empty_name])
+
+        assert result["status"] == STATUS_NOT_FOUND, (
+            f"Expected not_found for sole empty-name candidate, got {result!r}"
+        )
+
+    def test_whitespace_name_is_skipped(self) -> None:
+        """Candidate with whitespace-only name is silently skipped."""
+        from multilspy.multilspy_types import SymbolKind
+
+        ws_name: dict[str, Any] = {
+            "name": "   ",
+            "kind": SymbolKind.Function,
+            "location": {
+                "uri": "file:///fake/repo/src/lib.rs",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+            },
+        }
+        good = _sym("real_fn", SymbolKind.Struct, "src/types.rs", 1, 0)
+        mgr = _make_manager(STATE_READY)
+        result = _run_find_symbol(mgr, "fn", [ws_name, good])
+
+        assert result["status"] == STATUS_OK
+        assert len(result["results"]) == 1
+        assert result["results"][0]["name"] == "real_fn"
+
+    def test_sole_no_name_candidate_returns_not_found(self) -> None:
+        """If the only candidate has no name, result is not_found (not a crash)."""
+        from multilspy.multilspy_types import SymbolKind
+
+        no_name: dict[str, Any] = {
+            "kind": SymbolKind.Function,
+            "location": {
+                "uri": "file:///fake/repo/src/lib.rs",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+            },
+        }
+        mgr = _make_manager(STATE_READY)
+        result = _run_find_symbol(mgr, "fn", [no_name])
+
+        assert result["status"] == STATUS_NOT_FOUND, (
+            f"Expected not_found for sole no-name candidate, got {result!r}"
+        )
+
+
+class TestUriDotDotEscapeHardening:
+    """Fix 3 regression: ``..``-escape in URI must not leak out-of-repo paths.
+
+    ``Path.relative_to`` is lexical and does not collapse ``..`` sequences, so
+    a URI like ``file:///repo/../secret/x.rs`` can resolve to ``../secret/x.rs``
+    — an out-of-workspace path.  ``os.path.normpath`` collapses these lexically
+    (no filesystem access) before ``relative_to`` is called.
+    """
+
+    def test_dotdot_escape_uri_is_skipped(self) -> None:
+        """A URI using ``..`` to escape the repo root is skipped → not_found."""
+        from multilspy.multilspy_types import SymbolKind
+
+        # /fake/repo/../secret/x.rs normalizes to /fake/secret/x.rs — outside /fake/repo
+        mgr = _make_manager(STATE_READY)
+        sym = _sym_uri_only(
+            "secret_fn",
+            SymbolKind.Function,
+            uri="file:///fake/repo/../secret/x.rs",
+            line=0,
+            character=0,
+        )
+        result = _run_find_symbol(mgr, "secret_fn", [sym])
+        assert result["status"] == STATUS_NOT_FOUND, (
+            f"Expected not_found for ../-escape URI, got {result!r}"
+        )
+
+    def test_normal_in_repo_uri_still_resolves(self) -> None:
+        """A normal in-repo URI without .. continues to resolve correctly."""
+        from multilspy.multilspy_types import SymbolKind
+
+        mgr = _make_manager(STATE_READY)
+        sym = _sym_uri_only(
+            "normal_fn",
+            SymbolKind.Function,
+            uri="file:///fake/repo/src/main.rs",
+            line=3,
+            character=0,
+        )
+        result = _run_find_symbol(mgr, "normal_fn", [sym])
+        assert result["status"] == STATUS_OK
+        r = result["results"][0]
+        assert r["file"] == "src/main.rs"
+        assert r["line"] == 4  # LSP 3 → external 4
+        assert r["character"] == 1
+
+    def test_dotdot_within_repo_resolves_correctly(self) -> None:
+        """A ``..`` that stays within the repo root (non-escape) resolves to the real path."""
+        from multilspy.multilspy_types import SymbolKind
+
+        # /fake/repo/src/../lib.rs normalizes to /fake/repo/lib.rs — still inside repo
+        mgr = _make_manager(STATE_READY)
+        sym = _sym_uri_only(
+            "inrepo_fn",
+            SymbolKind.Function,
+            uri="file:///fake/repo/src/../lib.rs",
+            line=0,
+            character=0,
+        )
+        result = _run_find_symbol(mgr, "inrepo_fn", [sym])
+        assert result["status"] == STATUS_OK
+        r = result["results"][0]
+        assert r["file"] == "lib.rs"  # normalized path relative to repo root

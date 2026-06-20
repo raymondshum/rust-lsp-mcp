@@ -132,6 +132,16 @@ class AnalyzerManager:
         """The workspace root path passed at construction time."""
         return self._repository_root
 
+    @property
+    def is_ready(self) -> bool:
+        """True only when state is "ready" AND the live LSP context is set.
+
+        This guards the teardown window where _run's finally has cleared
+        _lsp but state has not been reset (Phase 4 owns that reset).
+        Callers must use this instead of checking state == STATE_READY alone.
+        """
+        return self.state == STATE_READY and self._lsp is not None
+
     async def start(self) -> None:
         """Spawn the background indexing task.  Returns immediately."""
         self._task = asyncio.create_task(self._run(), name="analyzer-lifecycle")
