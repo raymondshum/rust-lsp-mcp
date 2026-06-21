@@ -8,6 +8,13 @@ You are the **orchestrator** (lean — delegate, don't implement). Follow
 [roles.md](roles.md) for the agent model and [adversarial-review.md](adversarial-review.md)
 for the red-team step.
 
+This file is **rust-lsp-mcp's concrete instance** of the general
+[implementation cycle](../conventions/implementation-cycle.md); the steps below add
+this project's specifics (the Phase 0 container seam, the single serialized
+analyzer, and [progress.md](progress.md)). The plan it executes follows the
+[phasal-plan](../conventions/phasal-plan.md) contract; the whole flow sits in the
+[delivery lifecycle](../conventions/lifecycle.md).
+
 ## The cycle (run once per invocation)
 
 1. **Orient.** Read [CLAUDE.md](../../CLAUDE.md), the

@@ -18,7 +18,9 @@ docs/handoff/continue.md." The orchestrator owns
 
 ## Conventions
 
-Brief pointers — open the file when its topic or trigger applies.
+Brief pointers — open the file when its topic or trigger applies. The
+[delivery lifecycle](docs/conventions/lifecycle.md) is the **spine** (Grill → Plan →
+Verify → Implement → Document); the per-stage docs below implement it.
 
 - [CLAUDE.md layout](docs/conventions/claude-md-layout.md) — read before editing this
   file: keep it thin (pointers + brief description/trigger); detail lives in `docs/`.
@@ -34,8 +36,17 @@ Brief pointers — open the file when its topic or trigger applies.
 - [verification pass](docs/conventions/verification-pass.md) — read before a
   "verify the plan" / "flip UNVERIFIED to VERIFIED" pass: inventory → confirm via
   Context7/source → cache + annotate the residue.
+- [phasal plan](docs/conventions/phasal-plan.md) — the output contract for planning:
+  what a grill/plan session must produce (phases, deps, file-ownership partitions,
+  definition-of-done, adversarial intensity) to be implementable.
+- [implementation cycle](docs/conventions/implementation-cycle.md) — the standard build
+  loop (build → review → QA → adversarial → PR → record), one phase per pass.
+  rust-lsp-mcp's instance is the handoff dispatcher [continue.md](docs/handoff/continue.md).
 - Grilling a plan/design: first read [grill-me.md](docs/conventions/grill-me.md). The
   loop is **grill (decide) → `UNVERIFIED` inventory → [verification pass](docs/conventions/verification-pass.md)**.
+- [known issues](docs/impl/known-issues.md) — living register of open design / documentation
+  issues. **Review** at the start of a grill/plan session, at each phase's record step, and
+  when editing a module an open issue names.
 
 ## Highest-risk areas
 
