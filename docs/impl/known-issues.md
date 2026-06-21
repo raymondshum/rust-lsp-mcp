@@ -73,6 +73,31 @@ Check this list at these lifecycle checkpoints (see
   bind-mount target, rename it to signal "informational," or remove it and
   document the path elsewhere.
 
+### KI-5 — UTF-16 character offsets unhandled for non-ASCII target repos
+- **Where:** [src/rust_lsp_mcp/positions.py](../../src/rust_lsp_mcp/positions.py) ~line 20.
+- **What:** LSP positions are UTF-16 code-unit offsets, but the conversion treats
+  them as plain character offsets. This was explicitly deferred *because ripgrep's
+  source is all-ASCII* (where the two coincide). The
+  [repo-agnostic plan](../planning/repo-agnostic-and-docker-launch.md) makes any
+  Rust project a valid target.
+- **Why it matters:** Once the project points at a repo with non-ASCII source
+  (Unicode identifiers, CJK/emoji in strings or comments), `goto_definition`,
+  `find_references`, and `hover` return **wrong** `line`/`character` values. A
+  deferred edge becomes a real correctness bug under repo-agnosticism.
+- **Status:** open. Surfaced by the 2026-06-21 repo-agnostic grill; track as a
+  correctness gap to schedule (not a startup blocker).
+
+### KI-6 — ripgrep-specific claim in the `status` tool docstring
+- **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py) ~line 42.
+- **What:** The docstring states "For the pinned ripgrep clone (no active
+  development commits) this is effectively always ready and not stale." That
+  assumption is false for an actively-developed target project.
+- **Why it matters:** A tool docstring is part of the caller-facing contract;
+  it misdescribes staleness semantics for any non-ripgrep target.
+- **Status:** decided: fix in Phase 2 of the
+  [repo-agnostic plan](../planning/repo-agnostic-and-docker-launch.md) (drop the
+  ripgrep-specific sentence).
+
 ---
 
 ## Resolved
