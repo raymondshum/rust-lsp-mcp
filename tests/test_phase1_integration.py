@@ -61,7 +61,7 @@ async def _run_test_analyzer_reaches_ready(settings) -> None:
     """
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
-        repository_root=settings.ripgrep_src,
+        repository_root=settings.project_root,
     )
 
     # State must be indexing before we start
@@ -87,7 +87,7 @@ async def _run_test_no_misleading_ok_before_ready(settings) -> None:
     """
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
-        repository_root=settings.ripgrep_src,
+        repository_root=settings.project_root,
     )
 
     await manager.start()

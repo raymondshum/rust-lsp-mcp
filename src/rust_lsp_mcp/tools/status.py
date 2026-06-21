@@ -39,9 +39,9 @@ def status() -> dict[str, Any]:
 
         Commit-hash comparison does **not** detect uncommitted working-tree
         edits, so ``stale: false`` means "no *committed* changes since
-        indexing," not a freshness guarantee.  For the pinned ripgrep clone
-        (no active development commits) this is effectively always ready and
-        not stale.
+        indexing," not a freshness guarantee.  For a target project with no
+        commits since indexing began, ``stale`` is ``false``; once a newer
+        commit lands it flips to ``true``.
 
     This tool is always callable regardless of analyzer state — it is the
     readiness check itself and therefore never returns ``not_ready``.
@@ -50,7 +50,7 @@ def status() -> dict[str, Any]:
 
     state: str = mgr.state if mgr is not None else "indexing"
     indexed_commit: str | None = mgr.indexed_commit if mgr is not None else None
-    repo_root: str = mgr.repository_root if mgr is not None else get_settings().ripgrep_src
+    repo_root: str = mgr.repository_root if mgr is not None else get_settings().project_root
 
     current_commit: str | None = _git_head(repo_root)
 

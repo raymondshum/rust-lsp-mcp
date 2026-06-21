@@ -26,7 +26,7 @@ def test_settings_defaults() -> None:
 
     # Instantiate with no env_file to avoid picking up any local .env.
     s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
-    assert s.ripgrep_src == "/workspaces/ripgrep"
+    assert s.project_root == "/workspaces/ripgrep"
     assert s.cargo_target_dir == "/workspaces/cargo-target"
     assert s.cargo_home == "/workspaces/cargo-home"
     assert s.rust_analyzer_target_dir == "/workspaces/cargo-target/rust-analyzer"

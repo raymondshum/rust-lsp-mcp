@@ -506,7 +506,7 @@ async def analyzer_lifespan(app: object) -> AsyncIterator[dict[str, AnalyzerMana
     settings = get_settings()
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
-        repository_root=settings.ripgrep_src,
+        repository_root=settings.project_root,
     )
     await manager.start()
     try:

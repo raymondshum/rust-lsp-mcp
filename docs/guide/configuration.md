@@ -34,7 +34,8 @@ library.
 
 | Environment variable | Default | What it does |
 |---|---|---|
-| `RLM_RIPGREP_SRC` | `/workspaces/ripgrep` | Folder of the Rust project to navigate and whose Markdown files are searched. This is the sample ripgrep codebase inside the container. |
+| `RLM_PROJECT_ROOT` | `/workspaces/ripgrep` | Folder of the Rust project to navigate and whose Markdown files are searched. Repo-agnostic — point it at any Rust project. The default is the bundled ripgrep sample inside the container. *(The old name `RLM_RIPGREP_SRC` still works as a deprecated alias and emits a warning.)* |
+| `RLM_DOC_COLLECTION` | `project_docs` | Name of the ChromaDB collection that holds the documentation index. Change it only if you keep multiple projects' indexes under one `RLM_CHROMA_PATH`. |
 | `RLM_CARGO_TARGET_DIR` | `/workspaces/cargo-target` | Where Rust build output is stored. Kept on a persistent mount so it is reused across container rebuilds rather than rebuilt every time. |
 | `RLM_CARGO_HOME` | `/workspaces/cargo-home` | Where Rust's package downloads are cached (Cargo's registry and git checkouts). |
 | `RLM_RUST_ANALYZER_TARGET_DIR` | `/workspaces/cargo-target/rust-analyzer` | Where rust-analyzer keeps its own build output, separate from the main Cargo target directory. |
@@ -69,8 +70,8 @@ The following example points the server at a different Rust project and limits
 documentation search to files under a `docs/` folder:
 
 ```dotenv
-# Point at your own Rust project instead of the bundled ripgrep fixture
-RLM_RIPGREP_SRC=/home/user/projects/my-rust-app
+# Point at your own Rust project instead of the bundled ripgrep sample
+RLM_PROJECT_ROOT=/home/user/projects/my-rust-app
 
 # Only index Markdown files that live under a docs/ directory
 RLM_DOC_GLOB_PATTERNS=docs/**/*.md
