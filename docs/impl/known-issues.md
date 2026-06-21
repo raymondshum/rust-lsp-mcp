@@ -82,10 +82,19 @@ Check this list at these lifecycle checkpoints (see
   Rust project a valid target.
 - **Why it matters:** Once the project points at a repo with non-ASCII source
   (Unicode identifiers, CJK/emoji in strings or comments), `goto_definition`,
-  `find_references`, and `hover` return **wrong** `line`/`character` values. A
-  deferred edge becomes a real correctness bug under repo-agnosticism.
-- **Status:** open. Surfaced by the 2026-06-21 repo-agnostic grill; track as a
-  correctness gap to schedule (not a startup blocker).
+  `find_references`, `hover`, and `find_symbol` return **wrong** `character`
+  values on astral-plane lines. A deferred edge becomes a real correctness bug
+  under repo-agnosticism.
+- **Status:** decided (2026-06-21) — fix = **negotiate `positionEncoding`
+  `["utf-32","utf-16"]`** so rust-analyzer emits/accepts Unicode-codepoint
+  offsets (Approach A). The verification spike proved rust-analyzer supports
+  utf-8 AND utf-32 (see [lsp-position-encoding.md](../reference/lsp-position-encoding.md)),
+  so no per-line transcoding is needed and `positions.py` stays pure ±1.
+  Failing regression test in place: [tests/test_ki5_position_encoding.py](../../tests/test_ki5_position_encoding.py)
+  (`xfail(strict)` — flips to pass when the fix lands). Implementation: override
+  multilspy's rust-analyzer init params (the `PatchedRustAnalyzer` already hooks
+  the binary; the init params need a similar override), then drop the
+  `positions.py` UTF-16 caveat comment.
 
 ---
 
