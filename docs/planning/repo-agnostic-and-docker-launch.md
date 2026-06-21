@@ -147,15 +147,36 @@ waits on both so its docs describe shipped behavior.
 
 ## Runtime UNVERIFIED residue (confirm during the build)
 
-- **R1 (Phase 1):** the image builds and `docker run -i` carries MCP JSON-RPC
-  end-to-end cleanly (U3 confirmed *in-process*; the docker-run boundary is the
-  empirical gate above).
-- **R2 (Phase 1):** rust-analyzer's `sysroot: "discover"` actually resolves inside
-  the image (rustup present) and proc-macro/build-script crates compile.
-- **R3 (Phase 1, non-blocking):** quantify the warm-cargo-volume startup time vs
-  cold (U5 says re-index always runs; measure the delta).
+- **R1 (Phase 1) — ✅ CLEARED 2026-06-20:** image builds (after a one-line
+  Dockerfile fix, below) and `docker run -i` carries MCP JSON-RPC end-to-end
+  **cleanly**. Drove `initialize` + `find_symbol` + `search_docs` over stdio
+  against a **non-ripgrep** project (`dtolnay/anyhow`); every stdout line was
+  valid JSON-RPC (all logs went to stderr), and an independent `claude mcp`
+  client reported `✔ Connected`. `find_symbol Error` resolved the real
+  `pub struct Error` at `src/lib.rs:390` (1-indexed); `search_docs` returned the
+  exact README passage.
+- **R2 (Phase 1) — ✅ CLEARED 2026-06-20:** image carries the full toolchain
+  (rust-analyzer / cargo / rustc 1.96.0 + `rust-src` under the sysroot), and
+  `sysroot: "discover"` resolved — `anyhow` (which has proc-macro dev-deps:
+  `syn`, `thiserror`, `trybuild`) indexed to `state: ready` without error.
+- **R3 (Phase 1, non-blocking) — ✅ CLEARED 2026-06-20:** cold `status→ready`
+  (empty `/data` volume) **40.0 s**; warm (same volume reused, fresh container)
+  **12.6 s**. Faster (cargo registry + cargo-target + chroma + embedding-model
+  cache reused on `/data`) but **non-zero**, confirming U5: rust-analyzer
+  re-indexes every process start.
 - **R4 (Phase 2, minor):** chromadb `anonymized_telemetry=False` silences any
   init output in the pinned chromadb 1.5.x.
+
+**Verification environment (2026-06-20):** run on a Docker host where the
+account lacked daemon-socket access, so the host's **rootless podman 5.8.2** (OCI
+runtime; same Dockerfile, `-i` stdio, named volumes) drove the gate — equivalent
+to `docker run` for these claims. Two host-specific (not image) notes: (a) the
+one-line build fix below; (b) under SELinux-enforcing rootless podman the target
+bind mount needs a relabel suffix (`-v <proj>:/project:ro,Z`); the README's plain
+`:ro` is correct for a standard Docker daemon. **Dockerfile fix:** rustup-init
+rejects space-separated components — `--component rust-analyzer rust-src` →
+`--component rust-analyzer,rust-src` (rustup only accepts multiple components as
+one comma-separated argument; matches the dev container's component list).
 
 ## Status (as built — 2026-06-21)
 
@@ -165,7 +186,7 @@ original Phases 0–5 build, now complete).
 
 | Phase | State | PR | Gates run |
 |-------|-------|----|-----------|
-| Phase 1 — image + host launch | **merged** | #13 | ruff/format/ty/fast-tests (Python unchanged). **Image build + stdio-over-`docker run` NOT run** (no Docker in the build container) — see residue R1/R2/R3 + [phase-1-docker-verification.md](../handoff/phase-1-docker-verification.md). |
+| Phase 1 — image + host launch | **merged + verified** | #13 (image), follow-up (Dockerfile fix) | ruff/format/ty/fast-tests (Python unchanged). **Empirical Docker gate RUN 2026-06-20** (rootless podman on a Docker host): build ✅ (after one-line rustup fix), toolchain ✅ (R2), clean stdio + repo-agnostic tools ✅ (R1), cold 40.0 s / warm 12.6 s ✅ (R3). See residue R1/R2/R3 (cleared) + [phase-1-docker-verification.md](../handoff/phase-1-docker-verification.md). |
 | Phase 2 — repo-agnostic config | **merged** | #12 | ruff/format/ty + 416 fast tests; CI green. **Adversarial pass run post-merge** (see below). |
 | Phase 3 — provisioning + docs | **not started** | — | Deferred; only Phases 1–2 were commissioned. **Consequence:** README quick-start / "Status & scope" + [development.md](../guide/development.md) still describe the ripgrep-only, dev-container-only world and now read inconsistently with the new Phase-1 connection section. |
 
