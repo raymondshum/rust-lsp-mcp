@@ -32,5 +32,4 @@ def test_settings_defaults() -> None:
     assert s.rust_analyzer_target_dir == "/workspaces/cargo-target/rust-analyzer"
     assert s.rust_analyzer_bin == "/usr/local/cargo/bin/rust-analyzer"
     assert s.chroma_path == "/workspaces/chroma"
-    assert s.chroma_model_cache == "/home/vscode/.cache/chroma"
     assert s.doc_glob_patterns == "**/*.md"

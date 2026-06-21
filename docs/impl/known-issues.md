@@ -29,21 +29,20 @@ Check this list at these lifecycle checkpoints (see
 
 ## Open
 
-### KI-4 — `RLM_CHROMA_MODEL_CACHE` is a no-op setting
-- **Where:** [src/rust_lsp_mcp/settings.py](../../src/rust_lsp_mcp/settings.py)
-  (`chroma_model_cache`).
-- **What:** The setting is informational only — ChromaDB hardcodes the model cache
-  path to `~/.cache/chroma` and ignores this value. It is documented as such in
-  both the code and the [configuration guide](../guide/configuration.md).
-- **Why it matters:** A configuration knob that does nothing is a usability wart; a
-  user may set it expecting an effect.
-- **Status:** open. Decision needed: keep it purely as documentation of the
-  bind-mount target, rename it to signal "informational," or remove it and
-  document the path elsewhere.
+_(none — all currently-tracked issues are resolved.)_
 
 ---
 
 ## Resolved
+
+### KI-4 — `RLM_CHROMA_MODEL_CACHE` is a no-op setting
+- **Where:** [src/rust_lsp_mcp/settings.py](../../src/rust_lsp_mcp/settings.py).
+- **What:** A `chroma_model_cache` settings field (env `RLM_CHROMA_MODEL_CACHE`)
+  that did nothing — ChromaDB hardcodes the model cache to `~/.cache/chroma` and
+  ignored it. A knob with no effect is a usability wart.
+- **Resolved:** 2026-06-21 — removed the field from `settings.py` and `env.sample`;
+  the fixed `~/.cache/chroma` model-cache path is now documented in prose in the
+  [configuration guide](../guide/configuration.md) ("download once" section).
 
 ### KI-1 — Ghost script reference in the env-sample honesty test
 - **Where:** [tests/test_env_sample_honesty.py](../../tests/test_env_sample_honesty.py) (docstring).

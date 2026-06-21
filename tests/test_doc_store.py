@@ -92,7 +92,6 @@ def _make_settings(tmp_path: pathlib.Path, corpus_dir: pathlib.Path) -> Settings
         chroma_path=str(tmp_path / "chroma"),
         project_root=str(corpus_dir),
         doc_glob_patterns="**/*.md",
-        chroma_model_cache=str(tmp_path / "model_cache"),
     )
 
 
@@ -438,7 +437,6 @@ class TestDocStoreExcludePatterns:
             project_root=str(corpus),
             doc_glob_patterns="**/*.md",
             doc_exclude_patterns="**/CHANGELOG.md",
-            chroma_model_cache=str(tmp_path / "model_cache"),
         )
         store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
         count = store.rebuild()
@@ -475,7 +473,6 @@ class TestDocStoreExcludePatterns:
             project_root=str(corpus),
             doc_glob_patterns="**/*.md",
             doc_exclude_patterns="",  # No exclusions.
-            chroma_model_cache=str(tmp_path / "model_cache"),
         )
         store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
         count = store.rebuild()
