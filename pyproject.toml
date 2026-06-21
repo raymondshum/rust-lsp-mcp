@@ -6,6 +6,8 @@ build-backend = "hatchling.build"
 name = "rust-lsp-mcp"
 version = "0.1.0"
 description = "Read-only Rust code navigation over LSP, exposed via MCP."
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     # MCP Python SDK (FastMCP server, stdio transport).
