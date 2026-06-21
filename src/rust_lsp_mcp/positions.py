@@ -15,10 +15,12 @@ Design:
 Only line AND character are converted — the helper does not touch file paths
 or any other fields.
 
-Caveat (noted in implementation-plan.md §Phase 3):
-    LSP character offsets are UTF-16 by default.  This is irrelevant for
-    ripgrep's all-ASCII source and is intentionally not solved for the
-    prototype.
+Character encoding (KI-5):
+    The ``character`` axis is a **Unicode codepoint** offset.  ``AnalyzerManager``
+    negotiates ``positionEncoding: utf-32`` with rust-analyzer (see
+    ``PatchedRustAnalyzer._get_initialize_params`` in analyzer.py), so the LSP
+    offsets are already codepoint counts — this helper only adds/removes the
+    1-vs-0 index bias.  No UTF-16 surrogate transcoding is needed.
 """
 
 from typing import NamedTuple

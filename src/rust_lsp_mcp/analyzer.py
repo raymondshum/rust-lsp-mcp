@@ -47,8 +47,10 @@ import logging
 import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 from multilspy.language_servers.rust_analyzer.rust_analyzer import RustAnalyzer
+from multilspy.lsp_protocol_handler.lsp_types import InitializeParams
 from multilspy.multilspy_config import Language, MultilspyConfig
 from multilspy.multilspy_logger import MultilspyLogger
 from multilspy.multilspy_types import Hover, Location, UnifiedSymbolInformation
@@ -116,6 +118,28 @@ class PatchedRustAnalyzer(RustAnalyzer):
         """Return the native binary path, skipping multilspy's download logic."""
         _log.info("PatchedRustAnalyzer: using binary at %s", self._rust_analyzer_bin)
         return self._rust_analyzer_bin
+
+    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+        """Advertise UTF-32 position encoding (KI-5).
+
+        multilspy's bundled init params request ``positionEncodings: ["utf-16"]``,
+        so rust-analyzer reports character offsets as UTF-16 code units — wrong on
+        non-ASCII (astral) lines.  We instead advertise ``["utf-32", "utf-16"]`` so
+        rust-analyzer reports **Unicode codepoint** offsets (verified supported —
+        see docs/reference/lsp-position-encoding.md).  ``utf-16`` is listed second
+        purely as a protocol-level fallback for a server that lacks utf-32; the
+        positions then stay UTF-16 (the pre-fix behaviour), never an error.
+
+        All offset handling downstream (positions.py, the tool layer) is
+        encoding-agnostic — it forwards whatever the negotiated encoding yields —
+        so changing the negotiation is sufficient; no per-line transcoding.
+        """
+        params = super()._get_initialize_params(repository_absolute_path)
+        # The bundled JSON always carries capabilities.general; assert-fail loudly
+        # rather than silently no-op if multilspy ever restructures it.
+        general = cast(dict[str, Any], params)["capabilities"]["general"]
+        general["positionEncodings"] = ["utf-32", "utf-16"]
+        return params
 
 
 # ---------------------------------------------------------------------------
