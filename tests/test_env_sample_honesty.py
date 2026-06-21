@@ -4,8 +4,8 @@ Every settings variable that Settings reads must have a corresponding entry in
 env.sample (with the correct RLM_ prefix).  This prevents a settings variable
 being added without documenting it.
 
-The check is duplicated in CI via scripts/check-env-sample.py; this test
-makes it runnable in the ordinary pytest suite too.
+CI runs this test directly as part of the fast pytest tier
+(``pytest -m "not integration"``) — it is the check; there is no separate script.
 """
 
 from pathlib import Path
