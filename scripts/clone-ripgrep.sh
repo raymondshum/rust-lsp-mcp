@@ -7,8 +7,8 @@
 # Usage (inside the container after bind mounts are active):
 #   bash scripts/clone-ripgrep.sh
 #
-# The target directory is read from the environment (RLM_RIPGREP_SRC) or
-# falls back to the devcontainer default path.
+# The target directory is read from the environment (RLM_PROJECT_ROOT, or the
+# deprecated RLM_RIPGREP_SRC alias) or falls back to the devcontainer default path.
 
 set -euo pipefail
 
@@ -16,7 +16,8 @@ set -euo pipefail
 RIPGREP_TAG="14.1.1"
 RIPGREP_REPO="https://github.com/BurntSushi/ripgrep.git"
 
-TARGET="${RLM_RIPGREP_SRC:-/workspaces/ripgrep}"
+# Prefer the current name; fall back to the deprecated alias, then the default.
+TARGET="${RLM_PROJECT_ROOT:-${RLM_RIPGREP_SRC:-/workspaces/ripgrep}}"
 
 if [[ -d "$TARGET/.git" ]]; then
     echo "clone-ripgrep.sh: fixture already present at $TARGET — skipping clone." >&2
