@@ -50,3 +50,7 @@ htmlcov/
 
 # Agent worktrees (ephemeral)
 .claude/worktrees/
+
+# Rust build artifacts from test fixture crates
+tests/fixtures/**/target/
+tests/fixtures/**/Cargo.lock

@@ -14,3 +14,4 @@ Check here before re-querying Context7.
 - [pytest-markers.md](pytest-markers.md) — [tool.pytest.ini_options] markers; integration marker; -m "not integration" for CI (pytest, 2026-06-19)
 - [devcontainer-features.md](devcontainer-features.md) — rust:1 v1.5.0 (rust-analyzer in default components, path /usr/local/cargo/bin); NO official uv feature; RA cache = cargo.targetDir + CARGO_HOME, not an index dir (2026-06-19)
 - [mcp-inspector.md](mcp-inspector.md) — npx @modelcontextprotocol/inspector [--cli] -- uv run rust-lsp-mcp; UI :6274; Node ≥22.7.5 (2026-06-19)
+- [lsp-position-encoding.md](lsp-position-encoding.md) — LSP 3.17 positionEncoding negotiation; rust-analyzer supports utf-8 AND utf-32 (empirically verified) → KI-5 fix = negotiate utf-32 (codepoints, no transcoding) (rust-analyzer 1.96.0, 2026-06-21)
