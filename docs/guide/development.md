@@ -232,7 +232,7 @@ VS Code tasks (run from the Command Palette → **Tasks: Run Task**) launch the 
 | MCP Inspector (UI) | Web UI | Opens at http://localhost:6274 |
 | MCP Inspector (CLI) | Headless command line | Output in the terminal panel |
 
-Both tasks use `npx @modelcontextprotocol/inspector`, so **Node.js must be available inside the container**. Node.js is not part of the development container, so you must install it yourself before using these tasks. The tasks are optional and intended only for manual exploration.
+Both tasks use `npx @modelcontextprotocol/inspector`, which needs Node.js. The development container includes Node.js (the `node` dev-container feature), so the tasks work out of the box — no manual install. They are optional and intended only for manual exploration.
 
 ---
 
