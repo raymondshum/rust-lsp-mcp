@@ -25,7 +25,13 @@
     // GitHub CLI — the orchestration PR step (docs/handoff/continue.md) needs `gh`.
     // Without it, opening a PR hits the pr-open human seam. Auth is still per-user
     // (gh auth login, or a GH_TOKEN/GITHUB_TOKEN env var).
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    // Node.js — the optional MCP Inspector tasks (.vscode/tasks.json) run
+    // `npx @modelcontextprotocol/inspector`, which needs Node >= 22.7.5. "lts"
+    // installs the current LTS (22.x), satisfying that. (KI-3)
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
   },
 
   // Bind mounts: observable, gitignored, survive container rebuilds.
