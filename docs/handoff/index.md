@@ -18,3 +18,6 @@ plan and `docs/reference/`; these files only orchestrate.
   - [phase-2-resolution.md](phase-2-resolution.md)
   - [phase-3-4-tools.md](phase-3-4-tools.md)
   - [phase-5-doc-rag.md](phase-5-doc-rag.md)
+- [phase-1-docker-verification.md](phase-1-docker-verification.md) — host-side
+  checklist + Claude Code prompt to verify the production Docker image (clears the
+  repo-agnostic plan's residue R1/R2/R3, which needs a machine with Docker).

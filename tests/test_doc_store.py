@@ -525,3 +525,23 @@ def _init_with_fake_ef(settings: Settings, tmp_path: pathlib.Path) -> DocStore:
 
     _mod._doc_store = store
     return store
+
+
+def test_two_doc_stores_same_path_do_not_raise(tmp_path: pathlib.Path) -> None:
+    """Two DocStores at the same chroma_path must not raise (adversarial regression).
+
+    ChromaDB caches one System per path and rejects a second client opened with
+    DIFFERENT settings ("An instance of Chroma already exists ... with different
+    settings"). DocStore opens its PersistentClient with
+    ChromaSettings(anonymized_telemetry=False); this guards against a future
+    change that constructs a client at the same path with mismatched settings,
+    which would crash lifespan startup. (Adversarial review of PR #12, attack 4.)
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(parents=True, exist_ok=True)
+    settings = _make_settings(tmp_path, corpus)
+
+    store1 = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+    store2 = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+    assert store1._client is not None
+    assert store2._client is not None
