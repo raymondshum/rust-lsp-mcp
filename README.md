@@ -70,25 +70,61 @@ Call the `status` tool to check progress.
 
 ## Connect it to an AI assistant
 
-An MCP client launches this server as a subprocess over stdio. Most clients
-accept a JSON configuration block similar to this:
+An MCP client launches this server as a subprocess over stdio. The server needs
+rust-analyzer, the Python dependencies, and the full Rust toolchain — all of
+which live **inside a container**, not on your host. So rather than asking the
+client to run `uv` directly (which only works from *inside* the dev container),
+you build a self-contained image once and have the client launch it with
+`docker run`. This keeps your host clean and works for host-side clients like
+Claude Desktop.
+
+**1. Build the image** (once, from this repository):
+
+```
+docker build -t rust-lsp-mcp .
+```
+
+**2. Point your MCP client at the image.** Most clients accept a JSON
+configuration block similar to this:
 
 ```json
 {
   "mcpServers": {
     "rust-lsp-mcp": {
-      "command": "uv",
-      "args": ["run", "--directory", "/absolute/path/to/rust-lsp-mcp", "rust-lsp-mcp"]
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "/absolute/path/to/your/rust/project:/project:ro",
+        "-v", "rust-lsp-mcp-data:/data",
+        "rust-lsp-mcp"
+      ]
     }
   }
 }
 ```
 
-Replace `/absolute/path/to/rust-lsp-mcp` with the actual path to this
-repository inside the dev container. This configuration shape is typical for MCP
-clients such as Claude Desktop; the exact location of the config file depends on
-the client you are using. The server must be run inside the dev container
-environment where rust-analyzer and the Python dependencies are installed.
+What the pieces do:
+
+- `run -i --rm` — start a fresh container per session, attached over stdio
+  (`-i`), and remove it when the session ends (`--rm`). No long-running
+  container to manage.
+- `-v /absolute/path/to/your/rust/project:/project:ro` — **bind-mount the Rust
+  project you want to explore**, read-only, at the path the server expects
+  (`/project`). Replace the left side with your project's absolute path. The
+  server is repo-agnostic — point it at any Rust project.
+- `-v rust-lsp-mcp-data:/data` — a **named volume** for the documentation index,
+  Rust build cache, and the embedding model, so they are downloaded/built once
+  and reused across sessions ("download once").
+
+The exact location of the config file depends on the client you are using; this
+shape is typical for clients such as Claude Desktop.
+
+**Note on startup:** each session starts a fresh rust-analyzer process, which
+re-indexes the project (seconds to a couple of minutes — the build cache on the
+`/data` volume keeps the underlying `cargo check` incremental, but the in-memory
+index is rebuilt each time). If you want rust-analyzer to stay hot between
+sessions, keep one container running and use `docker exec` instead — see
+[`docker-compose.yml`](docker-compose.yml).
 
 ## Documentation
 
