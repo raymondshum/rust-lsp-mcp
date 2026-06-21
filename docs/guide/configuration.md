@@ -41,7 +41,6 @@ library.
 | `RLM_RUST_ANALYZER_TARGET_DIR` | `/workspaces/cargo-target/rust-analyzer` | Where rust-analyzer keeps its own build output, separate from the main Cargo target directory. |
 | `RLM_RUST_ANALYZER_BIN` | `/usr/local/cargo/bin/rust-analyzer` | Path to the rust-analyzer program inside the container. You can confirm the correct path with `rustup which rust-analyzer`. |
 | `RLM_CHROMA_PATH` | `/workspaces/chroma` | Folder where the documentation search database is stored. Kept on a persistent mount so the index survives container rebuilds. |
-| `RLM_CHROMA_MODEL_CACHE` | `/home/vscode/.cache/chroma` | **Informational only.** The documentation-search library always stores its downloaded embedding model under the user's home cache folder and ignores this setting. It is listed here only to document which folder the container persists so the model is not re-downloaded after a rebuild. Changing this value has no effect on where the model is actually stored. |
 | `RLM_DOC_GLOB_PATTERNS` | `**/*.md` | Which Markdown files to include in documentation search, written as comma-separated path patterns relative to the project folder. The default includes every Markdown file anywhere in the project. |
 | `RLM_DOC_EXCLUDE_PATTERNS` | `**/CHANGELOG.md` | Which files to exclude even if they matched the include patterns above. The default leaves out `CHANGELOG.md`, whose long list of version-by-version change notes would otherwise crowd out more useful documentation in search results. |
 
@@ -55,7 +54,11 @@ rebuild. This matters for two expensive one-time operations:
 
 - **The documentation-search embedding model** (about 80 MB) is downloaded the first
   time the documentation index is built and then read from the local cache on every
-  subsequent start. It lives under `RLM_CHROMA_MODEL_CACHE`.
+  subsequent start. The documentation-search library always stores it under the
+  container user's home cache folder (`~/.cache/chroma`) — this path is fixed and
+  not configurable. Persist that folder (a bind mount in the dev container, or the
+  production image's `/data` volume) so the model is not re-downloaded after a
+  rebuild.
 - **Rust build output** (potentially hundreds of megabytes) is compiled once and
   reused. It lives under `RLM_CARGO_TARGET_DIR` and `RLM_CARGO_HOME`.
 

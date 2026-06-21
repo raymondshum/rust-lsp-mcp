@@ -38,7 +38,6 @@ def _real_settings(tmp_chroma: pathlib.Path) -> Settings:
         chroma_path=str(tmp_chroma),
         project_root="/workspaces/ripgrep",
         doc_glob_patterns="**/*.md",
-        chroma_model_cache="/home/vscode/.cache/chroma",
     )
 
 

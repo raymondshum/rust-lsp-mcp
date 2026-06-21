@@ -29,6 +29,11 @@ class Settings(BaseSettings):
         # Allow construction by field name (e.g. Settings(project_root=...)) in
         # addition to the env aliases — tests and callers rely on this.
         populate_by_name=True,
+        # Ignore unknown RLM_* keys instead of erroring. Without this, a stale
+        # .env entry for a since-removed setting (e.g. the old
+        # RLM_CHROMA_MODEL_CACHE) would raise extra_forbidden at startup —
+        # removing a knob must not break an existing .env.
+        extra="ignore",
     )
 
     # -----------------------------------------------------------------------
@@ -74,12 +79,6 @@ class Settings(BaseSettings):
 
     # ChromaDB PersistentClient storage path (bind mount).
     chroma_path: str = "/workspaces/chroma"
-
-    # ONNX embedding-model cache bind-mount target (informational only).
-    # ChromaDB hardcodes the model path to Path.home()/.cache/chroma and does NOT
-    # read this value.  This field documents the bind-mount target so the path is
-    # visible here for devcontainer / docker-compose configuration reference.
-    chroma_model_cache: str = "/home/vscode/.cache/chroma"
 
     # ChromaDB collection name for the doc-RAG store.  Repo-agnostic default;
     # override per project if hosting multiple stores on one chroma_path.

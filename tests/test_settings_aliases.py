@@ -9,6 +9,7 @@ Covers:
 Run in CI (pytest -m "not integration"); no external services.
 """
 
+import pathlib
 import warnings
 
 import pytest
@@ -50,3 +51,16 @@ def test_doc_collection_default_and_override() -> None:
     s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
     assert s.doc_collection == "project_docs"
     assert Settings(doc_collection="custom", _env_file=None).doc_collection == "custom"  # ty: ignore[unknown-argument]
+
+
+def test_stale_dotenv_key_is_ignored(tmp_path: pathlib.Path) -> None:
+    """A removed setting left in a .env file must not crash startup (extra=ignore).
+
+    Regression: removing RLM_CHROMA_MODEL_CACHE made an existing .env containing it
+    raise extra_forbidden. extra="ignore" must let the rest of the config load.
+    """
+    env = tmp_path / ".env"
+    env.write_text("RLM_PROJECT_ROOT=/tmp/x\nRLM_CHROMA_MODEL_CACHE=/old/no/longer/a/setting\n")
+    s = Settings(_env_file=str(env))  # ty: ignore[unknown-argument]
+    assert s.project_root == "/tmp/x"
+    assert not hasattr(s, "chroma_model_cache")

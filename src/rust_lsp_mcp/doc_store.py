@@ -53,9 +53,8 @@ class DocStore:
         self._settings = settings
         self._ef = embedding_function
         # NOTE: ChromaDB hardcodes the ONNX model cache to Path.home()/.cache/chroma
-        # regardless of any setting.  settings.chroma_model_cache documents the
-        # bind-mount target but is NOT injected here — it is configured at the
-        # container level (see devcontainer.json / docker-compose bind mounts).
+        # regardless of any setting; persist that path at the container level (a
+        # devcontainer / docker-compose bind mount, or the image's /data volume).
         # anonymized_telemetry=False: this is a single-host stdio service — disable
         # ChromaDB's telemetry so it neither emits output nor makes a network call.
         self._client = chromadb.PersistentClient(
