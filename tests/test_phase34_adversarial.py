@@ -52,7 +52,7 @@ async def _with_warm_manager(settings, coro_fn):
     """Start the analyzer, wait for ready, then call coro_fn(manager)."""
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
-        repository_root=settings.ripgrep_src,
+        repository_root=settings.project_root,
     )
     await manager.start()
     try:

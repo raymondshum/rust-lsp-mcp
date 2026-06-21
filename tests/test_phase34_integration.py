@@ -67,7 +67,7 @@ async def _with_warm_manager(settings, coro_fn):
     """Start the analyzer, wait for ready, then call coro_fn(manager)."""
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
-        repository_root=settings.ripgrep_src,
+        repository_root=settings.project_root,
     )
     await manager.start()
     try:
@@ -156,7 +156,7 @@ async def _run_phase34_all(settings) -> dict[str, Any]:
     results: dict[str, Any] = {}
 
     async def _inner(manager: AnalyzerManager) -> dict[str, Any]:
-        repo_root = settings.ripgrep_src
+        repo_root = settings.project_root
 
         # ------------------------------------------------------------------
         # 1. Discover: find_symbol("SearcherBuilder")
@@ -414,7 +414,7 @@ async def _run_not_ready_gate(settings) -> dict[str, Any]:
     """Assert gated tools return not_ready immediately after start() (before ready)."""
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
-        repository_root=settings.ripgrep_src,
+        repository_root=settings.project_root,
     )
     results: dict[str, Any] = {}
     await manager.start()

@@ -18,6 +18,7 @@ import pathlib
 
 import chromadb
 import pytest
+from chromadb.config import Settings as ChromaSettings
 
 from rust_lsp_mcp.doc_store import DocStore, clear_doc_store
 from rust_lsp_mcp.settings import Settings
@@ -35,7 +36,7 @@ def _real_settings(tmp_chroma: pathlib.Path) -> Settings:
     """
     return Settings(
         chroma_path=str(tmp_chroma),
-        ripgrep_src="/workspaces/ripgrep",
+        project_root="/workspaces/ripgrep",
         doc_glob_patterns="**/*.md",
         chroma_model_cache="/home/vscode/.cache/chroma",
     )
@@ -75,8 +76,11 @@ class TestPhase5Integration:
         store.rebuild()
 
         # Inspect the collection configuration via PersistentClient.
-        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-        col = client.get_collection("ripgrep_docs")
+        client = chromadb.PersistentClient(
+            path=str(tmp_path / "chroma"),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        col = client.get_collection("project_docs")
 
         # ChromaDB 1.5.x exposes configuration via col.configuration_json or
         # the collection metadata.  The most reliable check: query two identical
@@ -126,8 +130,11 @@ class TestPhase5Integration:
         count2 = store.rebuild()
 
         # The collection should have exactly count2 items (not doubled).
-        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-        col = client.get_collection("ripgrep_docs")
+        client = chromadb.PersistentClient(
+            path=str(tmp_path / "chroma"),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        col = client.get_collection("project_docs")
         assert col.count() == count2, (
             f"Wholesale rebuild should replace, not append: "
             f"col.count()={col.count()}, count2={count2}"

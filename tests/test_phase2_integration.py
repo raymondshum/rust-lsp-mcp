@@ -46,7 +46,7 @@ async def _with_warm_manager(settings, coro_fn):
     """Start the analyzer, wait for ready, then call coro_fn(manager)."""
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
-        repository_root=settings.ripgrep_src,
+        repository_root=settings.project_root,
     )
     await manager.start()
     try:
@@ -112,7 +112,7 @@ def test_find_symbol_searcher_builder(settings) -> None:
 
     # Check ALL struct candidates — at least one must have "SearcherBuilder" near
     # the returned line (proves the position round-trips into the source).
-    ripgrep_root = pathlib.Path(settings.ripgrep_src)
+    ripgrep_root = pathlib.Path(settings.project_root)
     found_match = False
     for r in struct_candidates:
         assert r["line"] >= 1, "line must be 1-indexed"
@@ -165,7 +165,7 @@ def test_find_symbol_searcher_position_in_file(settings) -> None:
     assert struct_candidates, f"No Struct Searcher candidate in {result['results']!r}"
 
     r = struct_candidates[0]
-    ripgrep_root = pathlib.Path(settings.ripgrep_src)
+    ripgrep_root = pathlib.Path(settings.project_root)
     src_file = ripgrep_root / r["file"]
     lines = src_file.read_text(encoding="utf-8").splitlines()
     line_idx = r["line"] - 1

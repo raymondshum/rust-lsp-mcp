@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 import chromadb
 import numpy as np
+from chromadb.config import Settings as ChromaSettings
 
 from rust_lsp_mcp.doc_store import (
     DocStore,
@@ -89,7 +90,7 @@ def _make_settings(tmp_path: pathlib.Path, corpus_dir: pathlib.Path) -> Settings
     """Return a Settings instance pointing at tmp paths (no real bind mounts)."""
     return Settings(
         chroma_path=str(tmp_path / "chroma"),
-        ripgrep_src=str(corpus_dir),
+        project_root=str(corpus_dir),
         doc_glob_patterns="**/*.md",
         chroma_model_cache=str(tmp_path / "model_cache"),
     )
@@ -373,9 +374,14 @@ class TestSingletonLifecycle:
         # Simulate an interrupted build: create collection and add rows, but
         # deliberately skip collection.modify(metadata={"build_complete": True}).
         fake_ef = FakeEmbeddingFunction()
-        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        # Match DocStore's client settings (telemetry off) — ChromaDB caches one
+        # system per path and requires subsequent clients to use identical settings.
+        client = chromadb.PersistentClient(
+            path=str(tmp_path / "chroma"),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
         partial_col = client.create_collection(
-            "ripgrep_docs",
+            settings.doc_collection,
             embedding_function=fake_ef,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             configuration={"hnsw": {"space": "cosine"}},
         )
@@ -429,7 +435,7 @@ class TestDocStoreExcludePatterns:
 
         settings = Settings(
             chroma_path=str(tmp_path / "chroma"),
-            ripgrep_src=str(corpus),
+            project_root=str(corpus),
             doc_glob_patterns="**/*.md",
             doc_exclude_patterns="**/CHANGELOG.md",
             chroma_model_cache=str(tmp_path / "model_cache"),
@@ -466,7 +472,7 @@ class TestDocStoreExcludePatterns:
 
         settings = Settings(
             chroma_path=str(tmp_path / "chroma"),
-            ripgrep_src=str(corpus),
+            project_root=str(corpus),
             doc_glob_patterns="**/*.md",
             doc_exclude_patterns="",  # No exclusions.
             chroma_model_cache=str(tmp_path / "model_cache"),
@@ -502,7 +508,7 @@ def _init_with_fake_ef(settings: Settings, tmp_path: pathlib.Path) -> DocStore:
         # Pass embedding_function so the adopted collection uses FakeEF, not
         # DefaultEF — without this the adopt path would silently trigger a real
         # model download, breaking offline test isolation.
-        existing = store._client.get_collection("ripgrep_docs", embedding_function=fake_ef)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        existing = store._client.get_collection(settings.doc_collection, embedding_function=fake_ef)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
         meta = existing.metadata or {}
         if existing.count() > 0 and meta.get("build_complete"):
             store._collection = existing

@@ -25,6 +25,7 @@ from typing import Any, cast
 
 import chromadb
 from chromadb.api.types import Metadatas
+from chromadb.config import Settings as ChromaSettings
 from chromadb.errors import NotFoundError
 
 from rust_lsp_mcp.doc_chunking import chunk_markdown
@@ -32,7 +33,6 @@ from rust_lsp_mcp.settings import Settings
 
 _log = logging.getLogger(__name__)
 
-_COLLECTION_NAME = "ripgrep_docs"
 _ADD_BATCH_SIZE = 500
 
 
@@ -40,8 +40,8 @@ class DocStore:
     """ChromaDB-backed documentation search store.
 
     Args:
-        settings: Runtime settings (``chroma_path``, ``ripgrep_src``,
-            ``doc_glob_patterns`` are the relevant fields).
+        settings: Runtime settings (``chroma_path``, ``project_root``,
+            ``doc_collection``, ``doc_glob_patterns`` are the relevant fields).
         embedding_function: Optional ChromaDB embedding function.  ``None``
             means use ChromaDB's bundled ``DefaultEmbeddingFunction``
             (all-MiniLM-L6-v2, ONNX, downloaded once to the model-cache mount).
@@ -56,7 +56,12 @@ class DocStore:
         # regardless of any setting.  settings.chroma_model_cache documents the
         # bind-mount target but is NOT injected here — it is configured at the
         # container level (see devcontainer.json / docker-compose bind mounts).
-        self._client = chromadb.PersistentClient(path=settings.chroma_path)
+        # anonymized_telemetry=False: this is a single-host stdio service — disable
+        # ChromaDB's telemetry so it neither emits output nor makes a network call.
+        self._client = chromadb.PersistentClient(
+            path=settings.chroma_path,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
         self._collection: Any = None
         self._ready: bool = False
 
@@ -77,10 +82,12 @@ class DocStore:
         self._ready = False
         self._collection = None
 
+        collection_name = self._settings.doc_collection
+
         # Drop existing collection if present.
         try:
-            self._client.delete_collection(_COLLECTION_NAME)
-            _log.debug("doc_store: deleted existing collection %r", _COLLECTION_NAME)
+            self._client.delete_collection(collection_name)
+            _log.debug("doc_store: deleted existing collection %r", collection_name)
         except NotFoundError:
             # Expected on first build.
             pass
@@ -96,11 +103,11 @@ class DocStore:
         }
         if self._ef is not None:
             create_kwargs["embedding_function"] = self._ef
-        collection = self._client.create_collection(_COLLECTION_NAME, **create_kwargs)
+        collection = self._client.create_collection(collection_name, **create_kwargs)
         self._collection = collection
 
         # Glob markdown files.
-        src_root = pathlib.Path(self._settings.ripgrep_src)
+        src_root = pathlib.Path(self._settings.project_root)
         patterns = [p.strip() for p in self._settings.doc_glob_patterns.split(",") if p.strip()]
 
         all_files: list[pathlib.Path] = []
@@ -263,7 +270,7 @@ def init_doc_store(settings: Settings) -> DocStore:
     # → fall through to a full rebuild so callers never get misleading partial results.
     adopted = False
     try:
-        existing = store._client.get_collection(_COLLECTION_NAME)
+        existing = store._client.get_collection(settings.doc_collection)
         meta = existing.metadata or {}
         if existing.count() > 0 and meta.get("build_complete"):
             _log.info(
