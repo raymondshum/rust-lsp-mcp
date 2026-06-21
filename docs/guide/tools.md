@@ -24,7 +24,9 @@ Every tool returns an object with a `status` field. The four possible values are
 | `error` | Bad input or an internal failure. Always includes a `message` field. |
 
 **Positions are 1-based.** The first character of a file is line 1, character 1.
-File paths are relative to the project root (e.g. `"src/main.rs"`).
+A `character` offset counts **Unicode codepoints** (the intuitive "Nth
+character"), so positions stay correct on lines containing non-ASCII text. File
+paths are relative to the project root (e.g. `"src/main.rs"`).
 
 ---
 

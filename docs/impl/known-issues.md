@@ -73,32 +73,27 @@ Check this list at these lifecycle checkpoints (see
   bind-mount target, rename it to signal "informational," or remove it and
   document the path elsewhere.
 
-### KI-5 — UTF-16 character offsets unhandled for non-ASCII target repos
-- **Where:** [src/rust_lsp_mcp/positions.py](../../src/rust_lsp_mcp/positions.py) ~line 20.
-- **What:** LSP positions are UTF-16 code-unit offsets, but the conversion treats
-  them as plain character offsets. This was explicitly deferred *because ripgrep's
-  source is all-ASCII* (where the two coincide). The
-  [repo-agnostic plan](../planning/repo-agnostic-and-docker-launch.md) makes any
-  Rust project a valid target.
-- **Why it matters:** Once the project points at a repo with non-ASCII source
-  (Unicode identifiers, CJK/emoji in strings or comments), `goto_definition`,
-  `find_references`, `hover`, and `find_symbol` return **wrong** `character`
-  values on astral-plane lines. A deferred edge becomes a real correctness bug
-  under repo-agnosticism.
-- **Status:** decided (2026-06-21) — fix = **negotiate `positionEncoding`
-  `["utf-32","utf-16"]`** so rust-analyzer emits/accepts Unicode-codepoint
-  offsets (Approach A). The verification spike proved rust-analyzer supports
-  utf-8 AND utf-32 (see [lsp-position-encoding.md](../reference/lsp-position-encoding.md)),
-  so no per-line transcoding is needed and `positions.py` stays pure ±1.
-  Failing regression test in place: [tests/test_ki5_position_encoding.py](../../tests/test_ki5_position_encoding.py)
-  (`xfail(strict)` — flips to pass when the fix lands). Implementation: override
-  multilspy's rust-analyzer init params (the `PatchedRustAnalyzer` already hooks
-  the binary; the init params need a similar override), then drop the
-  `positions.py` UTF-16 caveat comment.
-
 ---
 
 ## Resolved
+
+### KI-5 — UTF-16 character offsets unhandled for non-ASCII target repos
+- **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`PatchedRustAnalyzer._get_initialize_params`).
+- **What:** LSP positions default to UTF-16 code units, and multilspy advertised
+  only `["utf-16"]`, so on non-ASCII (astral) lines `find_symbol`,
+  `goto_definition`, `find_references`, and `hover` returned `character` values
+  off by the surrogate count — a real correctness bug once the project became
+  repo-agnostic (ripgrep's all-ASCII source had hidden it).
+- **Resolved:** 2026-06-21 (Approach A). `PatchedRustAnalyzer` now advertises
+  `positionEncodings: ["utf-32","utf-16"]`, so rust-analyzer reports **Unicode
+  codepoint** offsets (verified supported — [lsp-position-encoding.md](../reference/lsp-position-encoding.md)).
+  No transcoding; `positions.py` stays pure ±1. Guarded by
+  [tests/test_ki5_position_encoding.py](../../tests/test_ki5_position_encoding.py)
+  (unit: the negotiated list; integration: output + input side codepoint-correct
+  on an astral-emoji fixture). Adversarial review: `no-breaks`.
+
+### KI-6 — ripgrep-specific claim in the `status` tool docstring
 
 ### KI-6 — ripgrep-specific claim in the `status` tool docstring
 - **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py) ~line 42.

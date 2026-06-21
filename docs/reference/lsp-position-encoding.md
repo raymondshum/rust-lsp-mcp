@@ -39,16 +39,19 @@ handles utf-8/utf-16/utf-32 offsets (Context7, rust-lang/rust-analyzer).
   `positionEncodings: ["utf-16"]` (`.venv/.../multilspy/language_servers/rust_analyzer/initialize_params.json`),
   so rust-analyzer emits/expects **UTF-16** offsets. On non-ASCII (astral) lines
   the `character` offset is off by the surrogate count — this is [KI-5](../impl/known-issues.md).
-- **Chosen fix (Approach A):** negotiate `positionEncodings: ["utf-32","utf-16"]`.
-  rust-analyzer then reports `utf-32`, so every range it emits/accepts is a
-  **Unicode codepoint** offset — exactly the intuitive "Nth character." No
-  per-line transcoding is needed; `positions.py` stays pure ±1 arithmetic.
-  (Approach B — keep utf-16 and transcode via the line text — was the fallback if
-  utf-32 were unsupported; the probe shows it isn't needed.)
-- **To confirm at implement time:** that the encoding is patched into multilspy's
-  init params (the existing `PatchedRustAnalyzer` hooks the binary; the init
-  params need a similar override), that rust-analyzer negotiates `utf-32` in the
-  real multilspy path (read back `capabilities.positionEncoding`), and that
-  multilspy itself does no internal UTF-16 position math. The regression test
-  [tests/test_ki5_position_encoding.py](../../tests/test_ki5_position_encoding.py)
-  (xfail → pass) proves the end-to-end result.
+- **Implemented (Approach A):** `PatchedRustAnalyzer._get_initialize_params`
+  advertises `positionEncodings: ["utf-32","utf-16"]`, so rust-analyzer reports
+  `utf-32` — every range it emits/accepts is a **Unicode codepoint** offset, the
+  intuitive "Nth character." No per-line transcoding; `positions.py` stays pure
+  ±1. (Approach B — keep utf-16 and transcode via the line text — was the
+  fallback if utf-32 were unsupported; the probe showed it isn't needed.)
+  `utf-16` stays second purely as a protocol-level fallback for a server lacking
+  utf-32 (it would silently revert to the old behaviour, never error).
+- **Confirmed end-to-end** by [tests/test_ki5_position_encoding.py](../../tests/test_ki5_position_encoding.py):
+  the negotiated list is exactly `["utf-32","utf-16"]`, and on an astral-emoji
+  fixture both output (`find_symbol`) and input (`goto_definition`,
+  `find_references`) positions are codepoint-correct. Adversarial review confirmed
+  multilspy does no internal UTF-16 position math (positions pass through). One
+  accepted residual: there is no runtime assertion that `utf-32` was negotiated —
+  a future rust-analyzer that dropped utf-32 would silently revert; the
+  integration tests are the guard.

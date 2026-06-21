@@ -9,3 +9,10 @@
 /* 😀 */ pub fn target_after_emoji() {}
 
 pub fn plain_ascii() {}
+
+/// Caller that references `target_after_emoji` on a non-ASCII line.
+/// The call site has an astral char before the identifier, so codepoint and
+/// UTF-16 column numbers differ by 1.  Used by the input-side attack tests.
+pub fn caller_with_astral_prefix() {
+    /* 😀 */ let _ = target_after_emoji();
+}
