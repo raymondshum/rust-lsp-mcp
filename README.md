@@ -158,3 +158,7 @@ This is a working prototype. It is read-only — it never modifies source code.
 The server is repo-agnostic: point it at any Rust project via a read-only bind
 mount (production image) or explore the dev container's bundled ripgrep sample
 out of the box.
+
+## License
+
+Released under the [MIT License](LICENSE).
