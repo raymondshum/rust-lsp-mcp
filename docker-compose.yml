@@ -1,0 +1,36 @@
+# Optional: the "warm-start" / `docker exec` launch path.
+#
+# The default, recommended launch is ephemeral `docker run -i --rm` per session
+# (see README "Connect it to an AI assistant"). That starts a fresh
+# rust-analyzer process each session — correct, but it re-indexes every time
+# (rust-analyzer's index is in-memory and rebuilt on each start; only the cargo
+# cache on the volume warms incremental `cargo check`).
+#
+# If that per-session warmup becomes annoying, keep ONE long-lived container up
+# with this compose file and have the MCP client `docker exec` into it, so the
+# rust-analyzer process stays hot between sessions:
+#
+#   RUST_PROJECT=/abs/path/to/your/rust/project docker compose up -d
+#
+# Then point the MCP client at:
+#   "command": "docker",
+#   "args": ["exec", "-i", "rust-lsp-mcp", "/app/.venv/bin/rust-lsp-mcp"]
+
+services:
+  rust-lsp-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rust-lsp-mcp
+    container_name: rust-lsp-mcp
+    # Keep the container alive; the server is launched per session via
+    # `docker exec`. This overrides the image ENTRYPOINT (which is the server).
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      # The target Rust project, read-only. Set RUST_PROJECT to its host path.
+      - "${RUST_PROJECT:?set RUST_PROJECT to your Rust project's absolute path}:/project:ro"
+      # Persistent caches (chroma store, cargo target + registry, embedding model).
+      - rlm-data:/data
+
+volumes:
+  rlm-data:

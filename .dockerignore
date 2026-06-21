@@ -1,0 +1,21 @@
+# Keep the build context small + reproducible. The image installs its own
+# toolchain and runs uv sync; none of the below belong in the image.
+
+.git
+.github
+.venv
+.devcontainer/cache
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.pyc
+.env
+dist
+build
+*.egg-info
+
+# Docs / tests / editor config are not needed at runtime.
+docs
+tests
+.vscode
+.claude
