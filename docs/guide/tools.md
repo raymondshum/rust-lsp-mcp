@@ -338,7 +338,7 @@ Each item in `results`:
     {
       "file":       "docs/guide/configuration.md",
       "breadcrumb": "configuration.md > Server settings",
-      "text":       "Set RIPGREP_SRC to the absolute path of the ripgrep source tree...",
+      "text":       "Set RLM_PROJECT_ROOT to the absolute path of the Rust project to navigate...",
       "distance":   0.21
     }
   ]

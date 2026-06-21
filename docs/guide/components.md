@@ -236,12 +236,15 @@ add a line to a `.env` file in the working directory. The server loads the
 
 The key settings are:
 
-- `RLM_RIPGREP_SRC` — path to the Rust workspace to analyze (default:
-  `/workspaces/ripgrep`)
+- `RLM_PROJECT_ROOT` — path to the Rust workspace to analyze (default:
+  `/workspaces/ripgrep`). The older name `RLM_RIPGREP_SRC` still works as a
+  deprecated alias (it emits a warning).
 - `RLM_RUST_ANALYZER_BIN` — path to the rust-analyzer binary (default:
   `/usr/local/cargo/bin/rust-analyzer`)
 - `RLM_CHROMA_PATH` — path for the ChromaDB persistent storage (default:
   `/workspaces/chroma`)
+- `RLM_DOC_COLLECTION` — name of the ChromaDB collection holding the doc index
+  (default: `project_docs`)
 - `RLM_DOC_GLOB_PATTERNS` — comma-separated globs selecting Markdown files to
   index (default: `**/*.md`)
 - `RLM_DOC_EXCLUDE_PATTERNS` — comma-separated globs to exclude from the index

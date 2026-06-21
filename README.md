@@ -36,6 +36,14 @@ A full per-tool reference is in the [Tools / API reference](docs/guide/tools.md)
 
 ## Quick start
 
+> **Just want to wire the server into an AI assistant?** Skip to
+> [Connect it to an AI assistant](#connect-it-to-an-ai-assistant) — that path
+> uses a pre-built Docker image and does not require VS Code or the dev
+> container.
+
+This path is for **contributors and developers** who want to work on the server
+itself inside a fully configured environment.
+
 **Prerequisites:** [Docker](https://www.docker.com/get-started/),
 [VS Code](https://code.visualstudio.com/), and the
 [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers).
@@ -49,10 +57,11 @@ A full per-tool reference is in the [Tools / API reference](docs/guide/tools.md)
 
 2. Open the cloned folder in VS Code and choose **"Reopen in Container"** when
    prompted (or run it from the command palette). The dev container — a
-   preconfigured environment built with Docker — builds automatically. During
-   that build it clones a sample Rust project, **ripgrep** version 14.1.1 (a
-   popular command-line search tool), and installs all Python dependencies using
-   the `uv` package manager. This is the project the server navigates by default.
+   preconfigured environment built with Docker — builds automatically. After
+   the container is created, a setup script clones **ripgrep** version 14.1.1
+   (a popular command-line search tool) as a sample Rust project — so you have
+   something to explore out of the box — and installs all Python dependencies
+   using the `uv` package manager.
 
 3. Once inside the container, start the server:
    ```
@@ -112,6 +121,10 @@ What the pieces do:
   project you want to explore**, read-only, at the path the server expects
   (`/project`). Replace the left side with your project's absolute path. The
   server is repo-agnostic — point it at any Rust project.
+  - **SELinux (rootless Podman):** if your host enforces SELinux with rootless
+    Podman, add a relabel suffix so the container can read the mount:
+    `-v /absolute/path/to/your/rust/project:/project:ro,Z`. Plain `:ro` is
+    correct for a standard Docker daemon.
 - `-v rust-lsp-mcp-data:/data` — a **named volume** for the documentation index,
   Rust build cache, and the embedding model, so they are downloaded/built once
   and reused across sessions ("download once").
@@ -141,5 +154,6 @@ sessions, keep one container running and use `docker exec` instead — see
 ## Status / scope
 
 This is a working prototype. It is read-only — it never modifies source code.
-It currently targets the bundled ripgrep sample project that the dev container
-clones automatically.
+The server is repo-agnostic: point it at any Rust project via a read-only bind
+mount (production image) or explore the dev container's bundled ripgrep sample
+out of the box.

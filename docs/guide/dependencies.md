@@ -51,11 +51,13 @@ These packages are used during development only; they are not required to run th
 
 ## External dependencies (not Python packages)
 
-These are programs the server relies on at runtime. They are not installed by `pip`; the development container provides them.
+These are programs the server relies on at runtime. They are not installed by `pip`. Both supported environments provide them: the development container (via its Rust dev-container feature) and the production Docker image (which bakes the full Rust toolchain in via `rustup` — see the [`Dockerfile`](../../Dockerfile)). You do not install them on your host.
 
-**rust-analyzer** is the code-intelligence engine for Rust. It reads and understands Rust source code so the server can answer questions like "where is this symbol defined" and "what are all the references to it." It is provided by the development container's Rust toolchain and the server runs it directly as a subprocess.
+**rust-analyzer** is the code-intelligence engine for Rust. It reads and understands Rust source code so the server can answer questions like "where is this symbol defined" and "what are all the references to it." It is supplied by the Rust toolchain (rustup + cargo + rustc + rust-src) in either environment, and the server runs it directly as a subprocess.
 
-**ripgrep (version 14.1.1 source)** is the sample Rust project the server navigates. Its source code is what the LSP tools explore, and its Markdown files are what the documentation-search tool indexes. The repository is cloned into the container automatically on setup and treated as read-only — it is not a dependency of the server's own code, but the server is configured to point at it by default.
+**The target Rust project** is whatever you point the server at — it is repo-agnostic. Its source code is what the LSP tools explore, and its Markdown files are what the documentation-search tool indexes; it is treated as read-only and is not a dependency of the server's own code. You supply it via `RLM_PROJECT_ROOT` (a read-only bind mount at `/project` in the production image). **ripgrep (version 14.1.1 source)** is just the convenience sample the development container clones on setup so there is something to explore out of the box; the production image bakes no project.
+
+**Docker** is the one host-side requirement for the production launch path: a host MCP client runs the server as `docker run -i` over stdio, so nothing but Docker needs to exist on the host. (Contributors using the dev container additionally need VS Code and the Dev Containers extension — see [Development setup](development.md).)
 
 ---
 
