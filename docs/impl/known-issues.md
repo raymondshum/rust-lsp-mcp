@@ -87,19 +87,16 @@ Check this list at these lifecycle checkpoints (see
 - **Status:** open. Surfaced by the 2026-06-21 repo-agnostic grill; track as a
   correctness gap to schedule (not a startup blocker).
 
-### KI-6 — ripgrep-specific claim in the `status` tool docstring
-- **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py) ~line 42.
-- **What:** The docstring states "For the pinned ripgrep clone (no active
-  development commits) this is effectively always ready and not stale." That
-  assumption is false for an actively-developed target project.
-- **Why it matters:** A tool docstring is part of the caller-facing contract;
-  it misdescribes staleness semantics for any non-ripgrep target.
-- **Status:** decided: fix in Phase 2 of the
-  [repo-agnostic plan](../planning/repo-agnostic-and-docker-launch.md) (drop the
-  ripgrep-specific sentence).
-
 ---
 
 ## Resolved
 
-_(none yet — move closed entries here with the date and the fixing PR.)_
+### KI-6 — ripgrep-specific claim in the `status` tool docstring
+- **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py) ~line 42.
+- **What:** The docstring stated "For the pinned ripgrep clone (no active
+  development commits) this is effectively always ready and not stale" — false
+  for an actively-developed target project.
+- **Resolved:** 2026-06-21 in PR #12 (Phase 2 of the
+  [repo-agnostic plan](../planning/repo-agnostic-and-docker-launch.md)). The
+  ripgrep-specific sentence was replaced with a repo-agnostic description of the
+  staleness semantics.
