@@ -180,6 +180,21 @@ Integration tests run against the real rust-analyzer, the real project root (the
 uv run pytest -m integration
 ```
 
+**When to run it.** CI only runs the fast tier, so the integration gate is *your*
+responsibility before merging. Run it locally for any change that touches the
+LSP / position / doc-store / settings surface — in practice when you edit any of:
+
+- `src/rust_lsp_mcp/analyzer.py` (rust-analyzer lifecycle, LSP delegates, the
+  initialize params / position-encoding negotiation),
+- `src/rust_lsp_mcp/positions.py` (the 1↔0-index / encoding boundary),
+- `src/rust_lsp_mcp/doc_store.py` or `doc_chunking.py` (the Chroma index and chunker),
+- `src/rust_lsp_mcp/settings.py` or the tool layer in `src/rust_lsp_mcp/tools/`.
+
+The fast tier uses a faked analyzer and an in-memory store, so it cannot catch a
+regression in how the *live* analyzer or the *real* embedding model behaves —
+only this gate can. It takes roughly ten minutes (several cold rust-analyzer
+starts plus the embedding model).
+
 > **Note:** The VS Code Test panel (the beaker icon in the sidebar) is configured to run the fast tests only by default. The integration tests are never triggered accidentally from there.
 
 ---
