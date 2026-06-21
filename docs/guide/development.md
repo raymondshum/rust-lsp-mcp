@@ -54,11 +54,13 @@ Certain folders are stored *outside* the container, under `.devcontainer/cache/`
 
 | Host folder (under `.devcontainer/cache/`) | Mounted path inside container | Purpose |
 |---|---|---|
-| `ripgrep-src/` | `/workspaces/ripgrep` | The pinned ripgrep source tree that the server navigates |
-| `cargo-target/` | `/workspaces/cargo-target` | Rust build output (compiled ripgrep), reused between runs |
+| `ripgrep-src/` | `/workspaces/ripgrep` | The pinned ripgrep sample project (dev container only) |
+| `cargo-target/` | `/workspaces/cargo-target` | Rust build output, reused between runs |
 | `cargo-home/` | `/workspaces/cargo-home` | Downloaded Rust crates (the package registry cache) |
 | `chroma-model-cache/` | `~/.cache/chroma` | The ~80 MB ONNX embedding model, downloaded once |
 | `chroma/` | `/workspaces/chroma` | The documentation-search vector database |
+
+> **Production image:** the same categories of persistent data live on a single named Docker volume mounted at `/data`, rather than these `.devcontainer/cache/` bind mounts. You choose the volume name in the `docker run` command (the examples below use `rust-lsp-mcp-data`); the `docker-compose.yml` warm-start path uses its own volume (`rlm-data`), so the two launch methods keep separate caches.
 
 ### Automatic first-time setup
 
@@ -115,13 +117,46 @@ After teardown, run `setup.sh` again to restore the environment.
 
 ## Running the server
 
+There are two ways to run the server, depending on your goal.
+
+### Inside the dev container (contributor / dev path)
+
 ```bash
 uv run rust-lsp-mcp
 ```
 
 This is equivalent to `python -m rust_lsp_mcp`. The server communicates over standard input/output (stdio) and is normally launched by an MCP client rather than run directly. See the [README quick start](../../README.md) for how to wire it into a client, and the [Tools reference](tools.md) for the full list of available tools.
 
-On the first run, the server indexes the ripgrep source tree and downloads the documentation-search model if it is not already cached. While that is happening, the `status` tool will report that the server is not yet ready. Call `status` again once indexing is complete.
+On the first run, the server indexes the configured project root (in the dev container this is the ripgrep sample at `/workspaces/ripgrep`) and downloads the documentation-search model if it is not already cached. While that is happening, the `status` tool will report that the server is not yet ready. Call `status` again once indexing is complete.
+
+### Running the production image (host MCP client, no host install)
+
+If you want to point an MCP client on your host machine at any Rust project — without installing Rust, Python, or rust-analyzer on the host — build and run the production image defined in [`../../Dockerfile`](../../Dockerfile).
+
+**Build once:**
+
+```bash
+docker build -t rust-lsp-mcp .
+```
+
+**Run per session:**
+
+```bash
+docker run -i --rm \
+  -v /abs/path/to/your/rust/project:/project:ro \
+  -v rust-lsp-mcp-data:/data \
+  rust-lsp-mcp
+```
+
+- `-v /abs/path/to/your/rust/project:/project:ro` — bind-mounts your Rust project read-only at `/project`. The server navigates whatever project you mount here; it is not tied to ripgrep or any other specific codebase.
+- `-v rust-lsp-mcp-data:/data` — a named volume that persists the Chroma vector store, cargo registry, and build cache across `--rm` runs.
+- `-i` — keeps stdin open so the MCP client can communicate over stdio.
+
+> **SELinux note:** Under SELinux-enforcing rootless Podman, append `,Z` to the bind mount: `-v /abs/path/to/your/project:/project:ro,Z`. Plain `:ro` is correct for a standard Docker daemon.
+
+The env-var defaults baked into the image (`RLM_PROJECT_ROOT=/project`, `RLM_CHROMA_PATH=/data/chroma`, `RLM_DOC_COLLECTION=project_docs`, and the cargo-cache paths) work out of the box for this invocation. See [Configuration](configuration.md) to override them.
+
+**Warm-start path (optional):** If the per-session rust-analyzer re-indexing is too slow, [`../../docker-compose.yml`](../../docker-compose.yml) keeps one long-lived container running so rust-analyzer stays hot between sessions. Start it with `RUST_PROJECT=/abs/path docker compose up -d`, then point the MCP client at `docker exec -i rust-lsp-mcp /app/.venv/bin/rust-lsp-mcp`. See the README ["Connect it to an AI assistant"](../../README.md#connect-it-to-an-ai-assistant) section for the full client config.
 
 ---
 
@@ -139,7 +174,7 @@ uv run pytest -m "not integration"
 
 ### Integration tests
 
-Integration tests run against the real rust-analyzer, the real ripgrep source tree, and the real documentation database. They are slower and are run on demand as a local quality gate. They are deliberately excluded from the automated cloud checks to stay within the free GitHub Actions usage quota.
+Integration tests run against the real rust-analyzer, the real project root (the ripgrep sample in the dev container), and the real documentation database. They are slower and are run on demand as a local quality gate. They are deliberately excluded from the automated cloud checks to stay within the free GitHub Actions usage quota.
 
 ```bash
 uv run pytest -m integration
