@@ -46,7 +46,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path --profile minimal \
             --default-toolchain stable \
-            --component rust-analyzer rust-src \
+            --component rust-analyzer,rust-src \
     && rustup --version \
     && rust-analyzer --version
 
