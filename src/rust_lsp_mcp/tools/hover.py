@@ -91,9 +91,9 @@ async def hover(file: str, line: int, character: int) -> dict[str, Any]:
     Nothing to hover → ``not_found``; rust-analyzer returns the info as
     markdown → ``ok`` + ``contents``.
 
-    UNVERIFIED: exact shape of ``contents`` rust-analyzer emits at runtime
-    (MarkupContent vs. MarkedString vs. list) — the helper covers all
-    documented shapes but live behavior depends on the rust-analyzer version.
+    rust-analyzer emits ``contents`` as ``MarkupContent`` (confirmed live in the
+    Phase 3+4 integration gate). The helper still defensively normalizes the other
+    documented shapes (``MarkedString`` / list) in case a future version differs.
     """
     # 1. Input validation.
     if line < 1 or character < 1:
