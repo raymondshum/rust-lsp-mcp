@@ -29,6 +29,10 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
 | 4 — Prose rewrite + branding | 1,2,3 | no (single-track) | not-started |
 | 5 — Retire Claude scaffolding | 1,2,3,4 | no | not-started |
 
+## Durable per-phase briefs
+
+- Phase 1 — [bob-port-phase-1.md](bob-port-phase-1.md) (`AGENTS.md` spine)
+
 ## Dependency graph
 
 ```
@@ -41,3 +45,4 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
 
 - 2026-06-23 — Plan frozen after grill; tracker created. All phases `not-started`.
 - 2026-06-23 — Phase 0 verification pass `done`. 15 items confirmed vs live Bob docs; cached to `docs/reference/bob-harness-capabilities.md`. Corrections (U8/U10/U14) + runtime-only residue (U2/U6/U9) folded into plan; gate-zero `passed`. Phase 1 unblocked.
+- 2026-06-23 — Phase 1 durable brief authored (`bob-port-phase-1.md`); handed off for a fresh session. Phase 1 still `not-started`.
