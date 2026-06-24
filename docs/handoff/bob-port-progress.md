@@ -25,7 +25,7 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
 | 0 — Verification pass | — | no | done |
 | 1 — `AGENTS.md` spine | 0 | no | done (PR #28 merged; runtime Bob-IDE smoke deferred to end-of-port) |
 | 2 — Skills port | 0 | no | in-progress (built; automated QA green; runtime activation deferred) |
-| 3 — Modes + orchestration | 0,1,2 | no | designed (grill 2026-06-24; D1–D7 frozen) — ready to build |
+| 3 — Modes + orchestration | 0,1,2 | no | in-progress (built; automated QA green; 5 runtime smokes deferred; PR open for review) |
 | 4 — Prose rewrite + branding | 1,2,3 | no (single-track) | not-started |
 | 5 — Retire Claude scaffolding | 1,2,3,4 | no | not-started |
 
@@ -67,6 +67,18 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
   `docs/handoff/` (Orchestrator-None can't read — role modes do); model-per-role + no-parallelism
   named as gaps; adversarial runs in a **fresh Bob session** (U9 silent). 5 runtime-only items
   parked for the end-of-port Bob-IDE pass.
+- 2026-06-24 — Phase 3 (**Modes + orchestration**) built. Added `.bob/custom_modes.yaml`
+  (4 role modes — build/review/qa/adversarial — schema-valid, write/verify `groups`
+  separation) and `.bob/skills/continue-build/SKILL.md` (self-contained Orchestrator
+  playbook; activates on "continue the build"). Rewrote `docs/handoff/`
+  `roles.md`+`continue.md`+`adversarial-review.md` to Bob terms (sequential delegation;
+  fresh-session adversarial; named no-parallelism + no-model-pinning gaps) and refreshed
+  `index.md` (live Bob mechanism / port artifacts / historical Claude-era split).
+  Automated QA green: YAML + frontmatter schema valid; link-check clean; no stale
+  worktree/parallel *claims* (only honest gap descriptions); no cruft. 5 runtime smokes
+  (skill-in-Orchestrator, custom-mode delegation, subtask isolation, Orchestrator-None
+  read, `.bob/rules-orchestrator/`) deferred to the end-of-port Bob-IDE pass. PR open;
+  paused for review before merge.
 - 2026-06-24 — Phase 2 (**Skills port**) built. `mcp-builder` copied **byte-identical**
   to `.bob/skills/mcp-builder/` (SKILL.md + LICENSE.txt + `reference/` + `scripts/`;
   `.DS_Store` excluded, frontmatter unchanged). `grill-me` ported to
