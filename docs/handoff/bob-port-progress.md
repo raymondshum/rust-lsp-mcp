@@ -31,9 +31,10 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
 
 **Port status: code-complete (all 5 phases built).** The one outstanding gate is the
 **end-of-port Bob-IDE verification** — every phase's runtime-only smoke was deferred to
-a single live Bob run (it can't execute in the build environment). See the deferred
-inventory in [bob-port-phase-3.md](bob-port-phase-3.md) (5 mode/skill/subtask items) plus
-the spine/skill smokes (AGENTS.md `@`-import load; skill auto/by-request activation).
+a single live Bob run (it can't execute in the build environment). Run the ordered
+checklist in [bob-port-verification.md](bob-port-verification.md) (covers the spine/skill
+smokes + the 5 mode/skill/subtask unknowns from [bob-port-phase-3.md](bob-port-phase-3.md))
+and record results back here.
 
 ## Durable per-phase briefs
 
