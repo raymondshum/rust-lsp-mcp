@@ -23,6 +23,9 @@ pointers — detail lives in the plan and `docs/reference/`; these files only or
 - [bob-port-phase-1.md](bob-port-phase-1.md) — Phase 1 brief (`AGENTS.md` spine, done).
 - [bob-port-phase-3.md](bob-port-phase-3.md) — Phase 3 brief (modes + orchestration;
   design D1–D7).
+- [bob-port-verification.md](bob-port-verification.md) — **end-of-port Bob-IDE
+  verification checklist**: the one live run that confirms every deferred runtime
+  smoke (spine imports, skill activation, modes, the orchestration dry-run).
 
 ## Historical — the original rust-lsp-mcp runtime build (Claude-era)
 
