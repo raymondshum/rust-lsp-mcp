@@ -42,7 +42,23 @@ Check this list at these lifecycle checkpoints (see
 - **Status:** `decided: reconcile in Phase 4/5 of the Bob harness port`
   ([bob-harness-port.md](../planning/bob-harness-port.md)) — once the prose rewrite
   and Claude-scaffolding retirement settle the convention docs' single home. Until
-  then, edit both copies together.
+  then, edit both copies together. _(Phase 4 record step: carried — `U6` forces the
+  in-folder skill copy and the `AGENTS.md` core needs the canonical, so the two are
+  both load-bearing; revisit at Phase 5 when `CLAUDE.md` retires one referrer.)_
+
+### KI-8 — devcontainer still provisions the Claude Code IDE extension
+- **Where:** [.devcontainer/devcontainer.json](../../.devcontainer/devcontainer.json)
+  (+ the extension table in [development.md](../guide/development.md)).
+- **What:** The Bob harness port (Phases 1–5) re-tools the *agent-facing* scaffolding
+  (`AGENTS.md`, `.bob/skills/`, custom modes, docs) but does **not** touch the dev
+  container's installed VS Code extensions, which still include the Claude Code
+  extension. `development.md` documents that accurately, so it is **not stale** — but
+  it is a residue: an "IDE-first" Bob harness ought to provision the Bob extension.
+- **Why it matters:** the harness isn't fully Bob until the IDE the container opens is
+  Bob's; tooling and intent otherwise disagree.
+- **Status:** `open` — **out of the documented Phase 1–5 scope** (docs/skills/modes/mcp,
+  not `devcontainer.json`). Decide separately whether the port extends to dev-container
+  provisioning.
 
 ---
 

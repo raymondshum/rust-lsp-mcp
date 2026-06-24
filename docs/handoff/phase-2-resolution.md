@@ -1,5 +1,7 @@
 # Phase 2 — Name→position resolution (durable prompt)
 
+> _**Historical record (Claude Code era).** A durable prompt from the original rust-lsp-mcp runtime build under the Claude Code harness; preserved as-is. The project's harness is now IBM Bob — see [the harness port](../planning/bob-harness-port.md)._
+
 **Second-highest risk. Serial, analyzer-bound.** The sole name→symbol bridge.
 
 ## Read first

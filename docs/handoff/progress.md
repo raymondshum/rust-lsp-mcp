@@ -1,5 +1,7 @@
 # Build progress tracker
 
+> _**Historical record (Claude Code era).** Tracks the original rust-lsp-mcp runtime build under the Claude Code harness; preserved as-is. The project's harness is now IBM Bob — see [the harness port](../planning/bob-harness-port.md) and its [tracker](bob-port-progress.md)._
+
 **Single source of truth for "where are we."** The **orchestrator is the sole writer**;
 build/reviewer/QA/adversarial agents report results, the orchestrator records them here.
 Read by [continue.md](continue.md) to pick the next phase.

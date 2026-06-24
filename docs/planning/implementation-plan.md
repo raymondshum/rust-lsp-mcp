@@ -1,5 +1,7 @@
 # Rust LSP MCP — Implementation Plan
 
+> _**Historical record (Claude Code era).** The implementation plan for the original rust-lsp-mcp runtime build, drilled and built under the Claude Code harness; preserved as-is (still the source of truth for the service's settled architecture). The project's **harness** is now IBM Bob — see [the harness port](bob-harness-port.md)._
+
 **Status:** Phase 0 fully specified; core service (Phases 1–5) drilled and resolved
 (2026-06-19). **Plan-verification pass complete (2026-06-19):** every spec-level
 `UNVERIFIED` item has been confirmed against current first-party docs via Context7

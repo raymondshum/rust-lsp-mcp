@@ -1,5 +1,7 @@
 # Planning Handoff — Rust LSP MCP
 
+> _**Historical record (Claude Code era).** A planning handoff from the original rust-lsp-mcp runtime build under the Claude Code harness; preserved as-is. The project's harness is now IBM Bob — see [the harness port](bob-harness-port.md)._
+
 Read this to resume planning in a fresh conversation. It orients you, states what
 is decided, what is still open, and how to continue.
 

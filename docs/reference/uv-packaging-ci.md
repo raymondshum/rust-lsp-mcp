@@ -37,7 +37,7 @@ steps:
 ```
 - `enable-cache: true` caches the uv cache dir for faster runs.
 - `--frozen` asserts the lockfile is up to date (good CI hygiene).
-- Keep CI to lint + type + fast tests only (free-tier quota; CLAUDE.md constraint).
+- Keep CI to lint + type + fast tests only (free-tier quota; AGENTS.md constraint).
 
 ## To re-verify at build (UNVERIFIED specifics)
 - Confirm `setup-uv` is still v8.x at build (bump the pinned SHA/tag if newer).

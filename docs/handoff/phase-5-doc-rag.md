@@ -1,5 +1,7 @@
 # Phase 5 — Documentation RAG (durable prompt)
 
+> _**Historical record (Claude Code era).** A durable prompt from the original rust-lsp-mcp runtime build under the Claude Code harness; preserved as-is. The project's harness is now IBM Bob — see [the harness port](../planning/bob-harness-port.md)._
+
 **Off the LSP path** — depends only on Phase 0, so it may run **parallel to Phases 3+4**
 (but must not drive the analyzer at the same time; it doesn't need it).
 

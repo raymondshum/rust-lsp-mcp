@@ -150,7 +150,7 @@ sessions, keep one container running and use `docker exec` instead — see
 | [Development setup](docs/guide/development.md) | The dev container, running the server, and the tests. |
 | [Components](docs/guide/components.md) | A guided tour of the code, module by module. |
 | [Dependencies](docs/guide/dependencies.md) | The main libraries and tools and what each is for. |
-| [Agentic coding](docs/guide/agentic-coding.md) | How the project is built with Claude Code — the delivery lifecycle, build conventions, and Claude configuration. |
+| [Agentic coding](docs/guide/agentic-coding.md) | How the project is built with IBM Bob — the delivery lifecycle, build conventions, and Bob configuration. |
 
 ## Status / scope
 
