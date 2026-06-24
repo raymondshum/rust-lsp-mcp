@@ -1,7 +1,5 @@
 # Planning Handoff — Rust LSP MCP
 
-> _**Historical record (Claude Code era).** A planning handoff from the original rust-lsp-mcp runtime build under the Claude Code harness; preserved as-is. The project's harness is now IBM Bob — see [the harness port](bob-harness-port.md)._
-
 Read this to resume planning in a fresh conversation. It orients you, states what
 is decided, what is still open, and how to continue.
 
@@ -49,7 +47,7 @@ misleading empty answer while indexing. Build **risk-first**; doc search last.
 - **Context7 over training.** For any library/API detail (MCP Python SDK,
   multilspy, ChromaDB, rust-analyzer/LSP, uv, ruff, ty, pydantic-settings), query
   Context7 before trusting memory; cache findings in `docs/reference/` (version +
-  date stamped). See `CLAUDE.md` (the project instructions; now `AGENTS.md`). For MCP server construction,
+  date stamped). See [CLAUDE.md](../../CLAUDE.md). For MCP server construction,
   use the `mcp-builder` skill first.
 - **Verify the plan.** Before the plan is final, cross-check **every** command,
   version, flag, and config snippet against current docs via Context7. Items in

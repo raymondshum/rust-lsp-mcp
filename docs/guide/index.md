@@ -12,7 +12,7 @@ This is the documentation guide for the Rust code-navigation and documentation-s
 - [Development setup](development.md) — how to set up the development container, run the server, and run the two kinds of tests.
 - [Components](components.md) — a guided, module-by-module tour of the source code.
 - [Dependencies](dependencies.md) — the main libraries and external tools the project relies on, and why.
-- [Agentic coding](agentic-coding.md) — how this project is built with IBM Bob: the delivery lifecycle, the build conventions, and the Bob configuration.
+- [Agentic coding](agentic-coding.md) — how this project is built with Claude Code: the delivery lifecycle, the build conventions, and the Claude configuration.
 
 ## Where to start
 

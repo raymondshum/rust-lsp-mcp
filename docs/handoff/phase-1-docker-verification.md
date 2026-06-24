@@ -1,7 +1,5 @@
 # Phase 1 — production image verification (run on a Docker host)
 
-> _**Historical record (Claude Code era).** A verification checklist from the original rust-lsp-mcp runtime build under the Claude Code harness; preserved as-is. The project's harness is now IBM Bob — see [the harness port](../planning/bob-harness-port.md)._
-
 The [production image](../../Dockerfile) (PR #13) was authored in a build
 container that has **no Docker**, so its build + runtime gates could not run
 there. This is the deferred gate. Run it on any machine with Docker; it clears

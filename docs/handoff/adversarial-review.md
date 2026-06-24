@@ -4,17 +4,11 @@ An independent pass that tries to **break the contract**, run after QA on every 
 and as **gate-zero** over `docs/handoff/` before any building. It is the
 implementation-time analog of grill-me (design) and the verification pass (plan).
 
-Under the **Bob** harness this is the [`adversarial` mode](../../.bob/custom_modes.yaml)
-(`read, command`; no `edit`), and — because Bob subtask context isolation is
-**unverified** — it is launched in a **fresh Bob session (or `/clear`ed context)**, not
-an in-session subtask. Independence is the whole point, so cold context is the primary
-path, not a fallback.
-
 ## Mandate
 
-Given the phase's **invariants and definition of done** — not the build mode's
+Given the phase's **invariants and definition of done** — not the build agent's
 rationalizations — and a **fresh, cold context**, actively attempt to make the
-implementation violate its contract.
+implementation violate its contract. Independence is the point.
 
 The project's load-bearing invariant: **never a misleading empty answer while indexing.**
 Attack it directly, plus:
@@ -32,11 +26,11 @@ Attack it directly, plus:
 
 - **Concrete falsifiers only.** Every finding is a failing input / reproduction
   ("this call sequence returns `[]` mid-index"), never "have you considered X."
-- **Findings become tests.** Each confirmed break is handed back to the `build` mode
-  and added to the QA suite as a regression test, so the attack only has to land once.
+- **Findings become tests.** Each confirmed break is added to the QA suite as a
+  regression test, so the attack only has to land once.
 - **Scope = implementation vs contract, not architecture.** Do not reopen settled
   design decisions (same guardrail as grill-me).
-- **Bounded loop.** Findings bounce back to the `build` mode for rework; after **N=2**
+- **Bounded loop.** Findings bounce back to the build agent for rework; after **N=2**
   rework rounds without resolution, escalate to the human. No adversarial ping-pong.
 
 ## Placement
@@ -47,11 +41,10 @@ contract-check on Phase 0 config and trivial nav tools — but it always runs.
 
 ## Gate-zero over docs/handoff/
 
-Before the first build subtask launches, the `adversarial` mode (fresh session) reads
-the durable prompts, [continue.md](continue.md) (the kickoff) and the
-[`continue-build` skill](../../.bob/skills/continue-build/SKILL.md) (the dispatcher
-logic itself), [progress.md](progress.md)'s dependency graph, and [roles.md](roles.md),
-and hunts for places they would let a mode: skip a gate, exceed a phase's scope, write
-shared state (incl. `pyproject.toml`/lock) off the Orchestrator thread, or auto-advance
-past the boundary. Fix findings, set `progress.md` gate-zero `passed`, then stop for
-human review before building.
+Before the first build agent launches, an adversarial agent reads the durable prompts,
+[continue.md](continue.md) (the dispatcher logic itself), [progress.md](progress.md)'s
+dependency graph, and [roles.md](roles.md) and hunts for places they would let an agent:
+skip a gate, deadlock the Phase 0 seam, touch the live analyzer in parallel, write
+shared state (incl. `pyproject.toml`/lock) concurrently, exceed a phase's scope, or
+merge a real conflict on the lean thread. Fix findings, set `progress.md` gate-zero
+`passed`, then stop for human review before building.
