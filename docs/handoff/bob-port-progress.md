@@ -25,13 +25,14 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
 | 0 — Verification pass | — | no | done |
 | 1 — `AGENTS.md` spine | 0 | no | done (PR #28 merged; runtime Bob-IDE smoke deferred to end-of-port) |
 | 2 — Skills port | 0 | no | in-progress (built; automated QA green; runtime activation deferred) |
-| 3 — Modes + orchestration | 0,1,2 | no | not-started |
+| 3 — Modes + orchestration | 0,1,2 | no | in-progress (built; automated QA green; 5 runtime smokes deferred; PR open for review) |
 | 4 — Prose rewrite + branding | 1,2,3 | no (single-track) | not-started |
 | 5 — Retire Claude scaffolding | 1,2,3,4 | no | not-started |
 
 ## Durable per-phase briefs
 
 - Phase 1 — [bob-port-phase-1.md](bob-port-phase-1.md) (`AGENTS.md` spine)
+- Phase 3 — [bob-port-phase-3.md](bob-port-phase-3.md) (modes + orchestration; design D1–D7 frozen)
 
 ## Dependency graph
 
@@ -54,6 +55,30 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
   static adversarial checks.
 - 2026-06-24 — Phase 1 **merged** (PR #28 → `main`); `bob_prototype` fast-forwarded
   to the merge commit. State `done` (runtime smoke deferred per above).
+- 2026-06-24 — **Full Bob-fact re-verification** (triggered by a U5 overstatement found
+  mid-grill): all 16 items re-vetted via 4-way fan-out vs live `bob.ibm.com/docs`. Every
+  item CONFIRMED except **U5** (skills *are* deliberately invokable by request — corrected)
+  plus new **U16** (slash commands; custom modes → `/<slug>`). U9 re-confirmed fully SILENT
+  (no subtasks page). Corrections folded into the cache + plan Phase 0 outcomes.
+- 2026-06-24 — **Phase 3 designed via grill** (D1–D7 frozen) → durable brief
+  [bob-port-phase-3.md](bob-port-phase-3.md). Key calls: built-in Orchestrator + a
+  `continue-build` *skill* (no `/continue-build` mode — protects delegation); four role
+  modes (build/review/qa/adversarial) with write/verify `groups` separation; briefs stay in
+  `docs/handoff/` (Orchestrator-None can't read — role modes do); model-per-role + no-parallelism
+  named as gaps; adversarial runs in a **fresh Bob session** (U9 silent). 5 runtime-only items
+  parked for the end-of-port Bob-IDE pass.
+- 2026-06-24 — Phase 3 (**Modes + orchestration**) built. Added `.bob/custom_modes.yaml`
+  (4 role modes — build/review/qa/adversarial — schema-valid, write/verify `groups`
+  separation) and `.bob/skills/continue-build/SKILL.md` (self-contained Orchestrator
+  playbook; activates on "continue the build"). Rewrote `docs/handoff/`
+  `roles.md`+`continue.md`+`adversarial-review.md` to Bob terms (sequential delegation;
+  fresh-session adversarial; named no-parallelism + no-model-pinning gaps) and refreshed
+  `index.md` (live Bob mechanism / port artifacts / historical Claude-era split).
+  Automated QA green: YAML + frontmatter schema valid; link-check clean; no stale
+  worktree/parallel *claims* (only honest gap descriptions); no cruft. 5 runtime smokes
+  (skill-in-Orchestrator, custom-mode delegation, subtask isolation, Orchestrator-None
+  read, `.bob/rules-orchestrator/`) deferred to the end-of-port Bob-IDE pass. PR open;
+  paused for review before merge.
 - 2026-06-24 — Phase 2 (**Skills port**) built. `mcp-builder` copied **byte-identical**
   to `.bob/skills/mcp-builder/` (SKILL.md + LICENSE.txt + `reference/` + `scripts/`;
   `.DS_Store` excluded, frontmatter unchanged). `grill-me` ported to

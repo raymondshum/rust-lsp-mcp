@@ -5,6 +5,17 @@ incomplete — see [[bob-research-source]] / memory). Stamp: **IBM Bob docs as o
 2026-06-23**. Confirms the `UNVERIFIED` inventory in
 [bob-harness-port.md](../planning/bob-harness-port.md) Phase 0.
 
+> **Full re-verification — 2026-06-24.** Triggered by the U5 overstatement (found
+> during the Phase 3 grill), **all 16 items (U1–U16) were re-vetted against the live
+> docs** via a 4-way fan-out, reading adversarially with verbatim quotes. **Result:
+> every item CONFIRMED except U5** (corrected below) — including all the SILENT/
+> undocumented sub-claims. New hard data points from this pass: `…/shell/features/skills`
+> **404s** (skills are IDE-only, U8c); `…/ide/features/subtasks` **404s** and the docs
+> are **fully silent** on subtask isolation/result-return/parallelism (U9 — the
+> load-bearing residue for the orchestration design); auto-approve has exactly **11**
+> actions (U15); `skill` is a valid 6th `groups` value (U14). The inventory the plan
+> rests on is sound.
+
 Verdict legend: `VERIFIED` · `CORRECTION` (assumption was wrong) ·
 `UNVERIFIED — runtime-only` (docs silent; confirm by testing in Bob).
 
@@ -32,12 +43,18 @@ Verdict legend: `VERIFIED` · `CORRECTION` (assumption was wrong) ·
 
 ## Skills
 
-- **U5 — invocation · VERIFIED (consequential).** Activation is **model-decided
-  from the skill's `description`** ("Bob automatically determines when to activate a
-  skill"); **no documented explicit user trigger** (no `/skill` slash command, no
-  by-name invoke). User control is approve/deny only. **Impact: `grill-me` cannot be
-  deliberately invoked the way it is under Claude — it must be auto-activated by a
-  well-written `description`.** Src: `/docs/ide/features/skills`.
+- **U5 — invocation · VERIFIED, with a 2026-06-24 CORRECTION.** Activation is
+  model-decided, but **"based on your request and the skill's description"** (exact
+  quote, `/docs/ide/features/skills`). The earlier gloss — "user control is
+  approve/deny only; `grill-me` cannot be deliberately invoked" — **was an
+  overstatement.** Corrected reading: a user **deliberately invokes a skill by
+  phrasing a request that matches its `description`** (then clears the approval
+  prompt); the request *is* the control. What is genuinely absent is a
+  **`/skill-name` slash command** — skills do **not** appear in the slash menu (see
+  U16). **Impact: a well-written `description` serves both auto-activation *and*
+  deliberate by-request invocation** — so the Phase 2 `grill-me` retune stands, it
+  just isn't the *only* way in. Src: `/docs/ide/features/skills`,
+  `/docs/ide/features/slash-commands`. Stamp: live Bob docs 2026-06-24.
 - **U6 — out-of-folder file refs · UNVERIFIED — runtime-only.** Docs say Bob "gains
   access to any supporting files **in the skill directory**"; silent on referencing
   repo paths outside the skill folder. **Design rule: bundle a skill's material
@@ -57,12 +74,19 @@ Verdict legend: `VERIFIED` · `CORRECTION` (assumption was wrong) ·
 
 ## Modes & orchestration
 
-- **U9 — subtask context isolation / boomerang · UNVERIFIED — runtime-only.** Docs
-  state only: "Subtasks are separate task instances that Bob creates to break down
-  complex work." **No** documented fresh-context-per-subtask, **no** result/summary
-  passing to parent, **no** parallel-vs-sequential statement. **The adversarial
-  "cold-context" independence cannot be guaranteed from docs — confirm by test in
-  Phase 3.** Src: `/docs/ide/features/auto-approving-actions`, `/docs/ide/features/modes`.
+- **U9 — subtask context isolation / boomerang · UNVERIFIED — runtime-only
+  (re-confirmed SILENT 2026-06-24).** Docs state only: "Subtasks are separate task
+  instances that Bob creates to break down complex work into manageable pieces" and
+  "Bob can create and complete these subtasks automatically." There is **no dedicated
+  subtasks page** — `…/ide/features/subtasks` **404s** — and the docs are **fully
+  silent** on (a) fresh/cold context per subtask, (b) result/summary passing to the
+  parent, (c) parallel vs sequential. **Design consequence (Phase 3): do NOT assume
+  boomerang-style isolated subtasks with result-return.** The adversarial gate's
+  independence cannot rest on Bob subtask isolation — **plan to run the adversarial
+  pass in a fresh Bob session (or a `/clear`ed context) as the primary path**, not as
+  a fallback; if a runtime test later shows subtasks isolate + return results, relax
+  it. Src: `/docs/ide/features/auto-approving-actions`, `/docs/ide/features/modes`
+  (no `…/features/subtasks`).
 - **U10 — built-in modes & custom delegation · CORRECTION + VERIFIED.** Built-ins are
   **five**: 💻 Code (`read,edit,command`), ❓ Ask (`read,browser,mcp`), 📝 Plan
   (`read,edit`-markdown,`browser,mcp`), 🛠️ Advanced (all groups), 🔀 Orchestrator
@@ -119,3 +143,17 @@ Verdict legend: `VERIFIED` · `CORRECTION` (assumption was wrong) ·
   Skills); no documented `settings.json` key; storage location / committability not
   stated (UNVERIFIED — runtime-only; decision #7 treats it as per-user). Src:
   `/docs/ide/features/auto-approving-actions`.
+
+## Slash commands (added 2026-06-24)
+
+- **U16 — slash menu & mode invocation · VERIFIED.** Typing `/` opens a unified
+  menu. **Custom modes appear as slash commands by slug** — a mode with slug
+  `reviewer` is invokable as **`/reviewer`** (exact example from the docs); `/code`
+  and `/ask` switch mode/context. Built-in commands: **`/init`**, **`/review`**
+  (review uncommitted changes / compare branches / validate against a GitHub issue),
+  **`/create-pr`** (AI-generated PR description from the branch diff). **Skills are
+  *not* in the slash menu** — no `/skill-name` form (they activate by request +
+  description per U5). **Impact (Phase 3): a custom *mode* gives a deterministic
+  slash handle (`/<slug>`) that a *skill* does not — relevant to how the build-loop
+  dispatcher is invoked.** Src: `/docs/ide/features/slash-commands`. Stamp: live Bob
+  docs 2026-06-24.

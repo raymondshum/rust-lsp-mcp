@@ -160,7 +160,8 @@ Verified 2026-06-23 against the live Bob site; full quotes + sources in
 | U2 plain-link auto-follow | ⏳ runtime-only | **Design rule: use `@`-imports for must-load content; don't rely on link-following** |
 | U3 `/init` output | ✅ / ⏳ | Generates root `AGENTS.md` + `.bob/rules-{mode}/AGENTS-{mode}.md`; overwrite behavior undocumented |
 | U4 hierarchy & precedence | ✅ VERIFIED | mode-rules → AGENTS.md → workspace rules; accumulates, not replaces |
-| U5 skill invocation | ✅ VERIFIED | **Model-activated by `description` only — no explicit user trigger** (impacts `grill-me`) |
+| U5 skill invocation | ⚠️ CORRECTION (2026-06-24) | Activation is **"based on your request and the skill's description"** — so a skill **IS deliberately invokable by phrasing the request** (then approving); what's absent is a `/skill-name` slash command. Earlier "no user trigger / approve-only" was overstated |
+| U16 slash commands (new) | ✅ VERIFIED (2026-06-24) | `/` menu: built-ins `/init`,`/review`,`/create-pr`; `/code`·`/ask` switch mode; **custom modes appear as `/<slug>`**; skills are **not** in the slash menu |
 | U6 out-of-folder file refs | ⏳ runtime-only | **Design rule: bundle skill material *inside* the skill folder** |
 | U7 skill approval setting | ✅ VERIFIED | Settings → Auto-Approve → "Skills" toggle; no config-key documented |
 | U8 mechanism inventory | ⚠️ CORRECTION | Also: custom rules, context mentions, code actions. **Skills are IDE-only** (no Shell skills) |
@@ -174,17 +175,24 @@ Verified 2026-06-23 against the live Bob site; full quotes + sources in
 
 ### Corrections with design impact (carry into later phases)
 
-- **Skills are model-activated, not user-invoked (U5) + reference only in-folder
-  files (U6).** Phase 2 must (a) write `grill-me`'s `description` so Bob auto-activates
-  it on grill-style requests, and (b) **copy `docs/conventions/grill-me.md` into
-  `.bob/skills/grill-me/`** rather than pointing at the repo path.
+- **Skills activate "based on your request and the skill's description" (U5,
+  corrected 2026-06-24) + reference only in-folder files (U6).** A skill **is**
+  deliberately invokable — you phrase a request matching its `description` (there is
+  no `/skill-name` slash command, but custom *modes* are slash-invokable as `/<slug>`,
+  U16). Phase 2 still (a) wrote `grill-me`'s `description` to cover grill-style
+  requests — which serves **both** auto- and deliberate-by-request activation — and
+  (b) **copied `docs/conventions/grill-me.md` into `.bob/skills/grill-me/`** rather
+  than pointing at the repo path.
 - **Skills are IDE-only (U8).** The **CLI stretch goal** can't reuse the skills as-is —
   in Bob Shell the three skills (`grill-me`, `mcp-builder`, `continue-build`) would
   need re-expression as **custom modes + slash commands**. Recorded as a stretch-scope
   constraint, not a Phase 1–5 blocker.
-- **Subtask cold-context isolation is undocumented (U9).** The adversarial gate's
-  independence is a **Phase 3 runtime test**, not a doc guarantee; if subtasks don't
-  isolate context, fall back to a fresh Bob session for the adversarial pass.
+- **Subtask cold-context isolation is undocumented (U9, re-confirmed fully SILENT
+  2026-06-24 — no subtasks page even exists).** The docs promise **no** isolation and
+  **no** result-return, so the adversarial gate's independence **cannot** rest on Bob
+  subtasks. Phase 3 designs the adversarial pass to run in a **fresh Bob session (or
+  `/clear`ed context) as the primary path** — not a fallback — and treats subtask
+  isolation as a runtime nice-to-have to relax toward only if a later test confirms it.
 - **Built-in mode list corrected (U10):** no Debug/Architect — the role custom modes
   in Phase 3 layer on Code/Ask/Plan/Advanced/Orchestrator.
 
