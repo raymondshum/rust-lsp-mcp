@@ -23,11 +23,17 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
 | Phase | Depends on | Parallelizable | State |
 |-------|-----------|----------------|-------|
 | 0 — Verification pass | — | no | done |
-| 1 — `AGENTS.md` spine | 0 | no | done (PR #28 merged; runtime Bob-IDE smoke deferred to end-of-port) |
-| 2 — Skills port | 0 | no | in-progress (built; automated QA green; runtime activation deferred) |
-| 3 — Modes + orchestration | 0,1,2 | no | in-progress (built; automated QA green; 5 runtime smokes deferred; PR open for review) |
-| 4 — Prose rewrite + branding | 1,2,3 | no (single-track) | in-progress (built; verified; PR pending) |
-| 5 — Retire Claude scaffolding | 1,2,3,4 | no | not-started |
+| 1 — `AGENTS.md` spine | 0 | no | done (PR #28 merged) |
+| 2 — Skills port | 0 | no | done (PR #29 merged) |
+| 3 — Modes + orchestration | 0,1,2 | no | done (PR #30 merged) |
+| 4 — Prose rewrite + branding | 1,2,3 | no (single-track) | done (PR #31 merged) |
+| 5 — Retire Claude scaffolding | 1,2,3,4 | no | in-progress (built; verified; PR pending) |
+
+**Port status: code-complete (all 5 phases built).** The one outstanding gate is the
+**end-of-port Bob-IDE verification** — every phase's runtime-only smoke was deferred to
+a single live Bob run (it can't execute in the build environment). See the deferred
+inventory in [bob-port-phase-3.md](bob-port-phase-3.md) (5 mode/skill/subtask items) plus
+the spine/skill smokes (AGENTS.md `@`-import load; skill auto/by-request activation).
 
 ## Durable per-phase briefs
 
@@ -67,6 +73,15 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
   `docs/handoff/` (Orchestrator-None can't read — role modes do); model-per-role + no-parallelism
   named as gaps; adversarial runs in a **fresh Bob session** (U9 silent). 5 runtime-only items
   parked for the end-of-port Bob-IDE pass.
+- 2026-06-24 — Phase 5 (**Retire Claude scaffolding**) built. `git rm` of `CLAUDE.md`
+  and the tracked `.claude/` tree (skills now live under `.bob/`; stray `.DS_Store`s gone).
+  Fixed the last 3 would-be-dangling `CLAUDE.md` links (`index.md` line removed;
+  `bob-port-phase-1.md` + `planning-handoff.md` de-linked to prose) and dropped `CLAUDE.md`
+  from the `grill-me.md` note. **KI-7 resolved** (won't dedupe — `U6` makes the grill-me
+  split structural). Final consistency pass: no tracked `CLAUDE.md`/`.claude/`; repo-wide
+  link-check clean (only the illustrative `[x](./x.md)` code-span false positives); no
+  markdown link still targets the removed files; remaining `CLAUDE.md`/`.claude/` mentions
+  are intentional history/migration prose. **`AGENTS.md` is now the sole instruction spine.**
 - 2026-06-24 — Phase 4 (**Prose rewrite + branding sweep**, Option C) built. Full Bob
   rewrite of `docs/guide/agentic-coding.md` (orchestration → Bob modes/sequential; "The
   Bob configuration in this repo"). Branding sweep on forward prose: README + guide/docs
