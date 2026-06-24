@@ -29,36 +29,11 @@ Check this list at these lifecycle checkpoints (see
 
 ## Open
 
-### KI-8 — devcontainer still provisions the Claude Code IDE extension
-- **Where:** [.devcontainer/devcontainer.json](../../.devcontainer/devcontainer.json)
-  (+ the extension table in [development.md](../guide/development.md)).
-- **What:** The Bob harness port (Phases 1–5) re-tools the *agent-facing* scaffolding
-  (`AGENTS.md`, `.bob/skills/`, custom modes, docs) but does **not** touch the dev
-  container's installed VS Code extensions, which still include the Claude Code
-  extension. `development.md` documents that accurately, so it is **not stale** — but
-  it is a residue: an "IDE-first" Bob harness ought to provision the Bob extension.
-- **Why it matters:** the harness isn't fully Bob until the IDE the container opens is
-  Bob's; tooling and intent otherwise disagree.
-- **Status:** `open` — **out of the documented Phase 1–5 scope** (docs/skills/modes/mcp,
-  not `devcontainer.json`). Decide separately whether the port extends to dev-container
-  provisioning.
+_(none — all currently-tracked issues are resolved.)_
 
 ---
 
 ## Resolved
-
-### KI-7 — `grill-me` style content is duplicated (canonical convention + bundled skill copy)
-- **Where:** [docs/conventions/grill-me.md](../conventions/grill-me.md) (canonical) and
-  [.bob/skills/grill-me/project-style.md](../../.bob/skills/grill-me/project-style.md) (bundled copy).
-- **What:** The Bob harness port bundles a copy of the grilling-style convention
-  *inside* the `grill-me` skill folder, because Bob skills can only reliably read files
-  in their own directory (`U6`, [bob-harness-capabilities.md](../reference/bob-harness-capabilities.md)).
-- **Resolved:** 2026-06-24 (Phase 5) — **won't dedupe; the split is structural.** `U6`
-  requires the in-folder skill copy, and the canonical `docs/conventions/grill-me.md`
-  is the single source the `AGENTS.md` core points to (with `CLAUDE.md` now retired,
-  one referrer is gone, but the canonical still serves the convention). Both copies are
-  load-bearing, so this is a documented **sync obligation** (noted in both files), not a
-  removable duplicate.
 
 ### KI-4 — `RLM_CHROMA_MODEL_CACHE` is a no-op setting
 - **Where:** [src/rust_lsp_mcp/settings.py](../../src/rust_lsp_mcp/settings.py).

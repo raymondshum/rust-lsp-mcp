@@ -37,7 +37,7 @@ orchestration; it does not restate those policies.
 
 5. **Keep indexes current.** New `docs/reference/` entries get a line in
    `docs/reference/index.md`; update the plan's status header and the planning
-   handoff so a fresh session sees the pass is done (navigation rule in AGENTS.md).
+   handoff so a fresh session sees the pass is done (navigation rule in CLAUDE.md).
 
 ## Definition of done
 

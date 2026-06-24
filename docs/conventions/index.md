@@ -3,7 +3,7 @@
 How we work together: workflow and interaction preferences.
 
 - [lifecycle.md](lifecycle.md) — **the spine:** the end-to-end delivery standard (Grill → Plan → Verify → Implement → Document) and how the stage docs connect
-- [agents-md-layout.md](agents-md-layout.md) — read before editing AGENTS.md: thin pointers + the `@`-import load model; detail in `docs/`
+- [claude-md-layout.md](claude-md-layout.md) — read before editing CLAUDE.md: thin pointers → detail in `docs/`
 - [working-style.md](working-style.md) — how to propose approaches and make decisions
 - [research-policy.md](research-policy.md) — read before trusting memory on any library/API detail (Context7-first; read source when docs are silent)
 - [caching.md](caching.md) — where learned patterns go (memory vs `docs/`) + the `docs/` layout
