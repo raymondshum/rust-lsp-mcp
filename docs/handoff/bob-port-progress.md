@@ -26,7 +26,7 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
 | 1 — `AGENTS.md` spine | 0 | no | done (PR #28 merged; runtime Bob-IDE smoke deferred to end-of-port) |
 | 2 — Skills port | 0 | no | in-progress (built; automated QA green; runtime activation deferred) |
 | 3 — Modes + orchestration | 0,1,2 | no | in-progress (built; automated QA green; 5 runtime smokes deferred; PR open for review) |
-| 4 — Prose rewrite + branding | 1,2,3 | no (single-track) | not-started |
+| 4 — Prose rewrite + branding | 1,2,3 | no (single-track) | in-progress (built; verified; PR pending) |
 | 5 — Retire Claude scaffolding | 1,2,3,4 | no | not-started |
 
 ## Durable per-phase briefs
@@ -67,6 +67,19 @@ Bob-fact risk; treat unconfirmed `UNVERIFIED` items as blockers.
   `docs/handoff/` (Orchestrator-None can't read — role modes do); model-per-role + no-parallelism
   named as gaps; adversarial runs in a **fresh Bob session** (U9 silent). 5 runtime-only items
   parked for the end-of-port Bob-IDE pass.
+- 2026-06-24 — Phase 4 (**Prose rewrite + branding sweep**, Option C) built. Full Bob
+  rewrite of `docs/guide/agentic-coding.md` (orchestration → Bob modes/sequential; "The
+  Bob configuration in this repo"). Branding sweep on forward prose: README + guide/docs
+  indexes + 3 principle/reference docs (`Claude Code`→`IBM Bob`, `CLAUDE.md`→`AGENTS.md`).
+  Era **banners** added to 10 historical Claude-era records (`progress.md`, the 6 per-phase
+  prompts + docker-verification, `implementation-plan.md`, `planning-handoff.md`,
+  `repo-agnostic-and-docker-launch.md`). Left intentionally: migration-narrative docs,
+  3rd-party skill content, and legitimate *client* mentions (Claude Desktop). New **KI-8**
+  (devcontainer still provisions the Claude Code extension — out of Phase 1–5 scope); KI-7
+  carried (U6 makes the grill-me dup structural). QA green: repo-wide link-check clean (one
+  false positive — an illustrative `[x](./x.md)` in a code span); no stale Claude-mechanism
+  claims in forward docs (3 remaining refs all accurate: CLAUDE.md-as-retiring + the real
+  devcontainer extension).
 - 2026-06-24 — Phase 3 (**Modes + orchestration**) built. Added `.bob/custom_modes.yaml`
   (4 role modes — build/review/qa/adversarial — schema-valid, write/verify `groups`
   separation) and `.bob/skills/continue-build/SKILL.md` (self-contained Orchestrator

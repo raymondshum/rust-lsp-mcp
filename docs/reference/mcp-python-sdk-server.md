@@ -47,4 +47,4 @@ mid-migration; there are TWO low-level shapes in the docs:
   (re-read `docs/migration.md`); if so, prefer it only if we drop FastMCP.
 - Confirm FastMCP structured-content return typing (dict vs. `types.*Content`) for our
   `{status, ...}` envelope.
-- Per CLAUDE.md, run the `mcp-builder` skill first at build for server scaffolding.
+- Per AGENTS.md, run the `mcp-builder` skill first at build for server scaffolding.

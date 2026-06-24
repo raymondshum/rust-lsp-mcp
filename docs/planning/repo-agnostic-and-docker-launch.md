@@ -1,5 +1,7 @@
 # Plan: repo-agnostic target + host-launchable Docker image
 
+> _**Historical record (Claude Code era).** A plan from the original rust-lsp-mcp runtime build under the Claude Code harness; preserved as-is. The project's harness is now IBM Bob — see [the harness port](bob-harness-port.md)._
+
 A phasal plan ([output contract](../conventions/phasal-plan.md)) addressing two
 issues surfaced 2026-06-21. Decisions below are **settled** (made in a grill +
 verification pass) and frozen for the implementation cycle.
