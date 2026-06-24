@@ -49,7 +49,7 @@ misleading empty answer while indexing. Build **risk-first**; doc search last.
 - **Context7 over training.** For any library/API detail (MCP Python SDK,
   multilspy, ChromaDB, rust-analyzer/LSP, uv, ruff, ty, pydantic-settings), query
   Context7 before trusting memory; cache findings in `docs/reference/` (version +
-  date stamped). See [CLAUDE.md](../../CLAUDE.md). For MCP server construction,
+  date stamped). See `CLAUDE.md` (the project instructions; now `AGENTS.md`). For MCP server construction,
   use the `mcp-builder` skill first.
 - **Verify the plan.** Before the plan is final, cross-check **every** command,
   version, flag, and config snippet against current docs via Context7. Items in

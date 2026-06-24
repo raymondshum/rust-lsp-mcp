@@ -29,23 +29,6 @@ Check this list at these lifecycle checkpoints (see
 
 ## Open
 
-### KI-7 — `grill-me` style content is duplicated (canonical convention + bundled skill copy)
-- **Where:** [docs/conventions/grill-me.md](../conventions/grill-me.md) (canonical) and
-  [.bob/skills/grill-me/project-style.md](../../.bob/skills/grill-me/project-style.md) (bundled copy).
-- **What:** The Bob harness port (Phase 2) bundles a copy of the grilling-style
-  convention *inside* the skill folder, because Bob skills can only reliably read
-  files in their own directory (`U6`, [bob-harness-capabilities.md](../reference/bob-harness-capabilities.md)).
-  The canonical doc is still referenced by the `AGENTS.md` core and `CLAUDE.md`, so
-  the same content now lives in two places and can drift.
-- **Why it matters:** The convention's own rule is single-source-of-truth; two full
-  copies violate it and risk divergence if one is edited.
-- **Status:** `decided: reconcile in Phase 4/5 of the Bob harness port`
-  ([bob-harness-port.md](../planning/bob-harness-port.md)) — once the prose rewrite
-  and Claude-scaffolding retirement settle the convention docs' single home. Until
-  then, edit both copies together. _(Phase 4 record step: carried — `U6` forces the
-  in-folder skill copy and the `AGENTS.md` core needs the canonical, so the two are
-  both load-bearing; revisit at Phase 5 when `CLAUDE.md` retires one referrer.)_
-
 ### KI-8 — devcontainer still provisions the Claude Code IDE extension
 - **Where:** [.devcontainer/devcontainer.json](../../.devcontainer/devcontainer.json)
   (+ the extension table in [development.md](../guide/development.md)).
@@ -63,6 +46,19 @@ Check this list at these lifecycle checkpoints (see
 ---
 
 ## Resolved
+
+### KI-7 — `grill-me` style content is duplicated (canonical convention + bundled skill copy)
+- **Where:** [docs/conventions/grill-me.md](../conventions/grill-me.md) (canonical) and
+  [.bob/skills/grill-me/project-style.md](../../.bob/skills/grill-me/project-style.md) (bundled copy).
+- **What:** The Bob harness port bundles a copy of the grilling-style convention
+  *inside* the `grill-me` skill folder, because Bob skills can only reliably read files
+  in their own directory (`U6`, [bob-harness-capabilities.md](../reference/bob-harness-capabilities.md)).
+- **Resolved:** 2026-06-24 (Phase 5) — **won't dedupe; the split is structural.** `U6`
+  requires the in-folder skill copy, and the canonical `docs/conventions/grill-me.md`
+  is the single source the `AGENTS.md` core points to (with `CLAUDE.md` now retired,
+  one referrer is gone, but the canonical still serves the convention). Both copies are
+  load-bearing, so this is a documented **sync obligation** (noted in both files), not a
+  removable duplicate.
 
 ### KI-4 — `RLM_CHROMA_MODEL_CACHE` is a no-op setting
 - **Where:** [src/rust_lsp_mcp/settings.py](../../src/rust_lsp_mcp/settings.py).

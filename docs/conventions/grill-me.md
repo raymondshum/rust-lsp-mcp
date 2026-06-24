@@ -1,10 +1,10 @@
 # Grill-me session style (preferences)
 
 _Set: 2026-06-19. Canonical source for how to run a grilling session in this
-project; the `AGENTS.md` core and `CLAUDE.md` point here. The Bob `grill-me` skill
+project; the `AGENTS.md` core points here. The Bob `grill-me` skill
 bundles an in-folder copy ([.bob/skills/grill-me/project-style.md](../../.bob/skills/grill-me/project-style.md))
-because Bob skills only read their own directory — keep the two in sync until the
-port reconciles them (known issue KI-7). Do not duplicate this content anywhere
+because Bob skills only read their own directory — keep the two in sync (the
+in-folder copy is required by `U6`; see KI-7). Do not duplicate this content anywhere
 else._
 
 When running a grilling session (stress-testing a plan or design), follow these
