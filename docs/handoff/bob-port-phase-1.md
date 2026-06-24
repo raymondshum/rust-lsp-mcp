@@ -98,4 +98,4 @@ unreliable, that's a `CORRECTION` to fold into the plan before Phase 2.
 - Plan: [bob-harness-port.md](../planning/bob-harness-port.md)
 - Tracker (update on completion): [bob-port-progress.md](bob-port-progress.md)
 - Verified Bob facts: [bob-harness-capabilities.md](../reference/bob-harness-capabilities.md)
-- Source to mirror: [CLAUDE.md](../../CLAUDE.md) + [claude-md-layout.md](../conventions/claude-md-layout.md)
+- Source to mirror: [CLAUDE.md](../../CLAUDE.md) + the layout convention (now [agents-md-layout.md](../conventions/agents-md-layout.md))

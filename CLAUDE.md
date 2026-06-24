@@ -22,8 +22,8 @@ Brief pointers — open the file when its topic or trigger applies. The
 [delivery lifecycle](docs/conventions/lifecycle.md) is the **spine** (Grill → Plan →
 Verify → Implement → Document); the per-stage docs below implement it.
 
-- [CLAUDE.md layout](docs/conventions/claude-md-layout.md) — read before editing this
-  file: keep it thin (pointers + brief description/trigger); detail lives in `docs/`.
+- [AGENTS.md layout](docs/conventions/agents-md-layout.md) — read before editing the
+  instruction spine: keep it thin (pointers + brief description/trigger); detail lives in `docs/`.
 - [working style](docs/conventions/working-style.md) — how to propose approaches and decide.
 - [research policy](docs/conventions/research-policy.md) — read before trusting memory
   on any library/API detail. **Essence:** prefer Context7 (and current first-party

@@ -97,7 +97,7 @@ mounts).
 - **[CLAUDE.md](../../CLAUDE.md)** (repo root) — the instructions loaded into every
   session. It is intentionally **thin**: each entry is a pointer plus a one-line
   trigger, with the detail living in `docs/`. Keeping it thin is itself a
-  convention ([claude-md-layout.md](../conventions/claude-md-layout.md)).
+  convention ([agents-md-layout.md](../conventions/agents-md-layout.md)).
 - **`.claude/skills/`** — project-local [Claude Code skills](https://docs.claude.com/en/docs/claude-code/skills)
   checked into the repo: `grill-me` (drives the grilling interview, reading
   [grill-me.md](../conventions/grill-me.md) for project style) and `mcp-builder`
