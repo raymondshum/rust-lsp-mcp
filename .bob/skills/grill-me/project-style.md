@@ -1,11 +1,9 @@
 # Grill-me session style (preferences)
 
-_Set: 2026-06-19. Canonical source for how to run a grilling session in this
-project; the `AGENTS.md` core and `CLAUDE.md` point here. The Bob `grill-me` skill
-bundles an in-folder copy ([.bob/skills/grill-me/project-style.md](../../.bob/skills/grill-me/project-style.md))
-because Bob skills only read their own directory — keep the two in sync until the
-port reconciles them (known issue KI-7). Do not duplicate this content anywhere
-else._
+_Set: 2026-06-19. Bundled copy for the `grill-me` Bob skill — Bob can only rely on
+files **inside** the skill folder, so the project's grilling style lives here. The
+canonical convention is [docs/conventions/grill-me.md](../../../docs/conventions/grill-me.md);
+keep the two in sync until the Bob port reconciles them (see known issue KI-7)._
 
 When running a grilling session (stress-testing a plan or design), follow these
 preferences in addition to the base `grill-me` skill instructions.
@@ -44,7 +42,7 @@ Use nested bullets:
 ## After the session — emit the UNVERIFIED inventory
 
 A grilling resolves decisions **in principle**. Before the session is done, write
-each decision durably to `docs/` (per [working-style.md](working-style.md)) **and
+each decision durably to `docs/` (per [working-style.md](../../../docs/conventions/working-style.md)) **and
 tag the concrete things it depends on as `UNVERIFIED`** — exact commands, versions,
 flags, config syntax, API signatures, install paths. Those tags are the inventory
 the verification pass later confirms.
@@ -53,5 +51,5 @@ the verification pass later confirms.
   install path it rests on is recorded as `UNVERIFIED` (or `VERIFIED` if you
   confirmed it live during the grill).
 - This is the bridge: **grill (decide) → `UNVERIFIED` inventory → verify.** If
-  nothing is tagged, the [verification-pass.md](verification-pass.md) has nothing
+  nothing is tagged, the [verification-pass.md](../../../docs/conventions/verification-pass.md) has nothing
   to find — so don't end a grill with decisions but no inventory.

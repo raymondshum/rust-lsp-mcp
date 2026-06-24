@@ -29,7 +29,20 @@ Check this list at these lifecycle checkpoints (see
 
 ## Open
 
-_(none — all currently-tracked issues are resolved.)_
+### KI-7 — `grill-me` style content is duplicated (canonical convention + bundled skill copy)
+- **Where:** [docs/conventions/grill-me.md](../conventions/grill-me.md) (canonical) and
+  [.bob/skills/grill-me/project-style.md](../../.bob/skills/grill-me/project-style.md) (bundled copy).
+- **What:** The Bob harness port (Phase 2) bundles a copy of the grilling-style
+  convention *inside* the skill folder, because Bob skills can only reliably read
+  files in their own directory (`U6`, [bob-harness-capabilities.md](../reference/bob-harness-capabilities.md)).
+  The canonical doc is still referenced by the `AGENTS.md` core and `CLAUDE.md`, so
+  the same content now lives in two places and can drift.
+- **Why it matters:** The convention's own rule is single-source-of-truth; two full
+  copies violate it and risk divergence if one is edited.
+- **Status:** `decided: reconcile in Phase 4/5 of the Bob harness port`
+  ([bob-harness-port.md](../planning/bob-harness-port.md)) — once the prose rewrite
+  and Claude-scaffolding retirement settle the convention docs' single home. Until
+  then, edit both copies together.
 
 ---
 
