@@ -10,7 +10,10 @@
 # with this compose file and have the MCP client `docker exec` into it, so the
 # rust-analyzer process stays hot between sessions:
 #
-#   RUST_PROJECT=/abs/path/to/your/rust/project docker compose up -d
+#   RUST_PROJECT=/abs/path/to/your/rust/project docker compose up -d rust-lsp-mcp
+#
+# (Name the service explicitly — a bare `up -d` would ALSO start the
+# rust-lsp-mcp-isolated variant below, giving you two containers on one volume.)
 #
 # Then point the MCP client at:
 #   "command": "docker",
@@ -48,3 +51,8 @@ services:
 
 volumes:
   rlm-data:
+    # Pin the real volume name so it matches the `docker run` / prime-cache.sh
+    # default (rust-lsp-mcp-data). Without this, compose would prefix it to
+    # `<project>_rlm-data`, and priming the default volume would warm a DIFFERENT
+    # cache than the isolated service reads — shipping degraded offline analysis.
+    name: rust-lsp-mcp-data

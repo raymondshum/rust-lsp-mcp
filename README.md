@@ -158,8 +158,9 @@ the scanned project's crates.io dependencies — which you warm **once** up fron
 
 **Default: warm the cache once, then run isolated (zero degradation).**
 
-1. **Prime** the dependency cache (downloads dependency *sources* only — runs no
-   build scripts, so this network-on step executes no project code):
+1. **Prime** the dependency cache. `cargo fetch` downloads dependency *sources*
+   only — it runs no build scripts and expands no proc-macros, so unlike the
+   isolated run it executes no *compiled* project code:
 
    ```
    scripts/prime-cache.sh /absolute/path/to/your/rust/project
@@ -167,8 +168,19 @@ the scanned project's crates.io dependencies — which you warm **once** up fron
 
    (equivalently: `docker run --rm -v /abs/project:/project -v rust-lsp-mcp-data:/data
    --entrypoint cargo rust-lsp-mcp fetch --manifest-path /project/Cargo.toml`.
-   Note the project is mounted **read-write** here so `cargo` can write
-   `Cargo.lock` if the project doesn't commit one; this step runs no project code.)
+   The project is mounted **read-write** here so `cargo` can write `Cargo.lock`
+   if the project doesn't commit one. `scripts/prime-cache.sh` auto-detects
+   `docker` or `podman`; override with `CONTAINER_ENGINE=…`.)
+
+   > **Caveat — priming still makes network calls the project controls.** This
+   > step is network-*on*, and `cargo fetch` resolves and downloads every
+   > registry **and git** dependency the project declares — so a malicious
+   > `Cargo.toml` can cause outbound connections to attacker-chosen hosts (e.g. a
+   > `git = "https://attacker/…"` dependency) and check out untrusted repos into
+   > the cache. It does not *execute build scripts*, but it is not a hermetic
+   > step. Only prime projects whose dependency set you would already let cargo
+   > resolve; for fully untrusted code, prime behind the allowlist proxy below or
+   > skip priming and accept the degraded first-index (see alternatives).
 
 2. **Point your MCP client at the isolated config** — `--network none` plus
    `CARGO_NET_OFFLINE=true`, with the project back to `:ro`:
