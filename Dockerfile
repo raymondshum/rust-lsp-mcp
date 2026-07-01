@@ -58,11 +58,26 @@ COPY src ./src
 # --frozen asserts the lockfile is current; --no-dev skips test/lint deps.
 RUN uv sync --frozen --no-dev
 
+# --- Bake the embedding model (offline-ready) ------------------------------
+# ChromaDB derives its ONNX model cache from $HOME (Path.home()/.cache/chroma,
+# evaluated at import). Point HOME at a NON-volume path and warm the model at
+# build time so it is frozen into the image layer: a bind/named mount on /data
+# cannot shadow it, and runtime needs ZERO network for embeddings. HOME here MUST
+# match the runtime HOME (re-declared in the runtime block below) or the runtime
+# lookup would miss the baked files and try to download. The tar is SHA256-pinned
+# by chromadb, so the build-time fetch is integrity-checked; the archive is
+# removed after extraction (runtime only validates the 6 extracted files).
+ENV HOME=/opt/rlm
+RUN mkdir -p /opt/rlm \
+ && /app/.venv/bin/python -c "from chromadb.utils.embedding_functions import DefaultEmbeddingFunction as D; D()(['warmup'])" \
+ && rm -f /opt/rlm/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx.tar.gz
+
 # --- Runtime configuration -------------------------------------------------
 # Target project is bind-mounted at /project (read-only) at runtime.
 # Caches live under /data so they persist across `--rm` runs via a named volume.
-# HOME=/data puts ChromaDB's hardcoded ~/.cache/chroma model cache on that volume.
-ENV HOME=/data \
+# HOME=/opt/rlm (matching the build-time warmup above) keeps ChromaDB's baked
+# ~/.cache/chroma model cache on the non-volume image path, not on /data.
+ENV HOME=/opt/rlm \
     RLM_PROJECT_ROOT=/project \
     RLM_CHROMA_PATH=/data/chroma \
     RLM_CARGO_HOME=/data/cargo-home \
