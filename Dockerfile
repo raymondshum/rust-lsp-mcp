@@ -75,6 +75,12 @@ ENV HOME=/data \
 # doc_store.py), but this env var disables telemetry for any client construction
 # regardless of code path — no output, no network call from a stdio service.
 ENV ANONYMIZED_TELEMETRY=FALSE
+# Blanket opt-out for Scarf-based analytics. NOTE: chromadb 1.5.9 ships no Scarf
+# agent, so these are inert for it today; they are a standing policy posture so
+# any future Scarf-instrumented dependency's client-side telemetry stays off by
+# default. They do NOT affect server-side Scarf Gateway download pixels.
+ENV SCARF_NO_ANALYTICS=true \
+    DO_NOT_TRACK=1
 # rust-analyzer / cargo read these from the environment (the dev container sets
 # the same three as containerEnv); redirect the cargo cache + RA target to /data.
 ENV CARGO_HOME=/data/cargo-home \
