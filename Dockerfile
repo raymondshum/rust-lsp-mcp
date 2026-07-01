@@ -70,6 +70,11 @@ ENV HOME=/data \
     RLM_RUST_ANALYZER_TARGET_DIR=/data/cargo-target/rust-analyzer \
     RLM_RUST_ANALYZER_BIN=/usr/local/cargo/bin/rust-analyzer \
     RLM_DOC_COLLECTION=project_docs
+# Backstop for ChromaDB's anonymized product telemetry. The app already passes
+# Settings(anonymized_telemetry=False) when it builds its client (see
+# doc_store.py), but this env var disables telemetry for any client construction
+# regardless of code path — no output, no network call from a stdio service.
+ENV ANONYMIZED_TELEMETRY=FALSE
 # rust-analyzer / cargo read these from the environment (the dev container sets
 # the same three as containerEnv); redirect the cargo cache + RA target to /data.
 ENV CARGO_HOME=/data/cargo-home \

@@ -57,7 +57,10 @@
     "CARGO_HOME": "/workspaces/cargo-home",
     // rust-analyzer targetDir: redirect RA's own cargo check output to keep it separate.
     // Passed through to .vscode/settings.json via the settings key below.
-    "RA_TARGET_DIR": "/workspaces/cargo-target/rust-analyzer"
+    "RA_TARGET_DIR": "/workspaces/cargo-target/rust-analyzer",
+    // Disable ChromaDB's anonymized product telemetry in the dev container too,
+    // mirroring the production image (the app also sets it via Settings).
+    "ANONYMIZED_TELEMETRY": "FALSE"
   },
 
   // VSCode extensions to install automatically.
