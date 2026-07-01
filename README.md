@@ -139,6 +139,17 @@ index is rebuilt each time). If you want rust-analyzer to stay hot between
 sessions, keep one container running and use `docker exec` instead — see
 [`docker-compose.yml`](docker-compose.yml).
 
+**Help your agent know when to use the server.** Wiring in the tools is not
+enough — an agent will often grep a Rust repo and never think to reach for the
+LSP. This repo ships a drop-in skill,
+[`rust-code-navigation`](.bob/skills/rust-code-navigation/SKILL.md), that
+routes an agent toward semantic navigation (definitions, references, types)
+instead of text search, with a per-tool intent map and the common gotchas
+(`not_ready` while indexing, 1-based positions, empty-result-is-not-an-error).
+For a client that loads skills — such as IBM Bob — copy that `SKILL.md`
+into your own project's `.bob/skills/rust-code-navigation/` so it travels
+with the repo you are exploring.
+
 ## Documentation
 
 | Page | Description |
@@ -151,6 +162,7 @@ sessions, keep one container running and use `docker exec` instead — see
 | [Components](docs/guide/components.md) | A guided tour of the code, module by module. |
 | [Dependencies](docs/guide/dependencies.md) | The main libraries and tools and what each is for. |
 | [Agentic coding](docs/guide/agentic-coding.md) | How the project is built with IBM Bob — the delivery lifecycle, build conventions, and Bob configuration. |
+| [Agent skill: `rust-code-navigation`](.bob/skills/rust-code-navigation/SKILL.md) | A skill that helps an AI agent decide *when* to reach for this server — routing it toward semantic navigation instead of grep, with a per-tool intent map and gotchas. |
 
 ## Status / scope
 
