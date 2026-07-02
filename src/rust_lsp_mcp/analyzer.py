@@ -67,9 +67,9 @@ import asyncio
 import contextlib
 import logging
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from multilspy.language_servers.rust_analyzer.rust_analyzer import RustAnalyzer
 from multilspy.lsp_protocol_handler.lsp_types import InitializeParams
@@ -89,6 +89,13 @@ STATE_ERROR = "error"
 DRAIN_TIMEOUT_SECONDS: float = 10.0
 
 _log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+class AnalyzerTornDownError(RuntimeError):
+    """The analyzer run serving an in-flight request was torn down (restart/shutdown)
+    before the request completed.  Maps to a not_ready envelope at the tool layer."""
 
 
 def _is_null_response_assertion(exc: AssertionError) -> bool:
@@ -399,6 +406,42 @@ class AnalyzerManager:
                 with contextlib.suppress(Exception):
                     await lsp.server.stop()
 
+    async def _race_teardown(self, coro: Coroutine[Any, Any, _T], op: str) -> _T:
+        """Await *coro*, aborting with AnalyzerTornDownError if this run is torn down.
+
+        INVARIANT: reached synchronously (no await) from the delegate's guard, so the
+        event read here pairs with the _lsp the caller snapshotted.  multilspy's stop()
+        never fails pending _response_handlers (verified, 0.0.15), so without this race
+        an in-flight request awaits request.cv forever across a drain (KI-9 / #87).
+        """
+        event = self._shutdown_event
+        if event.is_set():
+            coro.close()
+            raise AnalyzerTornDownError(f"analyzer torn down before {op} request was issued")
+        request_task = asyncio.ensure_future(coro)
+        teardown_task = asyncio.create_task(event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {request_task, teardown_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            request_task.cancel()
+            teardown_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await request_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await teardown_task
+            raise
+        if request_task in done:
+            teardown_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await teardown_task
+            return request_task.result()
+        request_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await request_task
+        raise AnalyzerTornDownError(f"analyzer torn down during {op} request")
+
     # -----------------------------------------------------------------------
     # LSP delegate methods — each guards against not-ready state
     # -----------------------------------------------------------------------
@@ -420,13 +463,16 @@ class AnalyzerManager:
 
         Raises:
             RuntimeError: If the manager is not in the ready state (defensive guard).
+            AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
+                this request is in flight.
         """
-        if self._lsp is None or self.state != STATE_READY:
+        lsp = self._lsp
+        if lsp is None or self.state != STATE_READY:
             raise RuntimeError(
                 "request_workspace_symbol called before analyzer is ready — "
                 "call require_ready() first"
             )
-        return await self._lsp.request_workspace_symbol(query)
+        return await self._race_teardown(lsp.request_workspace_symbol(query), "workspace_symbol")
 
     async def request_document_symbols(
         self, relative_file_path: str
@@ -450,14 +496,19 @@ class AnalyzerManager:
 
         Raises:
             RuntimeError: If the manager is not in the ready state.
+            AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
+                this request is in flight.
         """
-        if self._lsp is None or self.state != STATE_READY:
+        lsp = self._lsp
+        if lsp is None or self.state != STATE_READY:
             raise RuntimeError(
                 "request_document_symbols called before analyzer is ready — "
                 "call require_ready() first"
             )
         try:
-            result = await self._lsp.request_document_symbols(relative_file_path)
+            result = await self._race_teardown(
+                lsp.request_document_symbols(relative_file_path), "document_symbols"
+            )
         except AssertionError as exc:
             if _is_null_response_assertion(exc):
                 return []
@@ -491,13 +542,18 @@ class AnalyzerManager:
 
         Raises:
             RuntimeError: If the manager is not in the ready state.
+            AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
+                this request is in flight.
         """
-        if self._lsp is None or self.state != STATE_READY:
+        lsp = self._lsp
+        if lsp is None or self.state != STATE_READY:
             raise RuntimeError(
                 "request_definition called before analyzer is ready — call require_ready() first"
             )
         try:
-            result = await self._lsp.request_definition(relative_file_path, line, column)
+            result = await self._race_teardown(
+                lsp.request_definition(relative_file_path, line, column), "definition"
+            )
         except AssertionError as exc:
             # multilspy 0.0.15 asserts on a null LSP response instead of returning
             # None.  Only the null case → None (→ not_found); a malformed non-null
@@ -532,13 +588,18 @@ class AnalyzerManager:
 
         Raises:
             RuntimeError: If the manager is not in the ready state.
+            AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
+                this request is in flight.
         """
-        if self._lsp is None or self.state != STATE_READY:
+        lsp = self._lsp
+        if lsp is None or self.state != STATE_READY:
             raise RuntimeError(
                 "request_references called before analyzer is ready — call require_ready() first"
             )
         try:
-            result = await self._lsp.request_references(relative_file_path, line, column)
+            result = await self._race_teardown(
+                lsp.request_references(relative_file_path, line, column), "references"
+            )
         except AssertionError as exc:
             # multilspy 0.0.15 asserts on a null LSP response instead of returning
             # None.  Only the null case → None (→ not_found); a malformed non-null
@@ -561,12 +622,17 @@ class AnalyzerManager:
 
         Raises:
             RuntimeError: If the manager is not in the ready state.
+            AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
+                this request is in flight.
         """
-        if self._lsp is None or self.state != STATE_READY:
+        lsp = self._lsp
+        if lsp is None or self.state != STATE_READY:
             raise RuntimeError(
                 "request_hover called before analyzer is ready — call require_ready() first"
             )
-        return await self._lsp.request_hover(relative_file_path, line, column)
+        return await self._race_teardown(
+            lsp.request_hover(relative_file_path, line, column), "hover"
+        )
 
     # -----------------------------------------------------------------------
     # Lifecycle helpers
@@ -605,7 +671,15 @@ class AnalyzerManager:
         (it would take a *second* refresh to recover).  ``CancelledError`` is
         deliberately NOT swallowed here (only ``TimeoutError`` from our own
         wait_for is handled, via the cancel path); a cancellation of *this*
-        coroutine must still propagate as before.
+        coroutine must still propagate as before — including one delivered
+        while parked in the post-timeout ``await self._task`` below: if the
+        drained task is STILL not done when that cancellation lands (it swallowed
+        its own cancellation and kept running), this is an EXTERNAL cancellation
+        of the drain coroutine itself, not a report on the drained task, and must
+        propagate rather than be swallowed — otherwise a caller (``restart()``)
+        would proceed to swap ``_shutdown_event``/``_ready_event`` while the old
+        run might still be alive, breaking the synchronous-pairing invariant
+        ``_race_teardown`` (KI-9 / #87) depends on.
         """
         self._generation += 1
         self._shutdown_event.set()
@@ -617,8 +691,13 @@ class AnalyzerManager:
             except TimeoutError:
                 _log.warning("AnalyzerManager: drain timed out; cancelling task")
                 self._task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                try:
                     await self._task
+                except asyncio.CancelledError:
+                    if not self._task.done():
+                        raise  # cancellation of the drain itself, not the drained task
+                except Exception:
+                    pass
             except asyncio.CancelledError:
                 # Cancellation of *this* drain coroutine — propagate unchanged.
                 raise

@@ -47,7 +47,6 @@ Test coverage:
 """
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -277,9 +276,7 @@ class TestEventAlreadySetFailsFast:
                     assert mgr._lsp is first
 
                     with pytest.raises(AnalyzerTornDownError):
-                        await asyncio.wait_for(
-                            mgr.request_definition("src/main.rs", 0, 0), 2
-                        )
+                        await asyncio.wait_for(mgr.request_definition("src/main.rs", 0, 0), 2)
                     assert not first.request_started.is_set()
 
                     first.teardown_gate.set()
@@ -433,9 +430,7 @@ class TestFastPathNoLeak:
                     first.request_gate.set()
 
                     baseline = asyncio.all_tasks()
-                    result = await asyncio.wait_for(
-                        mgr.request_definition("src/main.rs", 0, 0), 2
-                    )
+                    result = await asyncio.wait_for(mgr.request_definition("src/main.rs", 0, 0), 2)
                     assert result == expected
                     assert asyncio.all_tasks() == baseline
                 finally:
@@ -503,9 +498,7 @@ class TestAssertionErrorTransparency:
                     first.exc = AssertionError("Unexpected response from Language Server: None")
                     first.request_gate.set()
 
-                    result = await asyncio.wait_for(
-                        mgr.request_definition("src/main.rs", 0, 0), 2
-                    )
+                    result = await asyncio.wait_for(mgr.request_definition("src/main.rs", 0, 0), 2)
                     assert result is None
                 finally:
                     await mgr.shutdown()
