@@ -924,6 +924,194 @@ class TestSetextHeaders:
 
 
 # ---------------------------------------------------------------------------
+# DS-10 (#54): a ``---`` immediately after a closing code fence (no blank
+# line) must not be misparsed as a setext-h2 underline for the fence line.
+# ---------------------------------------------------------------------------
+
+
+class TestDS10FenceCloseNotSetext:
+    """Regression for DS-10: closing fence followed by ``---`` with no blank
+    line between must not be treated as a setext-h2 underline for the fence
+    delimiter line itself.
+    """
+
+    def test_dash_after_closing_fence_not_setext_header(self) -> None:
+        md = "```\ncode line\n```\n---\n## Real Header\n\nContent.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        # No breadcrumb should contain a bare fence delimiter as a title.
+        for c in chunks:
+            assert "```" not in c.breadcrumb, (
+                f"Fence line was misparsed as a setext header title: {c.breadcrumb!r}"
+            )
+        # The fence content and closing fence must remain intact in the body.
+        assert any("code line" in c.text for c in chunks)
+        assert any("```" in c.text for c in chunks), "Closing fence was dropped from body"
+        # The real header after the ``---`` must still be found.
+        headers = [c for c in chunks if "Real Header" in c.breadcrumb]
+        assert len(headers) == 1, (
+            f"Expected exactly one 'Real Header' section, got: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_dash_after_closing_fence_with_trailing_text(self) -> None:
+        md = "```\ncode line\n```\n---\nsome trailing text\n"
+        chunks = chunk_markdown(md, "doc.md")
+        for c in chunks:
+            assert "```" not in c.breadcrumb, (
+                f"Fence line was misparsed as a setext header title: {c.breadcrumb!r}"
+            )
+        assert any("some trailing text" in c.text for c in chunks)
+        assert any("code line" in c.text for c in chunks)
+
+
+# ---------------------------------------------------------------------------
+# DS-11 (#55): a leading ``---`` is only frontmatter if it is actually valid
+# frontmatter (non-blank line follows, and a closing delimiter exists later).
+# ---------------------------------------------------------------------------
+
+
+class TestDS11FrontmatterPreScan:
+    """Regression for DS-11: a leading ``---`` that is NOT valid frontmatter
+    (thematic break, or unterminated) must not swallow the rest of the doc.
+    """
+
+    def test_leading_dash_then_blank_line_is_thematic_break_not_frontmatter(self) -> None:
+        """``---`` immediately followed by a blank line is a thematic break."""
+        md = "---\n\n# Real Header\n\nBody text.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        headers = [c for c in chunks if "Real Header" in c.breadcrumb]
+        assert len(headers) == 1, (
+            f"Real Header was swallowed as bogus frontmatter: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_unterminated_leading_dash_block_not_swallowed(self) -> None:
+        """A leading ``---`` with no closing ``---``/``...`` anywhere is not frontmatter."""
+        md = "---\nkey: value\nanother: thing\n# Header\n\nBody.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        headers = [c for c in chunks if "Header" in c.breadcrumb]
+        assert len(headers) == 1, (
+            f"Unterminated leading '---' block swallowed the header: "
+            f"{[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_valid_frontmatter_still_opaque(self) -> None:
+        """Positive control mirroring test_yaml_frontmatter_close_dash_not_setext:
+        valid frontmatter (opening ``---`` followed by non-blank content, closed
+        by ``---``) is still swallowed as opaque body and the real header after
+        it is found.
+        """
+        md = "---\ntitle: My Doc\nauthor: Foo\n---\n\n# Real Header\n\nContent.\n"
+        chunks = chunk_markdown(md, "d.md")
+        breadcrumbs = {c.breadcrumb for c in chunks}
+        assert not any("author" in bc for bc in breadcrumbs), (
+            f"Valid frontmatter content leaked as a header: {breadcrumbs}"
+        )
+        assert any("Real Header" in bc for bc in breadcrumbs), (
+            f"Real ATX header missing after valid frontmatter: {breadcrumbs}"
+        )
+
+    def test_blank_line_before_closer_is_not_frontmatter(self) -> None:
+        """Tightening 1: a blank line inside the leading ``---…---`` region means
+        the block is prose + a later thematic break, NOT frontmatter.  A header
+        that appears after the blank line must NOT be swallowed.
+        """
+        md = "---\nintro prose line\n\n# Real Header\n\nbody\n\n---\nmore\n"
+        chunks = chunk_markdown(md, "doc.md")
+        headers = [c for c in chunks if "Real Header" in c.breadcrumb]
+        assert len(headers) == 1, (
+            f"Header after a blank line inside a bogus frontmatter span was "
+            f"swallowed: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_blank_line_before_dots_closer_is_not_frontmatter(self) -> None:
+        """Tightening 1, ``...`` closer variant: same as above with a ``...`` end
+        marker instead of ``---``.
+        """
+        md = "---\nintro prose line\n\n# Real Header\n\nbody\n\n...\nmore\n"
+        chunks = chunk_markdown(md, "doc.md")
+        headers = [c for c in chunks if "Real Header" in c.breadcrumb]
+        assert len(headers) == 1, (
+            f"Header after a blank line inside a bogus frontmatter span was "
+            f"swallowed: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_trailing_space_on_closing_delimiter_is_valid_frontmatter(self) -> None:
+        """Tightening 2: Jekyll accepts ``^---\\s*$`` — a closing ``---`` with a
+        trailing space must still close the frontmatter (be treated as opaque),
+        so ``title: X`` is NOT emitted as a bogus setext-H2 breadcrumb, and the
+        real header after is found.
+        """
+        md = "---\ntitle: X\n--- \n# Header\n"
+        chunks = chunk_markdown(md, "doc.md")
+        breadcrumbs = {c.breadcrumb for c in chunks}
+        assert not any("title" in bc for bc in breadcrumbs), (
+            f"Frontmatter content leaked as a setext header (trailing-space "
+            f"closer not recognized): {breadcrumbs}"
+        )
+        assert any("Header" in bc for bc in breadcrumbs), (
+            f"Real ATX header missing after trailing-space-closer frontmatter: {breadcrumbs}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# DS-23 (roll-up #63): 0-3 leading spaces are allowed for ATX headers and
+# fence delimiters (CommonMark); 4+ leading spaces is indented code.
+# ---------------------------------------------------------------------------
+
+
+class TestDS23IndentedFencesAndHeaders:
+    """Regression for DS-23: indented (1-3 space) fences/headers were missed."""
+
+    def test_two_space_indented_closing_fence_closes(self) -> None:
+        md = "```\ncode\n  ```\n# Header\n\nBody.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        headers = [c for c in chunks if "Header" in c.breadcrumb]
+        assert len(headers) == 1, (
+            f"Indented closing fence failed to close the fence: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_indented_atx_header_recognized(self) -> None:
+        md = "Some text.\n\n  ## Indented Header\n\nBody.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        headers = [c for c in chunks if "Indented Header" in c.breadcrumb]
+        assert len(headers) == 1, (
+            f"1-3 space indented ATX header not recognized: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_four_space_indented_header_is_not_a_header(self) -> None:
+        md = "Some text.\n\n    # Not A Header\n\nMore.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        assert all("Not A Header" not in c.breadcrumb for c in chunks), (
+            f"4-space indented '#' was incorrectly treated as a header: "
+            f"{[c.breadcrumb for c in chunks]}"
+        )
+        assert any("Not A Header" in c.text for c in chunks)
+
+    def test_four_space_indented_fence_is_not_a_fence(self) -> None:
+        md = "```\ncode\n    ```\nStill fence body.\n```\n\n# Header\n\nBody.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        # The 4-space-indented ``` must NOT close the fence, so "Still fence
+        # body." stays inside the fence and "Header" is still found once the
+        # real (unindented) closing fence is hit.
+        headers = [c for c in chunks if c.breadcrumb.endswith("Header")]
+        assert len(headers) == 1
+        assert any("Still fence body." in c.text for c in chunks)
+
+    def test_indented_closing_fence_then_dash_not_setext(self) -> None:
+        """Interaction: an indented closing fence followed immediately by
+        ``---`` must close the fence (DS-23) AND not misfire as a setext
+        header (DS-10).
+        """
+        md = "```\ncode\n  ```\n---\n## Header\n\nBody.\n"
+        chunks = chunk_markdown(md, "doc.md")
+        for c in chunks:
+            assert "```" not in c.breadcrumb, (
+                f"Fence line was misparsed as a setext header title: {c.breadcrumb!r}"
+            )
+        headers = [c for c in chunks if "Header" in c.breadcrumb]
+        assert len(headers) == 1
+
+
+# ---------------------------------------------------------------------------
 # Round-2 Hole 1 regression: mid-loop flush of a single oversized line
 # in _split_lines_into_chunks must delegate to _hard_split_text
 # ---------------------------------------------------------------------------
