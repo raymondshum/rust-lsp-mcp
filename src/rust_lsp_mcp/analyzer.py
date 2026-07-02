@@ -98,6 +98,19 @@ class AnalyzerTornDownError(RuntimeError):
     before the request completed.  Maps to a not_ready envelope at the tool layer."""
 
 
+class AnalyzerNotReadyError(RuntimeError):
+    """Raised by the delegate guards when the manager is not ready at call time.
+
+    A ``RuntimeError`` subclass for backward compatibility — existing callers
+    and tests that catch/assert ``RuntimeError`` keep working unchanged.  Tools
+    map it via ``require_ready()``'s canonical classification (see
+    ``rust_lsp_mcp.core.require_ready``): the same guard trips both while
+    still indexing and after a permanent failure (``state == "error"``), so
+    the tool layer must re-consult ``require_ready()`` rather than assume
+    ``not_ready`` — see #98.
+    """
+
+
 # Canonical tool-layer not_ready message for AnalyzerTornDownError — every tool
 # call site returns this verbatim.
 TORN_DOWN_RETRY_MESSAGE = (
@@ -491,13 +504,13 @@ class AnalyzerManager:
             ``None`` if the LSP returned no result.
 
         Raises:
-            RuntimeError: If the manager is not in the ready state (defensive guard).
+            AnalyzerNotReadyError: If the manager is not in the ready state (defensive guard).
             AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
                 this request is in flight.
         """
         lsp = self._lsp
         if lsp is None or self.state != STATE_READY:
-            raise RuntimeError(
+            raise AnalyzerNotReadyError(
                 "request_workspace_symbol called before analyzer is ready — "
                 "call require_ready() first"
             )
@@ -524,13 +537,13 @@ class AnalyzerManager:
         protocol failure that must surface as ``error``).
 
         Raises:
-            RuntimeError: If the manager is not in the ready state.
+            AnalyzerNotReadyError: If the manager is not in the ready state.
             AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
                 this request is in flight.
         """
         lsp = self._lsp
         if lsp is None or self.state != STATE_READY:
-            raise RuntimeError(
+            raise AnalyzerNotReadyError(
                 "request_document_symbols called before analyzer is ready — "
                 "call require_ready() first"
             )
@@ -570,13 +583,13 @@ class AnalyzerManager:
                   succeeded with no hits (rare but valid).
 
         Raises:
-            RuntimeError: If the manager is not in the ready state.
+            AnalyzerNotReadyError: If the manager is not in the ready state.
             AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
                 this request is in flight.
         """
         lsp = self._lsp
         if lsp is None or self.state != STATE_READY:
-            raise RuntimeError(
+            raise AnalyzerNotReadyError(
                 "request_definition called before analyzer is ready — call require_ready() first"
             )
         try:
@@ -616,13 +629,13 @@ class AnalyzerManager:
                   exists but has no in-tree callers (the zero-callers case).
 
         Raises:
-            RuntimeError: If the manager is not in the ready state.
+            AnalyzerNotReadyError: If the manager is not in the ready state.
             AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
                 this request is in flight.
         """
         lsp = self._lsp
         if lsp is None or self.state != STATE_READY:
-            raise RuntimeError(
+            raise AnalyzerNotReadyError(
                 "request_references called before analyzer is ready — call require_ready() first"
             )
         try:
@@ -650,13 +663,13 @@ class AnalyzerManager:
             A ``Hover`` dict, or ``None`` if the LSP returned no hover info.
 
         Raises:
-            RuntimeError: If the manager is not in the ready state.
+            AnalyzerNotReadyError: If the manager is not in the ready state.
             AnalyzerTornDownError: If the run is torn down (restart/shutdown) while
                 this request is in flight.
         """
         lsp = self._lsp
         if lsp is None or self.state != STATE_READY:
-            raise RuntimeError(
+            raise AnalyzerNotReadyError(
                 "request_hover called before analyzer is ready — call require_ready() first"
             )
         return await self._race_teardown(
