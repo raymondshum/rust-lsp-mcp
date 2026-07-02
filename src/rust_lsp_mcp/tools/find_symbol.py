@@ -6,8 +6,9 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
+from rust_lsp_mcp.analyzer import TORN_DOWN_RETRY_MESSAGE, AnalyzerTornDownError
 from rust_lsp_mcp.core import get_manager, mcp, require_ready, symbol_to_external
-from rust_lsp_mcp.envelope import error, not_found, ok
+from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
 
 _log = logging.getLogger(__name__)
 
@@ -62,6 +63,8 @@ async def find_symbol(name: str) -> dict[str, Any]:
 
     try:
         raw = await manager.request_workspace_symbol(name)
+    except AnalyzerTornDownError:
+        return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("find_symbol: LSP error for query %r", name)
         return error(f"LSP error: {exc}")

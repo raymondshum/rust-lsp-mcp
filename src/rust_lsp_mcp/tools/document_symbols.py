@@ -6,6 +6,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
+from rust_lsp_mcp.analyzer import TORN_DOWN_RETRY_MESSAGE, AnalyzerTornDownError
 from rust_lsp_mcp.core import (
     get_manager,
     mcp,
@@ -13,7 +14,7 @@ from rust_lsp_mcp.core import (
     symbol_to_external,
     validate_workspace_file,
 )
-from rust_lsp_mcp.envelope import error, ok
+from rust_lsp_mcp.envelope import error, not_ready, ok
 
 _log = logging.getLogger(__name__)
 
@@ -90,6 +91,8 @@ async def document_symbols(file: str) -> dict[str, Any]:
 
     try:
         raw = await manager.request_document_symbols(file)
+    except AnalyzerTornDownError:
+        return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("document_symbols: LSP error for file %r", file)
         return error(f"LSP error: {exc}")
