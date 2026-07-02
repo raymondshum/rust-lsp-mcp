@@ -31,6 +31,15 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# This image runs as root (no USER below) and /project is a host-uid-owned
+# bind mount, so the two UIDs never match. Since git 2.35.2, git refuses to
+# operate on a repo it doesn't "own" ("detected dubious ownership") unless
+# the path is allow-listed via safe.directory — otherwise `git -C /project
+# rev-parse HEAD` (status/staleness check) fails every time and
+# indexed_commit/current_commit/stale stay permanently null. Scope this to
+# the fixed workspace root rather than `safe.directory '*'` (least privilege).
+RUN git config --system --add safe.directory /project
+
 # --- uv (pinned, matches the dev container) --------------------------------
 COPY --from=ghcr.io/astral-sh/uv:0.7.13 /uv /usr/local/bin/uv
 
