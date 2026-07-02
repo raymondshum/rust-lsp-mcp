@@ -6,8 +6,12 @@ Runs in CI as part of ``pytest -m "not integration"``.
 
 Test coverage:
     Readiness gating:
-        - store None → not_ready (not a search result).
+        - store None → not_ready (not a search result), UNLESS the module-level
+          doc_store_state() reports "error" (permanent init failure), in which
+          case → error.
         - store present but is_ready=False → not_ready; search NOT called.
+        - store present with state == "error" → error (not not_ready); search
+          NOT called.
     Happy path:
         - store ready, search returns 2 hits → ok with results passed through.
         - result dict shape: each hit has file, breadcrumb, text, distance keys.
@@ -21,6 +25,7 @@ Test coverage:
 """
 
 import asyncio
+import contextlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -63,12 +68,40 @@ def _make_not_ready_store() -> MagicMock:
     return store
 
 
-def _run_search_docs(query: str = "install", limit: int = 5, store: Any = None) -> dict[str, Any]:
-    """Monkeypatch get_doc_store and call search_docs(); return the envelope."""
+def _make_error_store(error_message: str = "RuntimeError: boom") -> MagicMock:
+    """Return a fake DocStore with state="error" (permanent failure)."""
+    store = MagicMock()
+    store.is_ready = False
+    store.state = "error"
+    store.error_message = error_message
+    return store
+
+
+def _run_search_docs(
+    query: str = "install",
+    limit: int = 5,
+    store: Any = None,
+    doc_store_state_return: Any = None,
+) -> dict[str, Any]:
+    """Monkeypatch get_doc_store (and optionally doc_store_state) and call search_docs().
+
+    ``doc_store_state_return``, when given, patches
+    ``search_mod.doc_store_state`` to return that ``(state, error)`` tuple
+    instead of consulting the real module singleton — used to test the
+    ``store is None`` branch deterministically regardless of any real
+    doc_store module state left over from other test files.
+    """
     import rust_lsp_mcp.tools.search_docs as search_mod
 
     async def _inner() -> dict[str, Any]:
-        with patch.object(search_mod, "get_doc_store", return_value=store):
+        patches = [patch.object(search_mod, "get_doc_store", return_value=store)]
+        if doc_store_state_return is not None:
+            patches.append(
+                patch.object(search_mod, "doc_store_state", return_value=doc_store_state_return)
+            )
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
             return await search_mod.search_docs(query=query, limit=limit)
 
     return asyncio.run(_inner())
@@ -83,11 +116,11 @@ class TestReadinessGating:
     """store None or is_ready=False must return not_ready — never a search result."""
 
     def test_store_none_returns_not_ready(self) -> None:
-        result = _run_search_docs(store=None)
+        result = _run_search_docs(store=None, doc_store_state_return=("building", None))
         assert result["status"] == STATUS_NOT_READY
 
     def test_store_none_not_ready_has_message(self) -> None:
-        result = _run_search_docs(store=None)
+        result = _run_search_docs(store=None, doc_store_state_return=("building", None))
         assert "message" in result
         assert result["message"]  # non-empty
 
@@ -104,9 +137,65 @@ class TestReadinessGating:
 
     def test_not_ready_is_not_error(self) -> None:
         """not_ready must not be confused with error."""
-        result = _run_search_docs(store=None)
+        result = _run_search_docs(store=None, doc_store_state_return=("building", None))
         assert result["status"] == STATUS_NOT_READY
         assert result["status"] != STATUS_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Error-state surfacing (DS-14): a permanently-failed build is NOT not_ready.
+# ---------------------------------------------------------------------------
+
+
+class TestErrorState:
+    """A doc index that failed to build/init must surface as error, not not_ready."""
+
+    def test_errored_store_returns_error(self) -> None:
+        """store present with state == "error" → error envelope."""
+        store = _make_error_store("RuntimeError: embedding model unavailable")
+        result = _run_search_docs(store=store)
+        assert result["status"] == STATUS_ERROR
+
+    def test_errored_store_error_not_not_ready(self) -> None:
+        store = _make_error_store()
+        result = _run_search_docs(store=store)
+        assert result["status"] != STATUS_NOT_READY
+
+    def test_errored_store_message_includes_reason(self) -> None:
+        store = _make_error_store("RuntimeError: embedding model unavailable")
+        result = _run_search_docs(store=store)
+        assert "embedding model unavailable" in result["message"]
+
+    def test_errored_store_message_mentions_refresh(self) -> None:
+        store = _make_error_store()
+        result = _run_search_docs(store=store)
+        assert "refresh" in result["message"].lower()
+
+    def test_errored_store_search_never_called(self) -> None:
+        """A permanently-failed store must never have search() invoked on it."""
+        store = _make_error_store()
+        _run_search_docs(store=store)
+        store.search.assert_not_called()
+
+    def test_store_none_with_init_error_returns_error(self) -> None:
+        """store is None AND doc_store_state() reports "error" → error envelope."""
+        result = _run_search_docs(
+            store=None,
+            doc_store_state_return=("error", "RuntimeError: chroma path unwritable"),
+        )
+        assert result["status"] == STATUS_ERROR
+
+    def test_store_none_with_init_error_message_includes_reason(self) -> None:
+        result = _run_search_docs(
+            store=None,
+            doc_store_state_return=("error", "RuntimeError: chroma path unwritable"),
+        )
+        assert "chroma path unwritable" in result["message"]
+
+    def test_store_none_still_building_returns_not_ready(self) -> None:
+        """store is None but doc_store_state() reports "building" → not_ready, not error."""
+        result = _run_search_docs(store=None, doc_store_state_return=("building", None))
+        assert result["status"] == STATUS_NOT_READY
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +297,7 @@ class TestEmptyResults:
     def test_empty_and_not_ready_statuses_distinct(self) -> None:
         """not_found (empty store) vs not_ready (rebuilding) must differ."""
         empty_result = _run_search_docs(store=_make_ready_store(search_return=[]))
-        not_ready_result = _run_search_docs(store=None)
+        not_ready_result = _run_search_docs(store=None, doc_store_state_return=("building", None))
         assert empty_result["status"] != not_ready_result["status"]
         assert empty_result["status"] == STATUS_NOT_FOUND
         assert not_ready_result["status"] == STATUS_NOT_READY

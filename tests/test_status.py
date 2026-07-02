@@ -13,6 +13,7 @@ Test coverage:
     - All cases return status="ok" (tool is always ungated).
 """
 
+import contextlib
 import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -37,12 +38,17 @@ def _make_manager(
 
     Sets ``_lsp`` to a non-None sentinel when state==ready so that
     ``is_ready`` (which checks both ``state`` and ``_lsp``) behaves correctly.
+
+    ``_error`` is set to ``None`` so ``status()``'s ``error_message`` read
+    never raises ``AttributeError`` on this stub (it does not go through
+    ``__init__``).
     """
     mgr = AnalyzerManager.__new__(AnalyzerManager)
     mgr.state = state
     mgr._lsp = object() if state == STATE_READY else None  # type: ignore[assignment]
     mgr._indexed_commit = indexed_commit
     mgr._repository_root = repository_root
+    mgr._error = None
     return mgr
 
 
@@ -59,11 +65,18 @@ def _call_status(
     manager: AnalyzerManager | None,
     subprocess_run_return: Any = None,
     subprocess_raises: Exception | None = None,
+    doc_store_state_return: tuple[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """Invoke the status tool with the given manager and git subprocess stub.
 
-    Patches both ``rust_lsp_mcp.core._manager`` (via ``get_manager``) and
+    Patches ``rust_lsp_mcp.core._manager`` (via ``get_manager``) and
     ``rust_lsp_mcp.tools.status.subprocess.run`` so tests are fully hermetic.
+    When ``doc_store_state_return`` is given, also patches
+    ``rust_lsp_mcp.tools.status.doc_store_state`` to that fixed value —
+    otherwise the real (module-singleton-backed) ``doc_store_state`` runs,
+    which is fine for tests that don't care about the doc-index fields but
+    would be nondeterministic (and coupled to other test files' state) for
+    tests that do.
     """
     import rust_lsp_mcp.core as core_mod
     import rust_lsp_mcp.tools.status as status_mod
@@ -73,10 +86,17 @@ def _call_status(
             raise subprocess_raises
         return subprocess_run_return  # type: ignore[return-value]
 
-    with (
+    patches = [
         patch.object(core_mod, "_manager", manager),
         patch.object(status_mod.subprocess, "run", side_effect=_fake_run),
-    ):
+    ]
+    if doc_store_state_return is not None:
+        patches.append(
+            patch.object(status_mod, "doc_store_state", return_value=doc_store_state_return)
+        )
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         return status_mod.status()
 
 
@@ -217,3 +237,61 @@ class TestStatusIndexedCommitNone:
     def test_stale_none(self) -> None:
         # Cannot determine staleness when indexed_commit is unknown.
         assert self._result()["stale"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: doc_index_state / doc_index_error (DS-14) and analyzer_error (DS-07)
+# ---------------------------------------------------------------------------
+
+
+class TestStatusDocIndex:
+    def test_doc_index_building(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("building", None),
+        )
+        assert result["doc_index_state"] == "building"
+        assert result["doc_index_error"] is None
+
+    def test_doc_index_ready(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("ready", None),
+        )
+        assert result["doc_index_state"] == "ready"
+        assert result["doc_index_error"] is None
+        # A ready analyzer + ready doc index must report analyzer_error=None.
+        assert result["analyzer_error"] is None
+
+    def test_doc_index_error(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("error", "RuntimeError: embedding model unavailable"),
+        )
+        assert result["doc_index_state"] == "error"
+        assert result["doc_index_error"] == "RuntimeError: embedding model unavailable"
+
+    def test_doc_index_error_does_not_affect_analyzer_error(self) -> None:
+        """The two error surfaces (analyzer vs doc index) are independent."""
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("error", "boom"),
+        )
+        assert result["analyzer_error"] is None
+        assert result["status"] == STATUS_OK
+
+    def test_no_manager_analyzer_error_none(self) -> None:
+        result = _call_status(
+            None,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("building", None),
+        )
+        assert result["analyzer_error"] is None

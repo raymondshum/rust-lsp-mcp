@@ -19,9 +19,9 @@ Every tool returns an object with a `status` field. The four possible values are
 | Status | Meaning |
 |---|---|
 | `ok` | The query ran successfully. The payload may be empty — an empty result is a meaningful answer, not an error. |
-| `not_ready` | The code analyzer is still indexing (or the documentation index is rebuilding). Wait and retry. Always includes a `message` field. |
+| `not_ready` | The code analyzer is still indexing (or the documentation index is building). Transient — wait and retry. Always includes a `message` field. |
 | `not_found` | The requested thing does not exist at that name or position. Always includes a `message` field. |
-| `error` | Bad input or an internal failure. Always includes a `message` field. |
+| `error` | Bad input, an internal failure, *or* a **permanently** failed analyzer/doc index (`state`/`doc_index_state` == `"error"` on the `status` tool). Unlike `not_ready`, this does not resolve on its own — call the `refresh` tool to recover. Always includes a `message` field. |
 
 **Positions are 1-based.** The first character of a file is line 1, character 1.
 A `character` offset counts **Unicode codepoints** (the intuitive "Nth
@@ -313,12 +313,16 @@ exact words do not appear.
 | Status | Fields |
 |---|---|
 | `ok` | `results`: list of chunk objects, best match first (see below). |
-| `not_ready` | `message` — the documentation index is missing or is currently rebuilding. Do not interpret this as "no matching docs". Retry once the index is ready (poll `status`, or wait for `refresh` to return). |
+| `not_ready` | `message` — the documentation index is still building (transient — the initial build, or a `refresh`-triggered rebuild, is in flight). Do not interpret this as "no matching docs". Retry once the index is ready (poll `status`, or wait for `refresh` to return). |
 | `not_found` | `message` — the index is ready and the collection is genuinely empty. |
-| `error` | `message` — unexpected failure from the search layer. |
+| `error` | `message` — the documentation index **failed to build or initialise** (permanent until recovered — unlike `not_ready`, retrying immediately will not help; the message includes the underlying reason), or an unexpected failure from the search layer itself. Call `refresh` to rebuild the index and clear the failure. |
 
-The `not_ready` state for this tool is about the documentation index, which is
-separate from the code analyzer's readiness. Both can be checked with `status`.
+`not_ready` and `error` mean different things here: `not_ready` is transient
+(the index is actively being built and will become `ready` on its own),
+while `error` is permanent until you call `refresh` (the build already
+finished, unsuccessfully). The `doc_index_state` field on the `status` tool
+distinguishes the same three states (`"building"` / `"ready"` / `"error"`)
+independently of the code analyzer's own readiness.
 
 Each item in `results`:
 
@@ -359,9 +363,11 @@ Each item in `results`:
 
 ### `status`
 
-Full status of the code analyzer. Always callable — never returns `not_ready`.
-Use this to decide whether to issue navigation queries, and to detect stale
-indexes.
+Full status of the code analyzer and the documentation index. Always callable
+— always returns `ok` at the envelope level, even when the analyzer or doc
+index has failed (failures are reported as *field values*, not as the
+envelope status). Use this to decide whether to issue navigation queries or
+`search_docs` calls, and to detect stale indexes.
 
 **Inputs:** none.
 
@@ -371,10 +377,13 @@ Always `ok`, with these fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `state` | `"indexing"` or `"ready"` | Whether the analyzer has finished indexing. |
+| `state` | `"indexing"`, `"ready"`, or `"error"` | Whether the analyzer has finished indexing. `"error"` means the background indexing run failed permanently — gated tools (via `require_ready`) return an `error` envelope (not `not_ready`) while in this state. Call `refresh` to retry. |
+| `analyzer_error` | string or `null` | Diagnostic message when `state` is `"error"`, else `null`. |
 | `indexed_commit` | string or `null` | The git commit hash that was current when indexing started. `null` if not yet captured or git is unavailable. |
 | `current_commit` | string or `null` | The git commit hash right now. `null` on any failure (non-git directory, git not installed, etc.). |
 | `stale` | boolean or `null` | `true` if the two commit hashes differ; `false` if they match; `null` if either hash is unknown. |
+| `doc_index_state` | `"building"`, `"ready"`, or `"error"` | Whether the documentation search index (used by `search_docs`) has finished building. Independent of `state` above. |
+| `doc_index_error` | string or `null` | Diagnostic message when `doc_index_state` is `"error"`, else `null`. |
 
 **Caution on `stale`:** the comparison looks at committed versions only. If you
 have uncommitted edits in your working tree, `stale` will still be `false`. It
@@ -386,9 +395,12 @@ means "no committed changes since indexing began," not a freshness guarantee.
 {
   "status": "ok",
   "state": "ready",
+  "analyzer_error": null,
   "indexed_commit": "a3f1c9d",
   "current_commit": "a3f1c9d",
-  "stale": false
+  "stale": false,
+  "doc_index_state": "ready",
+  "doc_index_error": null
 }
 ```
 
@@ -398,7 +410,8 @@ means "no committed changes since indexing began," not a freshness guarantee.
 
 A minimal readiness check. Always callable — never returns `not_ready`. Use
 this for a lightweight poll to know when it is safe to call navigation tools.
-For the full report (commit hashes, staleness), use `status` instead.
+For the full report (`analyzer_error`, commit hashes, staleness, doc-index
+state), use `status` instead.
 
 **Inputs:** none.
 
@@ -408,7 +421,7 @@ Always `ok`, with one field:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `state` | `"indexing"` or `"ready"` | Whether the analyzer has finished indexing. |
+| `state` | `"indexing"`, `"ready"`, or `"error"` | Whether the analyzer has finished indexing. `"error"` means the background indexing run failed permanently (see `status` for the diagnostic message); gated tools return `error`, not `not_ready`, in that state. |
 
 **Example response**
 
@@ -424,7 +437,10 @@ Always `ok`, with one field:
 ### `refresh`
 
 Rebuild everything from scratch: restart the code analyzer and rebuild the
-documentation index.
+documentation index. This is also the **recovery path** for either index
+having failed permanently (`state == "error"` on the analyzer,
+`doc_index_state == "error"` on the doc index) — a fresh `refresh` clears
+both failures and starts over.
 
 **Inputs:** none.
 
@@ -433,11 +449,18 @@ documentation index.
 | Status | Fields |
 |---|---|
 | `ok` | `state`: `"indexing"` (the code re-index has started in the background); `message`: a polling hint. |
-| `error` | `message` — one of two cases: (1) the analyzer is not running, in which case nothing is started; or (2) the documentation rebuild failed, in which case the code re-index has *already* started and continues in the background. |
+| `error` | `message` — one of two cases: (1) the analyzer is not running, in which case nothing is started; or (2) the documentation rebuild/re-init failed, in which case the code re-index has *already* started and continues in the background. |
 
 After `refresh` returns `ok`, the code analyzer continues indexing in the
 background. Poll `status` or `analyzer_status` until `state` is `"ready"`
 before issuing navigation queries.
+
+**Doc-index recovery detail:** if the documentation index was never
+initialised, or is currently in the `"error"` state, `refresh` re-runs its
+full startup sequence (construct + adopt-or-build) rather than calling
+rebuild on a store that may not exist or is known-broken. Otherwise (a
+healthy index already present) it rebuilds that index in place. Either way
+the doc-index half completes before `refresh` returns.
 
 **Note on speed:** `refresh` does not wipe rust-analyzer's saved on-disk cargo
 cache. Only the in-process LSP context is torn down and respawned. Re-indexing
@@ -458,9 +481,10 @@ is therefore fast — rust-analyzer reuses its prior work.
 ### `probe`
 
 **Diagnostic only.** Confirms the readiness gate works end-to-end. Returns
-`not_ready` while the analyzer is indexing, and `ok` with a short message once
-it is ready. This tool has no everyday use; it exists to verify the gating
-mechanism during development and testing.
+`not_ready` while the analyzer is indexing, `error` if the analyzer's
+background run failed (`state == "error"`), and `ok` with a short message
+once it is ready. This tool has no everyday use; it exists to verify the
+gating mechanism during development and testing.
 
 ---
 
