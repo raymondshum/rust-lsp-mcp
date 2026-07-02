@@ -40,10 +40,17 @@ async def document_symbols(file: str) -> dict[str, Any]:
           {
             "name":      str,        # symbol name as declared
             "kind":      str,        # human-readable SymbolKind (e.g. "Function")
-            "line":      int,        # 1-indexed line number (start of declaration)
-            "character": int,        # 1-indexed character offset (start of declaration)
+            "line":      int,        # 1-indexed line number of the symbol NAME
+            "character": int,        # 1-indexed character offset of the symbol NAME
             "container": str | null  # enclosing scope name, or null
           }
+
+      ``line``/``character`` point at the symbol's *name* (LSP
+      ``selectionRange``), not the start of the full declaration — so a symbol
+      preceded by doc comments or ``#[attributes]`` still resolves to the name
+      itself. This position is suitable for feeding directly into ``hover``,
+      ``goto_definition``, or ``find_references``. Falls back to the start of
+      the declaration (``range``) only if a provider omits ``selectionRange``.
 
       Note: document-symbol results carry a top-level ``range`` rather than a
       ``location`` sub-dict, so ``container`` is almost always ``null`` (the LSP

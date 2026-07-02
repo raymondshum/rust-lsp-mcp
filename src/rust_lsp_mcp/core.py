@@ -332,7 +332,11 @@ def symbol_to_external(
 
     Position resolution order:
         1. ``sym["location"]["range"]["start"]`` (workspace-symbol shape).
-        2. ``sym["range"]["start"]`` (document-symbol shape, no location).
+        2. ``sym["selectionRange"]["start"]`` (document-symbol shape, no
+           location) — the symbol's *name* position, suitable for feeding
+           back into hover/goto_definition/find_references.
+        3. ``sym["range"]["start"]`` (document-symbol shape) — fallback used
+           when ``selectionRange`` is absent or malformed.
 
     File path resolution order:
         1. ``sym["location"]["relativePath"]`` or ``sym["location"]["uri"]``
@@ -361,14 +365,24 @@ def symbol_to_external(
         character: int = pos_info["character"]
     else:
         # Document-symbol shape: top-level range, no location.
-        top_range = sym.get("range")
-        if top_range is None:
+        #
+        # Per LSP, a DocumentSymbol's `range` spans the whole declaration
+        # *including* leading doc comments and `#[attributes]`, while
+        # `selectionRange` covers just the symbol's name.  Prefer
+        # `selectionRange` so the returned position lands on the name and can
+        # be fed straight back into hover/goto_definition/find_references;
+        # fall back to `range` when `selectionRange` is absent or malformed
+        # (defensive — keep working if a provider omits it).
+        pos_range = sym.get("selectionRange")
+        if not isinstance(pos_range, Mapping) or "start" not in pos_range:
+            pos_range = sym.get("range")
+        if pos_range is None:
             _log.debug(
                 "symbol_to_external: candidate %r has no location or range — skipped",
                 sym_name,
             )
             return None
-        start = top_range.get("start", {})
+        start = pos_range.get("start", {})
         ext = lsp_to_external(
             lsp_line=start.get("line", 0),
             lsp_character=start.get("character", 0),
