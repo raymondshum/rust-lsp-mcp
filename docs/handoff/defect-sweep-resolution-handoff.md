@@ -33,7 +33,9 @@ docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve
     (cherry-pick `974f23f`); record PR #80.
   - Unit 9 — DS-15 (#59) + DS-16 (#60): closed via PR #81 → `main` (cherry-pick `4f0f6cb`);
     record PR #82.
-  - **3 issues remain open** (#61, #62, #63; #63 stays open until the roll-up lows land).
+  - Unit 10 — DS-17 (#61) + DS-18 (#62) + DS-28 (roll-up #63): closed via PR #83 → `main`
+    (cherry-pick `fc2fe8e`); record PR #84.
+  - **1 issue remains open** (#63 — roll-up; remaining lows DS-19/DS-20/DS-24/DS-27).
 - Nothing is deferred by decision yet — sequencing below is a recommendation, not a commitment.
 
 ## What's left (grounded)
@@ -59,9 +61,9 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 | DS-14 | #58 | Med | `tools/status.py` | ✅ Done — PR #71 (same commit). `status.doc_index_state`; search_docs errors on permanent failure; refresh re-inits an absent/errored store. |
 | DS-15 | #59 | Med | `scripts/setup.sh:34` | ✅ Done — PR #81 → `main`, cherry-picked to `bob_prototype` (`4f0f6cb`). Signing-disable gated behind `_in_container`. |
 | DS-16 | #60 | Med | `Dockerfile:80` | ✅ Done — PR #81 (same cherry-pick). `git config --system --add safe.directory /project`. (Dockerfile is shared, not bob-only.) |
-| DS-17 | #61 | Med | `tests/test_phase34_adversarial.py:228` | Open. Malformed-response branch never runs in CI. Fix = drop `integration` marker on the two `_MalformedLSP` tests (they need no live analyzer). |
-| DS-18 | #62 | Med | `core.py:55` | Open. `_lifespan`/`analyzer_lifespan` untested (swallow contract + teardown). |
-| DS-19…DS-28 | #63 | Low | (roll-up) | Open. **DS-21 ✅ done** (PR #67, with DS-03/04). **DS-22 ✅, DS-23 ✅, DS-25 ✅, DS-26 ✅** (PR #77, #75, #79). Remaining: `status` sync subprocess (DS-19), dead null-check (DS-20), dead sentinel (DS-24), SELinux relabel (DS-27), no tool-registration test (DS-28). Issue closes when all land. |
+| DS-17 | #61 | Med | `tests/test_phase34_adversarial.py:228` | ✅ Done — PR #83 → `main`, cherry-picked to `bob_prototype` (`fc2fe8e`). Fake-ready manager; two malformed tests de-integrated (mutation-verified). |
+| DS-18 | #62 | Med | `core.py:55` | ✅ Done — PR #83 (same cherry-pick), atop the readiness unit's test_lifespan_startup.py. Nav-continues-after-docstore-failure + analyzer_lifespan wiring covered. |
+| DS-19…DS-28 | #63 | Low | (roll-up) | Open. **DS-21 ✅ done** (PR #67, with DS-03/04). **DS-22 ✅, DS-23 ✅, DS-25 ✅, DS-26 ✅** (PR #77, #75, #79). Remaining: `status` sync subprocess (DS-19), dead null-check (DS-20), dead sentinel (DS-24), SELinux relabel (DS-27). **DS-28 ✅** (PR #83). Issue closes when all land. |
 
 **Recommended sequencing (human's call):** DS-01/02 → DS-03/04/21 → DS-05/06 → Mediums by area (RAG
 DS-10/11/23; docs/config DS-13/25/26; test-gaps DS-17/18/28) → Lows opportunistically.
