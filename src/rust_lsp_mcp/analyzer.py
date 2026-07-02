@@ -444,10 +444,26 @@ class AnalyzerManager:
             teardown_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await teardown_task
+            # An external cancellation (client disconnect) delivered while we
+            # were suspended in the reap above is suppressed along with the
+            # child's own CancelledError.  Any earlier cancel would have been
+            # raised at the asyncio.wait suspension (and re-raised by the
+            # except branch above), so a nonzero cancelling() count here can
+            # only mean a cancel landed in the reap window — honour it instead
+            # of returning a result to a caller that already cancelled us.
+            cur = asyncio.current_task()
+            if cur is not None and cur.cancelling():
+                raise asyncio.CancelledError
             return request_task.result()
         request_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await request_task
+        # Same reap-window guard as the fast path: an external cancel landing
+        # while the request was acknowledging its own cancellation must
+        # propagate as CancelledError, not be converted to a teardown error.
+        cur = asyncio.current_task()
+        if cur is not None and cur.cancelling():
+            raise asyncio.CancelledError
         raise AnalyzerTornDownError(f"analyzer torn down during {op} request")
 
     # -----------------------------------------------------------------------

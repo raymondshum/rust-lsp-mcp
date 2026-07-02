@@ -48,6 +48,15 @@ Test coverage:
           the razor-thin ``_must_cancel`` race (timeout firing between the
           drain's suspension points).  Together they preserve the event/_lsp
           pairing invariant ``_race_teardown`` depends on.
+    viii. Reap-window cancellation (adversarial finding, round 1): an
+          EXTERNAL cancellation of the delegate task landing while
+          ``_race_teardown`` is suspended in one of its suppressed reap
+          awaits (fast path: ``await teardown_task``; teardown branch:
+          ``await request_task``) is swallowed by the ``suppress`` and must
+          be re-raised — the delegate task must end cancelled, never return
+          a normal result or convert the cancel into
+          ``AnalyzerTornDownError``.  Guarded by the ``cancelling()``-checked
+          re-raise after each reap.
 """
 
 import asyncio
@@ -170,6 +179,52 @@ class UndeadLsp(FakeLsp):
         await self.server.shutdown()  # pragma: no cover - unreachable in this test
         await self.server.stop()
         self.exited = True
+
+
+class SlowCancelNavLsp(NavLsp):
+    """NavLsp whose request handler needs an extra turn to acknowledge a cancel.
+
+    Mirrors multilspy's real cancellation path: ``Condition.wait`` must
+    reacquire the cv lock on cancellation, which can suspend if the response
+    dispatcher holds it.  On the first ``CancelledError`` the handler sets
+    ``cancel_entered`` and parks on ``cancel_release`` before re-raising —
+    deterministically widening the window in which ``_race_teardown``'s
+    teardown branch is suspended at its suppressed ``await request_task`` reap.
+    """
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.cancel_entered = asyncio.Event()
+        self.cancel_release = asyncio.Event()
+
+    async def request_definition(self, *a: Any) -> Any:
+        self.request_started.set()
+        try:
+            await self.request_gate.wait()
+        except asyncio.CancelledError:
+            self.cancel_entered.set()
+            await self.cancel_release.wait()
+            raise
+        return self.result
+
+
+class ExplodingCancelNavLsp(NavLsp):
+    """NavLsp whose request handler raises RuntimeError when cancelled.
+
+    Drives the except-CancelledError branch's reap: the request task then
+    completes with a stored *exception* (not cancelled), which the reap's
+    suppressed await must retrieve — otherwise asyncio reports
+    "Task exception was never retrieved" via the loop exception handler at
+    GC time.
+    """
+
+    async def request_definition(self, *a: Any) -> Any:
+        self.request_started.set()
+        try:
+            await self.request_gate.wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("boom during cancel") from None
+        return self.result
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +540,60 @@ class TestDelegateCancellationPropagates:
 
         asyncio.run(_scenario())
 
+    def test_cancel_reap_retrieves_request_exception(self) -> None:
+        """The cancel-path reap must retrieve a request exception (no GC warning).
+
+        If the request task completes with a stored *exception* while the
+        delegate is being cancelled (ExplodingCancelNavLsp raises RuntimeError
+        on cancel), the except-CancelledError branch's suppressed
+        ``await request_task`` retrieves it.  Were that reap removed, asyncio
+        would report "Task exception was never retrieved" — via the LOOP
+        exception handler at GC time, not the warnings machinery — so this
+        test records loop-handler events and asserts none fire after the
+        delegate task is dropped and collected.
+        """
+        instances: list[ExplodingCancelNavLsp] = []
+
+        async def _scenario() -> None:
+            import gc
+
+            handler_events: list[dict[str, Any]] = []
+            asyncio.get_running_loop().set_exception_handler(
+                lambda loop, ctx: handler_events.append(ctx)
+            )
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(
+                    analyzer_module,
+                    "PatchedRustAnalyzer",
+                    _factory(ExplodingCancelNavLsp, instances),
+                )
+                mgr = _make_manager()
+                try:
+                    await mgr.start()
+                    first = await _await_first_instance(instances)
+                    await asyncio.wait_for(mgr._ready_event.wait(), 2)
+                    assert mgr.is_ready
+
+                    d = asyncio.create_task(mgr.request_definition("src/main.rs", 0, 0))
+                    await asyncio.wait_for(first.request_started.wait(), 2)
+
+                    d.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await d
+
+                    # Drop the only reference and force collection while the
+                    # loop is still running — an unretrieved request exception
+                    # would fire the handler here.
+                    del d
+                    gc.collect()
+                    await asyncio.sleep(0)
+                    assert handler_events == []
+                finally:
+                    await mgr.shutdown()
+                    await _cancel_leaked_tasks()
+
+        asyncio.run(_scenario())
+
 
 # ---------------------------------------------------------------------------
 # vi — AssertionError transparency through the helper
@@ -611,6 +720,131 @@ class TestExternalCancelDuringUndeadDrain:
                 finally:
                     if first is not None:
                         first.second_gate.set()
+                    await _cancel_leaked_tasks()
+
+        asyncio.run(_scenario())
+
+
+# ---------------------------------------------------------------------------
+# viii — external cancel landing in _race_teardown's suppressed reap windows
+# ---------------------------------------------------------------------------
+
+
+async def _await_instance(instances: list, idx: int, timeout: float = 2.0) -> Any:
+    """Like _await_first_instance, but for the idx-th constructed instance."""
+
+    async def _poll() -> Any:
+        while len(instances) <= idx:
+            await asyncio.sleep(0)
+        return instances[idx]
+
+    return await asyncio.wait_for(_poll(), timeout)
+
+
+class TestReapWindowCancellation:
+    """External cancels landing inside _race_teardown's reap awaits (adversarial).
+
+    Both reaps sit under ``contextlib.suppress(asyncio.CancelledError, ...)``:
+    a cancel thrown into the delegate task while it is suspended there is
+    swallowed along with the reaped child's own cancellation.  The
+    ``cancelling()``-checked re-raise after each reap restores the contract
+    that a delegate cancellation always propagates ``CancelledError``.
+    """
+
+    def test_fast_path_external_cancel_never_swallowed(self) -> None:
+        """Sweep cancel delivery over turn offsets 0..6 around a healthy call.
+
+        The fast-path reap (``await teardown_task`` after cancelling it) opens
+        a 1-turn window on EVERY successful delegate call; the exact offset
+        depends on scheduling, so the sweep asserts the invariant at every
+        offset instead of pinning one: if ``d.cancel()`` returned True (the
+        task was still pending), awaiting ``d`` must raise ``CancelledError``
+        — never return the normal result with the cancel unacknowledged.
+        """
+        instances: list[NavLsp] = []
+
+        async def _scenario() -> None:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(analyzer_module, "PatchedRustAnalyzer", _factory(NavLsp, instances))
+                for k in range(7):
+                    mgr = _make_manager()
+                    try:
+                        await mgr.start()
+                        inst = await _await_instance(instances, k)
+                        await asyncio.wait_for(mgr._ready_event.wait(), 2)
+                        assert mgr.is_ready
+
+                        expected = [{"sentinel": k}]
+                        inst.result = expected
+                        inst.request_gate.set()
+
+                        d = asyncio.create_task(mgr.request_definition("src/main.rs", 0, 0))
+                        for _ in range(k):
+                            await asyncio.sleep(0)
+                        requested = d.cancel()
+                        if requested:
+                            # Task.cancel() returned True => d was still
+                            # pending; the cancel MUST be honoured.
+                            with pytest.raises(asyncio.CancelledError):
+                                await asyncio.wait_for(d, 2)
+                        else:
+                            # d already completed before the cancel — the
+                            # normal result is the only acceptable outcome.
+                            assert d.result() == expected, f"k={k}"
+                    finally:
+                        await mgr.shutdown()
+                await _cancel_leaked_tasks()
+
+        asyncio.run(_scenario())
+
+    def test_teardown_reap_external_cancel_not_converted(self) -> None:
+        """A cancel landing in the teardown-branch reap must NOT become
+        AnalyzerTornDownError.
+
+        The teardown branch cancels ``request_task`` and awaits it under
+        ``suppress(CancelledError, Exception)``; SlowCancelNavLsp holds the
+        request's cancel acknowledgement open, so the delegate task is parked
+        at that reap when the external cancel (client disconnect) arrives.
+        Swallowing it would raise AnalyzerTornDownError → the tool would send
+        not_ready to a client that already disconnected.
+        """
+        instances: list[SlowCancelNavLsp] = []
+
+        async def _scenario() -> None:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(
+                    analyzer_module, "PatchedRustAnalyzer", _factory(SlowCancelNavLsp, instances)
+                )
+                mgr = _make_manager()
+                first: SlowCancelNavLsp | None = None
+                try:
+                    await mgr.start()
+                    first = await _await_first_instance(instances)
+                    await asyncio.wait_for(mgr._ready_event.wait(), 2)
+                    assert mgr.is_ready
+
+                    d = asyncio.create_task(mgr.request_definition("src/main.rs", 0, 0))
+                    await asyncio.wait_for(first.request_started.wait(), 2)
+
+                    # Teardown wins the race: _race_teardown cancels
+                    # request_task, whose handler parks on cancel_release —
+                    # d is now suspended at the suppressed reap await.
+                    r = asyncio.create_task(mgr.restart())
+                    await asyncio.wait_for(first.cancel_entered.wait(), 2)
+
+                    # External cancel (client disconnect) lands in the reap
+                    # window, then the request finishes acknowledging.
+                    d.cancel()
+                    first.cancel_release.set()
+
+                    with pytest.raises(asyncio.CancelledError):
+                        await asyncio.wait_for(d, 2)
+
+                    await asyncio.wait_for(r, 2)
+                finally:
+                    if first is not None:
+                        first.cancel_release.set()
+                    await mgr.shutdown()
                     await _cancel_leaked_tasks()
 
         asyncio.run(_scenario())
