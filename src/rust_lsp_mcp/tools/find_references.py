@@ -6,7 +6,13 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
-from rust_lsp_mcp.core import get_manager, location_to_external, mcp, require_ready
+from rust_lsp_mcp.core import (
+    get_manager,
+    location_to_external,
+    mcp,
+    require_ready,
+    validate_workspace_file,
+)
 from rust_lsp_mcp.envelope import error, not_found, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
@@ -87,7 +93,10 @@ async def find_references(
       ``analyzer_status`` reports ``"ready"``.
 
     - ``error`` — input validation failed (line/character < 1) or an unexpected
-      exception from the LSP layer; includes a message.
+      exception from the LSP layer; includes a message.  ``file`` must be a
+      workspace-relative path that does not resolve outside the workspace
+      root (absolute paths and ``..``-escaping paths are rejected
+      immediately, without calling the analyzer).
     """
     # Step 1: validate input positions (must be 1-indexed, i.e. >= 1).
     if line < 1 or character < 1:
@@ -96,17 +105,24 @@ async def find_references(
             f" (got line={line}, character={character})."
         )
 
-    # Step 2: gate on analyzer readiness.
+    # Step 2: validate the file path (reject absolute/escaping paths before
+    # the analyzer ever sees them).  The normalized form is forwarded so a
+    # symlink+``..`` combination cannot resolve outside the root at the OS level.
+    file, guard = validate_workspace_file(file)
+    if guard is not None:
+        return guard
+
+    # Step 3: gate on analyzer readiness.
     if (guard := require_ready()) is not None:
         return guard
 
-    # Step 3: get manager and convert to LSP (0-indexed) coordinates.
+    # Step 4: get manager and convert to LSP (0-indexed) coordinates.
     mgr = get_manager()
     assert mgr is not None  # guaranteed by require_ready()
 
     pos = external_to_lsp(line, character)
 
-    # Step 4: request references from the live analyzer.
+    # Step 5: request references from the live analyzer.
     try:
         refs = await mgr.request_references(file, pos.line, pos.character)
     except Exception as exc:
@@ -121,7 +137,7 @@ async def find_references(
 
     repo_root = mgr.repository_root
 
-    # Step 5: map reference locations to external (1-indexed) positions.
+    # Step 6: map reference locations to external (1-indexed) positions.
     # Use a dict keyed by (file, line, character) to deduplicate.
     seen: dict[tuple[str, int, int], dict[str, Any]] = {}
 
@@ -133,7 +149,7 @@ async def find_references(
         key = (mapped["file"], mapped["line"], mapped["character"])
         seen[key] = mapped
 
-    # Step 5 (continued): if include_declaration, synthesize by merging the
+    # Step 6 (continued): if include_declaration, synthesize by merging the
     # definition location(s).  Only call request_definition when needed.
     if include_declaration:
         try:
@@ -161,7 +177,7 @@ async def find_references(
                 # Only insert if not already present (declaration already in refs list).
                 seen.setdefault(key, mapped)
 
-    # Step 6/7: return ok envelope with the (possibly empty) reference list.
+    # Step 7/8: return ok envelope with the (possibly empty) reference list.
     # Zero references is a valid "no callers" answer — not_found is only for the
     # refs-is-None case (no symbol at position), handled above.
     return ok(references=list(seen.values()))

@@ -6,7 +6,13 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
-from rust_lsp_mcp.core import get_manager, location_to_external, mcp, require_ready
+from rust_lsp_mcp.core import (
+    get_manager,
+    location_to_external,
+    mcp,
+    require_ready,
+    validate_workspace_file,
+)
 from rust_lsp_mcp.envelope import error, not_found, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
@@ -51,30 +57,40 @@ async def goto_definition(file: str, line: int, character: int) -> dict[str, Any
     - ``error`` — input validation failure or unexpected LSP exception; includes
       a message.  Positions must be >= 1 (1-indexed); supplying 0 or negative
       values returns an ``error`` immediately without calling the analyzer.
+      ``file`` must be a workspace-relative path that does not resolve outside
+      the workspace root (absolute paths and ``..``-escaping paths are
+      rejected immediately, without calling the analyzer).
     """
     # Step 1: validate 1-indexed inputs
     if line < 1 or character < 1:
         return error("line and character are 1-indexed; must be >= 1")
 
-    # Step 2: readiness gate
+    # Step 2: validate the file path (reject absolute/escaping paths before
+    # the analyzer ever sees them).  The normalized form is forwarded so a
+    # symlink+``..`` combination cannot resolve outside the root at the OS level.
+    file, guard = validate_workspace_file(file)
+    if guard is not None:
+        return guard
+
+    # Step 3: readiness gate
     if (guard := require_ready()) is not None:
         return guard
 
-    # Step 3: get manager
+    # Step 4: get manager
     mgr = get_manager()
     assert mgr is not None  # guaranteed by require_ready()
 
-    # Step 4: convert 1-indexed external positions to 0-indexed LSP positions
+    # Step 5: convert 1-indexed external positions to 0-indexed LSP positions
     pos = external_to_lsp(line, character)
 
-    # Step 5: call the LSP delegate
+    # Step 6: call the LSP delegate
     try:
         locs = await mgr.request_definition(file, pos.line, pos.character)
     except Exception as exc:
         _log.exception("goto_definition: LSP error for %r line=%d char=%d", file, line, character)
         return error(f"LSP error: {exc}")
 
-    # Step 6: map results to external (1-indexed) positions
+    # Step 7: map results to external (1-indexed) positions
     if not locs:
         return not_found(f"No definition found at {file}:{line}:{character}.")
 
@@ -87,7 +103,7 @@ async def goto_definition(file: str, line: int, character: int) -> dict[str, Any
             continue
         definitions.append(mapped)
 
-    # Step 7: empty list / all-skipped → not_found
+    # Step 8: empty list / all-skipped → not_found
     if not definitions:
         return not_found(f"No definition found at {file}:{line}:{character}.")
 

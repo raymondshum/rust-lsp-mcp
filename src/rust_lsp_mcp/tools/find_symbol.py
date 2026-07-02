@@ -49,9 +49,10 @@ async def find_symbol(name: str) -> dict[str, Any]:
     - ``error`` — unexpected exception from the LSP layer; includes a message.
 
     Defensive handling:
-        Candidates missing a ``location`` or a null ``relativePath`` are silently
-        skipped (logged at DEBUG level).  This keeps the tool from crashing on
-        malformed LSP responses while still returning all usable candidates.
+        Candidates missing a ``location``, with a null ``relativePath``, or whose
+        path resolves outside the workspace root are silently skipped (logged at
+        DEBUG level).  This keeps the tool from crashing on malformed LSP
+        responses while still returning all usable in-workspace candidates.
     """
     if (guard := require_ready()) is not None:
         return guard
