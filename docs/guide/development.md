@@ -197,6 +197,71 @@ starts plus the embedding model).
 
 > **Note:** The VS Code Test panel (the beaker icon in the sidebar) is configured to run the fast tests only by default. The integration tests are never triggered accidentally from there.
 
+### Production-image smoke gate
+
+There is a third, separate tier that neither the fast nor the integration
+tests exercise: the *production image itself*, built from the real
+`Dockerfile` at the repo root and run as a black box, the way a host MCP
+client actually launches it. It is opt-in and local-only:
+
+```bash
+RLM_IMAGE_SMOKE=1 uv run --frozen pytest -m image
+```
+
+Without `RLM_IMAGE_SMOKE=1` (or without podman/docker on `PATH`), every test
+in `tests/test_image_smoke.py` skips instantly with a clear reason — it never
+runs as part of the fast tier, the integration tier, or CI.
+
+**What it proves**, by building the image fresh (tagged `rust-lsp-mcp:smoke`
+— a pre-existing local `:latest` is never trusted) and running it as a real
+container:
+
+- **DS-16** — the target project is always a host-owned bind mount and the
+  image runs as root, so git's "dubious ownership" protection would
+  otherwise leave `indexed_commit`/`current_commit`/`stale` permanently
+  `null`. The gate forces a genuinely *foreign-owned* bind mount and checks
+  that the Dockerfile's baked `git config --system --add safe.directory
+  /project` line rescues `git -C /project rev-parse HEAD`.
+- **DS-25** — the embedding model is baked into the image at build time so
+  the documentation index can build with zero network access. The gate runs
+  the real embedding function inside the container under `--network none`
+  and checks it returns a real (384-dim) embedding without touching the
+  network.
+- An **end-to-end `status` call over real MCP stdio** — the same
+  `podman/docker run --rm -i --network none ...` invocation a host client
+  would use, driven with the actual `mcp` client library (via `anyio`, since
+  this repo has no `pytest-asyncio`), asserting the full stack comes up
+  cleanly offline.
+
+Each of the two container-level checks (DS-16, DS-25) includes an in-test
+*mutation* alongside its positive assertion — e.g. unsetting `safe.directory`
+before re-running `rev-parse`, or redirecting `HOME` before re-running the
+embedding call under `--network none` — that must independently fail with
+the real, specific error (git's "dubious ownership" message; a
+connect/DNS-resolution error). This is what makes each positive assertion
+falsifiable rather than true by construction.
+
+> **Rootless Podman fidelity note:** on this host's rootless Podman, the
+> default user namespace maps container uid 0 to the invoking host user, so
+> an *ordinary* bind mount is not actually foreign from the container's
+> point of view — the DS-16 check would be vacuous without deliberately
+> re-owning the fixture repo first (via `podman unshare chown`). Rootful
+> Docker mounts are natively foreign (no uid remapping), so this step is a
+> no-op there — Docker gets DS-16 fidelity for free.
+
+**Cost.** A cold build (first run on a host, or after a toolchain/dependency
+bump) takes several minutes — the full Rust toolchain via rustup, `uv sync`,
+and the ~80 MB embedding model download all happen from scratch. A warm
+build (no relevant Dockerfile/`src`/lockfile changes since the last build)
+reuses layer cache and the whole gate — build plus all three tests — finishes
+in well under a minute.
+
+**Deliberately not in CI.** Building a full production image on every push
+would burn through the free GitHub Actions quota for a check that only
+matters immediately before a release; this gate is a local pre-release
+responsibility, not an automated one — there is no corresponding CI workflow
+file, by design.
+
 ---
 
 ## Code quality tools
