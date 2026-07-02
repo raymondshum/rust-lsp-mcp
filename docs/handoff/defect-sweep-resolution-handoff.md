@@ -16,8 +16,9 @@ docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve
   1 refuted, 2 recovered from overloaded agents and hand-verified.
 - The **audit doc shipped**: PR **#64** merged to `main`, cherry-picked onto `bob_prototype` (commit
   `3f93b34`). It exists on both branches.
-- **19 issues opened** (#45–#63), all currently **open** (verified via `gh issue list --label
-  audit-2026-07-01 --state open` → 19). No fixes landed yet.
+- **19 issues opened** (#45–#63). **First unit landed 2026-07-01:** DS-01 (#45) + DS-02 (#46)
+  closed via PR #65 to `main` (cherry-picked to `bob_prototype` `0fb8627`); the audit record was
+  updated in PR #66. **17 issues remain open** (#47–#63).
 - Nothing is deferred by decision yet — sequencing below is a recommendation, not a commitment.
 
 ## What's left (grounded)
@@ -27,8 +28,8 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 
 | DS | Issue | Sev | Where | Status / caveat |
 |----|-------|-----|-------|-----------------|
-| DS-01 | #45 | High | `tools/goto_definition.py:72` (+hover/find_references/document_symbols) | Open. Path traversal → arbitrary file read; fix with DS-02 as one containment change. |
-| DS-02 | #46 | High | `core.py:181` | Open. `..`-path leak; multilspy always populates `relativePath`. |
+| DS-01 | #45 | High | `tools/goto_definition.py:72` (+hover/find_references/document_symbols) | ✅ Done — PR #65 → `main`, cherry-picked to `bob_prototype` (`0fb8627`). Shared lexical containment guard rejects out-of-workspace `file` before the delegate; adversarial `no-breaks`. |
+| DS-02 | #46 | High | `core.py:181` | ✅ Done — PR #65 (same commit). `location_to_external` containment-checks `relativePath`; out-of-workspace locations fall back to URI or are skipped. |
 | DS-03 | #47 | High | `analyzer.py:489` | Open. `refresh` mid-index → stale `ready`; couple with DS-04/DS-21. |
 | DS-04 | #48 | High | `analyzer.py:440` | Open. Drain-timeout orphans subprocess (multilspy teardown has no `finally`). |
 | DS-05 | #49 | High | `doc_store.py:274` | Open. Adopt-without-freshness. **Only** cross-project + stale-after-edit is in scope; build-once persistence is intended. |
