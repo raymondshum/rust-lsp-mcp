@@ -30,8 +30,8 @@ and the **GitHub issue** tracking it.
 |----|-----|------|----------|-------|
 | DS-01 | High | security | Unvalidated `file` param → arbitrary file read (path traversal) | #45 ✅ |
 | DS-02 | High | tools | Out-of-workspace definitions leak as `..`-prefixed "relative" paths | #46 ✅ |
-| DS-03 | High | core | `refresh` during indexing sticks state at a stale `ready` | #47 |
-| DS-04 | High | core | Drain-timeout cancel orphans the rust-analyzer subprocess | #48 |
+| DS-03 | High | core | `refresh` during indexing sticks state at a stale `ready` | #47 ✅ |
+| DS-04 | High | core | Drain-timeout cancel orphans the rust-analyzer subprocess | #48 ✅ |
 | DS-05 | High | rag | Doc store adopts an existing collection with zero freshness check | #49 |
 | DS-06 | High | tests | The real `init_doc_store()` is executed by no test | #50 |
 | DS-07 | Med | core | Failed analyzer startup is swallowed — `indexing` forever | #51 |
@@ -48,7 +48,7 @@ and the **GitHub issue** tracking it.
 | DS-18 | Med | tests | `_lifespan` / `analyzer_lifespan` have zero coverage | #62 |
 | DS-19 | Low | core | `status` runs `subprocess.run` synchronously on the event loop | #63 |
 | DS-20 | Low | tools | Null `documentSymbol` → `error` envelope; `None`-check is dead code | #63 |
-| DS-21 | Low | core | Concurrent `refresh` not serialized → duplicate analyzer processes | #63 |
+| DS-21 | Low | core | Concurrent `refresh` not serialized → duplicate analyzer processes | #63 ✅ |
 | DS-22 | Low | tools | `search_docs` accepts empty/whitespace query, returns arbitrary top-k | #63 |
 | DS-23 | Low | rag | Indented (1–3 space) fences/headers missed, swallowing later headers | #63 |
 | DS-24 | Low | rag | Empty-corpus `build_complete` sentinel is dead code | #63 |
@@ -125,6 +125,11 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   (`is_ready` requires `_lsp is not None`). The status tool and the readiness
   gate contradict each other, breaking the documented poll-until-ready
   protocol for a potentially minutes-long window on large crates.
+- **Resolved:** 2026-07-02 (PR #67, fixed with DS-04/DS-21 as one lifecycle cluster).
+  `_drain_task` bumps a generation counter; `_run(gen)` publishes `_lsp`/`state=ready`/
+  `_ready_event` only while it is the current generation (one synchronous block), so a
+  superseded run can never leave a stale `ready`. `restart()` re-asserts `indexing`
+  after the drain. Adversarial `no-breaks` (300-round race storm).
 
 ### DS-04 — Drain-timeout cancel path orphans the rust-analyzer subprocess
 - **Where:** `src/rust_lsp_mcp/analyzer.py:440` (`_drain_task`).
@@ -140,6 +145,10 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   process that keeps running `cargo check`, consuming CPU and multiple GB of
   RAM. Repeated refreshes during warm-up accumulate orphans until the container
   OOMs.
+- **Resolved:** 2026-07-02 (PR #67). `_run`'s `finally` clears `_lsp` (identity-guarded)
+  then idempotently calls `lsp.server.stop()` — multilspy's own teardown — so the
+  subprocess is terminated on every reachable cancel window. Guarded by a real-sentinel
+  subprocess regression test.
 
 ### DS-05 — Doc store adopts any populated collection with zero freshness checking
 - **Where:** `src/rust_lsp_mcp/doc_store.py:274` (`init_doc_store` adopt gate).
@@ -348,6 +357,10 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** Two live rust-analyzer processes; whichever readies last
   wins the `_lsp` slot, so tools may talk to an analyzer indexed against a
   different commit than `indexed_commit` reports. (Related to DS-03/DS-04.)
+- **Resolved:** 2026-07-02 (PR #67, with DS-03/DS-04). An `asyncio.Lock` now serializes
+  `restart()`/`shutdown()`, so concurrent refreshes cannot overwrite `self._task`; a
+  `_closed` flag makes refresh-after-shutdown a no-op. (Issue #63 remains open until the
+  other roll-up lows land.)
 
 ### DS-22 — `search_docs` accepts empty/whitespace query, returns arbitrary top-k
 - **Where:** `src/rust_lsp_mcp/tools/search_docs.py:75`.
