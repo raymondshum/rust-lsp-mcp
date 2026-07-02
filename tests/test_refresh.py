@@ -506,16 +506,11 @@ class TestFinding3ConcurrentRefreshSerialized:
         ``core._manager``/``refresh_mod.get_doc_store`` are read-only for
         this test's purposes and ``init_doc_store`` is the thing under test.
 
-        ALSO NOTE: ``refresh_mod._doc_store_refresh_lock`` is swapped for a
-        fresh ``asyncio.Lock()`` for the duration of this test.  A plain
-        ``asyncio.Lock`` binds to whichever event loop first genuinely
-        contends it; reusing the real module-level lock across multiple
-        ``asyncio.run()``-per-test invocations (this test suite's style)
-        would bind it to THIS test's loop and then blow up with "bound to a
-        different event loop" in any later test that also contends it. Using
-        a fresh instance keeps this test hermetic without changing
-        production behaviour (the production lock still lives for the
-        server's single long-running event loop).
+        No lock-swapping needed (#91): the refresh lock is now obtained
+        per-loop via ``_get_doc_store_refresh_lock()``, so this test's own
+        ``asyncio.run()`` loop transparently gets its own fresh lock without
+        any patching, and it never collides with the lock any other test's
+        loop got.
         """
         import rust_lsp_mcp.core as core
         import rust_lsp_mcp.tools.refresh as refresh_mod
@@ -551,7 +546,6 @@ class TestFinding3ConcurrentRefreshSerialized:
             patch.object(core, "_manager", mgr),
             patch.object(refresh_mod, "get_doc_store", return_value=None),
             patch.object(refresh_mod, "init_doc_store", _init_doc_store_sync),
-            patch.object(refresh_mod, "_doc_store_refresh_lock", asyncio.Lock()),
         ):
             results = asyncio.run(_run_both())
 
@@ -566,10 +560,10 @@ class TestFinding3ConcurrentRefreshSerialized:
         init_doc_store exactly once apiece (serialized, not skipped or
         duplicated) — total call count is exactly 3, with no overlap.
 
-        Patches are applied ONCE outside the gather, including a fresh
-        ``_doc_store_refresh_lock`` instance — see the docstring on
+        Patches are applied ONCE outside the gather — see the docstring on
         ``test_concurrent_refresh_init_doc_store_never_overlaps`` for why
-        both of those are necessary for a hermetic test.
+        that's necessary for a hermetic test.  No lock-swapping needed
+        (#91): the refresh lock is obtained per-loop.
         """
         import rust_lsp_mcp.core as core
         import rust_lsp_mcp.tools.refresh as refresh_mod
@@ -601,7 +595,6 @@ class TestFinding3ConcurrentRefreshSerialized:
             patch.object(core, "_manager", mgr),
             patch.object(refresh_mod, "get_doc_store", return_value=None),
             patch.object(refresh_mod, "init_doc_store", _init_doc_store_sync),
-            patch.object(refresh_mod, "_doc_store_refresh_lock", asyncio.Lock()),
         ):
             results = asyncio.run(_run_all())
 
@@ -653,7 +646,7 @@ class TestRefreshLockCrossEventLoop:
             await asyncio.gather(_holder(), _contender())
 
         async def _contend_and_return_lock() -> asyncio.Lock:
-            lock = refresh_mod._doc_store_refresh_lock
+            lock = refresh_mod._get_doc_store_refresh_lock()
             await _contend(lock)
             return lock
 

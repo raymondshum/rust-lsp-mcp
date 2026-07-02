@@ -5,6 +5,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 
 import asyncio
 import logging
+import weakref
 from typing import Any
 
 from anyio.to_thread import run_sync
@@ -28,16 +29,49 @@ _log = logging.getLogger(__name__)
 # mgr.restart() — the analyzer side is already serialized by its own
 # lifecycle lock.
 #
-# Loop-binding hazard: a module-level asyncio.Lock binds to the event loop
-# that first CONTENDS it (Python's lazy _get_loop()), not the one that
-# constructs it.  This is safe in production because the MCP server runs a
-# single persistent event loop for its entire lifetime, so every refresh()
-# contends the same loop.  But a test that contends this lock across separate
-# asyncio.run() invocations (each a fresh, then-closed loop) would trip
-# "bound to a different event loop" on the second run — such tests MUST patch
-# in a fresh asyncio.Lock() per test (as the finding-3 tests in
-# tests/test_refresh.py do).
-_doc_store_refresh_lock = asyncio.Lock()
+# Per-loop lock (#91): a bare module-level asyncio.Lock binds to the event
+# loop that first CONTENDS it (Python's lazy _get_loop(), reached only on the
+# contended acquire path), not the one that constructs it.  In production
+# this is a non-issue — the MCP server runs a single persistent event loop
+# for its entire lifetime, so every refresh() contends the same loop, and
+# there is effectively still just one lock.  But it's a footgun for tests:
+# each ``asyncio.run()`` spins up and tears down its own loop, so a lock that
+# got bound to one test's loop would raise "bound to a different event loop"
+# the moment a later test's loop contends it — forcing those tests to patch
+# in a fresh ``asyncio.Lock()`` per run.
+#
+# Instead of one shared Lock, keep a lock PER event loop, created lazily on
+# first use via ``_get_doc_store_refresh_lock()``.  Keyed by the running
+# loop in a ``WeakKeyDictionary`` rather than a plain ``dict``: event loops
+# are weak-referenceable, and a plain dict would hold a strong ref to every
+# loop that ever contended the lock — in production there's only ever one
+# loop for the process lifetime so it wouldn't matter, but a test suite that
+# creates-and-closes a fresh loop per test (this module's own style) would
+# otherwise accumulate one dead, closed loop per test run for the life of
+# the process. ``WeakKeyDictionary`` lets each entry disappear as soon as its
+# loop is garbage-collected, with no behavioural difference for the single
+# long-lived production loop.
+_doc_store_refresh_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _get_doc_store_refresh_lock() -> asyncio.Lock:
+    """Return the doc-store refresh lock for the CURRENTLY RUNNING event loop.
+
+    Create-on-first-use, keyed by ``asyncio.get_running_loop()``.  Within a
+    single loop this always returns the same ``asyncio.Lock`` instance (so
+    finding-3's serialization guarantee holds); across different loops it
+    returns a different instance each time, so contending it never trips
+    asyncio's "bound to a different event loop" error (see the module
+    docstring above).
+    """
+    loop = asyncio.get_running_loop()
+    lock = _doc_store_refresh_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _doc_store_refresh_locks[loop] = lock
+    return lock
 
 
 @mcp.tool()
@@ -84,11 +118,11 @@ async def refresh() -> dict[str, Any]:
         - **Doc-store re-init serialization (finding-3)**: the doc-store
           recovery block (the ``get_doc_store()`` read through the
           ``init_doc_store``/``rebuild`` call) is serialized behind a
-          module-level ``asyncio.Lock`` so two concurrent ``refresh`` calls on
-          an absent/errored store cannot both construct a fresh ``DocStore``
-          against the same on-disk collection.  Only that block is locked —
-          ``mgr.restart()`` above is already serialized by the analyzer's own
-          lifecycle lock.
+          per-event-loop ``asyncio.Lock`` (see ``_get_doc_store_refresh_lock``)
+          so two concurrent ``refresh`` calls on an absent/errored store cannot
+          both construct a fresh ``DocStore`` against the same on-disk
+          collection.  Only that block is locked — ``mgr.restart()`` above is
+          already serialized by the analyzer's own lifecycle lock.
 
     Returns:
         ``ok`` envelope with ``state="indexing"`` and a polling hint message,
@@ -117,17 +151,18 @@ async def refresh() -> dict[str, Any]:
     # Either way this is synchronous/blocking work offloaded to a worker
     # thread so we don't block the event loop.
     #
-    # finding-3: serialized behind _doc_store_refresh_lock so two concurrent
-    # refresh() calls on an absent/errored store cannot both take the re-init
-    # path and construct two DocStore instances against the same on-disk
-    # collection — see the lock's module-level docstring.  (DS-12's
-    # search/rebuild race itself is fixed inside DocStore via _read_lock; this
-    # lock only serializes refresh()'s OWN doc-store block.)  ``get_doc_store``
-    # is read INSIDE the lock too, so a refresh() that waited behind another
-    # one observes the just-re-initialised singleton rather than a stale
-    # absent/errored snapshot taken before the wait.
+    # finding-3: serialized behind the per-loop doc-store refresh lock (#91)
+    # so two concurrent refresh() calls on an absent/errored store cannot
+    # both take the re-init path and construct two DocStore instances
+    # against the same on-disk collection — see the lock accessor's
+    # module-level docstring.  (DS-12's search/rebuild race itself is fixed
+    # inside DocStore via _read_lock; this lock only serializes refresh()'s
+    # OWN doc-store block.)  ``get_doc_store`` is read INSIDE the lock too,
+    # so a refresh() that waited behind another one observes the
+    # just-re-initialised singleton rather than a stale absent/errored
+    # snapshot taken before the wait.
     try:
-        async with _doc_store_refresh_lock:
+        async with _get_doc_store_refresh_lock():
             store = get_doc_store()
             if store is None or getattr(store, "state", None) == DOC_STATE_ERROR:
                 _log.info("refresh: doc store absent or errored — re-initialising")
