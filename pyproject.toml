@@ -43,9 +43,11 @@ dev-dependencies = [
 [tool.ruff]
 src = ["src", "tests"]
 line-length = 100
-# Vendored Claude Code skills (e.g. mcp-builder) ship their own scripts; they are
+# Vendored harness skills (e.g. mcp-builder) ship their own scripts; they are
 # tooling, not our source — keep them out of lint/format. (Adds to ruff's defaults.)
-extend-exclude = [".claude"]
+# ".bob" is the bob_prototype branch's skills dir (absent on main) — listed on both
+# branches so this file stays in lockstep and the branch's fast tier stays green.
+extend-exclude = [".claude", ".bob"]
 
 [tool.ruff.lint]
 select = ["E", "F", "UP", "B", "SIM", "I"]
@@ -60,7 +62,7 @@ known-first-party = ["rust_lsp_mcp"]
 # [tool.ty.src] exclude, gitignore-style, anchored to project root.
 # ---------------------------------------------------------------------------
 [tool.ty.src]
-exclude = [".claude"]
+exclude = [".claude", ".bob"]
 
 # ---------------------------------------------------------------------------
 # pytest
