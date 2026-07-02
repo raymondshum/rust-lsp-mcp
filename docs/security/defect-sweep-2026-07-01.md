@@ -40,7 +40,7 @@ and the **GitHub issue** tracking it.
 | DS-10 | Med | rag | `---` after a closing code fence misparsed as a setext header | #54 ✅ |
 | DS-11 | Med | rag | Doc starting with `---` swallowed whole as frontmatter | #55 ✅ |
 | DS-12 | Med | rag | `refresh` rebuild races in-flight `search_docs` (no lock) | #56 ✅ |
-| DS-13 | Med | infra | `RLM_CARGO_*` / `RLM_RUST_ANALYZER_TARGET_DIR` are dead knobs | #57 |
+| DS-13 | Med | infra | `RLM_CARGO_*` / `RLM_RUST_ANALYZER_TARGET_DIR` are dead knobs | #57 ✅ |
 | DS-14 | Med | docs | `status` can't report doc-index readiness; recovery path loops | #58 ✅ |
 | DS-15 | Med | infra | `setup.sh` disables host-global git commit signing | #59 |
 | DS-16 | Med | infra | `status` git-staleness always null on rootful Linux Docker | #60 |
@@ -52,8 +52,8 @@ and the **GitHub issue** tracking it.
 | DS-22 | Low | tools | `search_docs` accepts empty/whitespace query, returns arbitrary top-k | #63 ✅ |
 | DS-23 | Low | rag | Indented (1–3 space) fences/headers missed, swallowing later headers | #63 ✅ |
 | DS-24 | Low | rag | Empty-corpus `build_complete` sentinel is dead code | #63 |
-| DS-25 | Low | docs | Model-persistence advice contradicts the baked-model design | #63 |
-| DS-26 | Low | infra | Dockerfile comment claims RA reads `RA_TARGET_DIR`; it doesn't | #63 |
+| DS-25 | Low | docs | Model-persistence advice contradicts the baked-model design | #63 ✅ |
+| DS-26 | Low | infra | Dockerfile comment claims RA reads `RA_TARGET_DIR`; it doesn't | #63 ✅ |
 | DS-27 | Low | infra | `prime-cache.sh` SELinux relabel applied only to project mount | #63 |
 | DS-28 | Low | tests | No test asserts tools are actually registered on the app | #63 |
 
@@ -296,6 +296,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   the server's analyzer.
 - **Why it matters:** Setting any of the three per the docs is a silent no-op
   (`extra="ignore"` also hides typos). In the devcontainer the knob is fiction.
+- **Resolved:** 2026-07-02 (PR #79). Removed the three dead `Settings` fields, their
+  `env.sample`/`configuration.md` entries, and the dead `RLM_CARGO_*` Dockerfile ENV
+  lines; the persistence note now documents the real container-level `CARGO_*` mechanism.
 
 ### DS-14 — `status` can't report doc-index readiness; documented recovery loops forever
 - **Where:** `docs/guide/tools.md:315`; `src/rust_lsp_mcp/tools/status.py`;
@@ -436,6 +439,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** A reader could try to pre-seed/wipe the model on `/data`
   or expect `/data` to supply it — a misunderstanding that would surface as a
   hard failure under `--network none`.
+- **Resolved:** 2026-07-02 (PR #79). The persistence note now splits dev-container
+  (download-once to a `~/.cache/chroma` bind mount) from the production image (model
+  baked at build onto `HOME=/opt/rlm`; nothing to persist on `/data`).
 
 ### DS-26 — Dockerfile comment claims rust-analyzer reads `RA_TARGET_DIR`; it doesn't
 - **Where:** `Dockerfile:99`.
@@ -446,6 +452,10 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** RA's check output lands in `/data/cargo-target`, not the
   `…/rust-analyzer` subdir the comment claims; the stated separation silently
   doesn't exist.
+- **Resolved:** 2026-07-02 (PR #79). Corrected the Dockerfile comment (RA has no
+  `RA_TARGET_DIR` env var; it is only honored in the dev container via VS Code settings)
+  and removed the inert `RA_TARGET_DIR` ENV line; RA's output lands under
+  `CARGO_TARGET_DIR`. (Issue #63 stays open for the other lows.)
 
 ### DS-27 — `prime-cache.sh` SELinux relabel applied only to the project mount
 - **Where:** `scripts/prime-cache.sh:90`.
