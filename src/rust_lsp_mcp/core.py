@@ -6,6 +6,8 @@ This module owns:
     - ``require_ready()`` — the fail-fast readiness gate used by all tools.
     - ``get_manager()`` — accessor for the module-level ``AnalyzerManager`` singleton.
     - ``_uri_to_relative_path()`` — convert ``file://`` URIs to workspace-relative paths.
+    - ``validate_workspace_file()`` — reject client-supplied ``file`` arguments that
+        are absolute or escape the workspace root, before the analyzer is ever called.
     - Shared symbol/location mapping helpers reused across navigation tools:
         ``kind_name``, ``location_to_external``, ``symbol_to_external``.
 
@@ -28,7 +30,7 @@ from multilspy.multilspy_types import SymbolKind
 
 from rust_lsp_mcp.analyzer import AnalyzerManager, analyzer_lifespan
 from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store
-from rust_lsp_mcp.envelope import not_ready
+from rust_lsp_mcp.envelope import error, not_ready
 from rust_lsp_mcp.positions import lsp_to_external
 from rust_lsp_mcp.settings import get_settings
 
@@ -142,6 +144,88 @@ def _uri_to_relative_path(uri: str, repository_root: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Path containment — pure lexical, no filesystem access, no symlink resolution
+# ---------------------------------------------------------------------------
+
+
+def _is_contained_relpath(path: str) -> bool:
+    """Whether ``path`` is a workspace-relative path that cannot escape the root.
+
+    Purely lexical (``os.path.normpath`` only — no filesystem access, no
+    symlink resolution), mirroring the reasoning in ``_uri_to_relative_path``.
+    A path is rejected when it is empty, contains a NUL byte, is absolute, or
+    normalizes to ``".."`` or to a path with a leading ``".."`` segment (i.e.
+    it climbs out of the root).
+
+    The escape check compares the normalized path's leading segment rather
+    than doing a raw ``str.startswith("..")`` prefix check, so a literal
+    in-workspace filename like ``"..hidden.rs"`` is correctly accepted — it
+    does not start with a ``".." + os.sep`` segment boundary.
+
+    Args:
+        path: A candidate workspace-relative path (untrusted — either
+              client-supplied ``file`` input or a delegate-returned
+              ``relativePath``).
+
+    Returns:
+        ``True`` if ``path`` is safe to join onto the workspace root.
+    """
+    if not path or "\x00" in path:
+        return False
+    if pathlib.Path(path).is_absolute():
+        return False
+    normalized = os.path.normpath(path)
+    return normalized != os.pardir and not normalized.startswith(os.pardir + os.sep)
+
+
+def validate_workspace_file(file: str) -> tuple[str, dict[str, Any] | None]:
+    """Validate a client-supplied ``file`` argument before calling the analyzer.
+
+    multilspy 0.0.15 joins ``file`` onto the repository root via
+    ``str(PurePath(repository_root_path, relative_file_path))``.  Per
+    ``pathlib`` join semantics, an *absolute* ``file`` silently discards the
+    root entirely, and a ``..``-escaping ``file`` (e.g.
+    ``"../../etc/hostname"``) resolves outside it; multilspy then reads
+    whatever that path points to and forwards its contents to rust-analyzer,
+    turning ``hover``/``document_symbols``/etc. into an arbitrary-file-read
+    primitive.  This guard rejects both cases BEFORE the analyzer delegate is
+    ever called.
+
+    Containment is purely lexical — see ``_is_contained_relpath``.
+
+    On acceptance the *normalized* path (``os.path.normpath``) is returned,
+    and tools MUST forward that normalized form — never the raw input — to
+    the delegate.  POSIX resolves symlinks before ``..``, so a raw accepted
+    path like ``"target/../secrets.txt"`` (normalizes to ``"secrets.txt"``
+    and passes the lexical check) would still resolve *outside* the root at
+    the OS level if ``target`` were a symlink to a directory elsewhere.
+    Collapsing the ``..`` lexically before the path ever reaches the
+    filesystem closes that symlink+``..`` laundering variant.
+
+    Usage in tools::
+
+        file, guard = validate_workspace_file(file)
+        if guard is not None:
+            return guard
+
+    Args:
+        file: The client-supplied ``file`` argument, intended to be
+              workspace-relative (e.g. ``"src/main.rs"``).
+
+    Returns:
+        ``(normalized_file, None)`` when ``file`` is valid, else
+        ``(file, error_envelope)`` when it is invalid (empty, absolute,
+        NUL-containing, or ``..``-escaping).
+    """
+    if not _is_contained_relpath(file):
+        return file, error(
+            f"Invalid file path {file!r}: must be a workspace-relative path "
+            "that does not resolve outside the workspace root."
+        )
+    return os.path.normpath(file), None
+
+
+# ---------------------------------------------------------------------------
 # Shared mapping helpers — reused by navigation tool modules
 # ---------------------------------------------------------------------------
 
@@ -167,8 +251,21 @@ def location_to_external(loc: Mapping[str, Any], repo_root: str) -> dict[str, An
     """Convert an LSP Location-ish dict to an external position dict.
 
     Accepts a ``Location`` dict that may contain ``relativePath``, ``uri``,
-    and ``range``.  Prefers ``relativePath``; falls back to deriving the path
-    from ``uri`` via ``_uri_to_relative_path``.
+    and ``range``.  Prefers ``relativePath``, but only when it is
+    workspace-contained (see ``_is_contained_relpath``); otherwise falls back
+    to deriving the path from ``uri`` via ``_uri_to_relative_path`` (which
+    containment-checks it too).
+
+    Security: multilspy 0.0.15 *always* populates ``relativePath`` via
+    ``os.path.relpath(absolute_path, repository_root_path)`` (see
+    ``PathUtils.get_relative_path``), which on POSIX never returns ``None``
+    — for a location outside the workspace (e.g. a stdlib/dependency symbol)
+    it instead yields a ``..``-prefixed path such as
+    ``"../../usr/local/rustup/.../alloc/src/vec/mod.rs"``.  Trusting
+    ``relativePath`` unconditionally would let such an out-of-workspace path
+    pass through as if it were workspace-relative.  Containment-checking it
+    here closes that gap; an out-of-workspace ``relativePath`` is treated the
+    same as an absent one (fall back to the URI, or skip entirely).
 
     Args:
         loc:       An LSP ``Location``-like dict (must contain at least ``range``).
@@ -176,10 +273,10 @@ def location_to_external(loc: Mapping[str, Any], repo_root: str) -> dict[str, An
 
     Returns:
         ``{"file": <rel>, "line": <1-indexed>, "character": <1-indexed>}``
-        or ``None`` if no usable file path can be determined.
+        or ``None`` if no usable in-workspace file path can be determined.
     """
     rel_path: str | None = loc.get("relativePath")
-    if not rel_path:
+    if not rel_path or not _is_contained_relpath(rel_path):
         uri = loc.get("uri", "")
         rel_path = _uri_to_relative_path(uri, repo_root) if uri else None
     if not rel_path:
