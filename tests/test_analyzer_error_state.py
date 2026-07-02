@@ -172,7 +172,7 @@ class TestStatusReportsAnalyzerError:
             patch.object(core_mod, "_manager", mgr),
             patch.object(status_mod, "doc_store_state", return_value=("building", None)),
         ):
-            result = status_mod.status()
+            result = asyncio.run(status_mod.status())
 
         assert result["status"] == "ok"
         assert result["state"] == STATE_ERROR

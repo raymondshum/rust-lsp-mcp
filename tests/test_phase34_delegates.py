@@ -225,6 +225,57 @@ class TestDocumentSymbolsDelegate:
 
         asyncio.run(_run())
 
+    def test_returns_empty_list_when_underlying_raises_null_assertion_error(self) -> None:
+        """DS-20: multilspy 0.0.15 asserts isinstance(response, list) and RAISES
+        AssertionError on a JSON-RPC null response — it never returns None for
+        this call. The delegate must catch the null-shaped AssertionError
+        (message ending in "None") and return [] (→ the tool emits
+        ok+symbols=[]), not let it propagate to the tool's except Exception
+        (→ error). Before the DS-20 fix this case incorrectly surfaced as
+        error.
+        """
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with patch.object(
+                lsp,
+                "request_document_symbols",
+                new=AsyncMock(
+                    side_effect=AssertionError("Unexpected response from Language Server: None")
+                ),
+            ):
+                result = await mgr.request_document_symbols("src/lib.rs")
+            assert result == []
+
+        asyncio.run(_run())
+
+    def test_reraises_malformed_non_null_assertion_error(self) -> None:
+        """DS-20: a malformed but non-null AssertionError (message not ending
+        in "None") is a genuine protocol failure and must propagate, so the
+        tool surfaces error — not be collapsed into ok+symbols=[]."""
+        mgr = _make_ready_manager()
+        lsp = _make_unstarted_lsp()
+        mgr._lsp = lsp
+
+        async def _run() -> None:
+            with (
+                patch.object(
+                    lsp,
+                    "request_document_symbols",
+                    new=AsyncMock(
+                        side_effect=AssertionError(
+                            "Unexpected response from Language Server: {'garbage': 1}"
+                        )
+                    ),
+                ),
+                pytest.raises(AssertionError),
+            ):
+                await mgr.request_document_symbols("src/lib.rs")
+
+        asyncio.run(_run())
+
 
 class TestDefinitionDelegate:
     """request_definition forwards (rel, line, col) and returns result or None.
