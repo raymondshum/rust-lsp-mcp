@@ -16,6 +16,13 @@ pointers — detail lives in the plan and `docs/reference/`; these files only or
   (the `adversarial` mode, run in a **fresh Bob session**) applied after QA on every
   phase, and gate-zero over this folder.
 
+## Defect-sweep resolution (next effort)
+
+- [defect-sweep-resolution-handoff.md](defect-sweep-resolution-handoff.md) — session seed for driving the
+  2026-07-01 defect sweep (issues #45–#63) to completion. Kicked off with
+  [`/resolve-defect-sweep`](../../.bob/skills/resolve-defect-sweep/SKILL.md); evidence in
+  [docs/security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md).
+
 ## Bob harness port (the current effort)
 
 - [bob-port-progress.md](bob-port-progress.md) — **single source of truth** for the
