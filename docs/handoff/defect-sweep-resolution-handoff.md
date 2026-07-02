@@ -57,6 +57,9 @@ DS-10/11/23; docs/config DS-13/25/26; test-gaps DS-17/18/28) → Lows opportunis
 - **Fable subagents** — logic/judgment: triage, branch-target classification, subtle-correctness fix design,
   adversarial pass.
 - **Sonnet subagents** — implementation and testing (the workhorse).
+- **Fallback:** Fable 5 is unavailable after ~2026-07-08. When Fable is unavailable, use **Opus 4.8** in its
+  place — both the main-thread orchestrator role and the Fable logic/judgment subagents. Sonnet's role is
+  unchanged.
 - **Gates** per the [implementation cycle](../conventions/implementation-cycle.md): Orient → decide branch
   target → build (regression-test-first) → review → **QA on-thread** → adversarial (Highs/subtle) → PR+record
   → stop. One unit per pass. Research is Context7-first

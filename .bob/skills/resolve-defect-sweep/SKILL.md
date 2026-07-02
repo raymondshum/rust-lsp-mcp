@@ -23,6 +23,9 @@ your own context for judgment and integration.
 - **You (Fable, main thread)** — orient, sequence, decide branch targets, do the **final QA pass yourself**,
   own merges and the one-PR-per-unit + record step, and stop for human review.
 
+> **Model fallback:** Fable 5 is unavailable after ~2026-07-08. When Fable is unavailable, use **Opus 4.8**
+> for both the main-thread orchestrator and the Fable logic/judgment subagents; Sonnet's role is unchanged.
+
 ## The cycle (one unit per pass, then stop)
 
 Follow the [implementation cycle](../../../docs/conventions/implementation-cycle.md) gates. A "unit" is one

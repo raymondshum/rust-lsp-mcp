@@ -55,7 +55,9 @@ session at already-done work is worse than no handoff.
      - *Claude Code main-thread* (default when resuming in this harness): **Fable 5** on the main thread as
        orchestrator, last-stop QA, and decision-maker; deploy subagents to keep the main thread lean —
        **Fable** subagents for logic/judgment-critical work, **Sonnet** subagents for implementation and
-       testing. Orchestrator does the final QA pass and owns merges + the PR/pause decision.
+       testing. Orchestrator does the final QA pass and owns merges + the PR/pause decision. **Fallback:**
+       Fable 5 is unavailable after ~2026-07-08 — substitute **Opus 4.8** for the orchestrator + Fable
+       logic subagents when Fable is unavailable (Sonnet's role unchanged).
      - *Bob custom-modes* (when driving under the Bob harness): the Orchestrator + `build`/`review`/`qa`/
        `adversarial` modes in `.bob/custom_modes.yaml`, **sequential** delegation, per
        [docs/handoff/roles.md](../../../docs/handoff/roles.md) and the
