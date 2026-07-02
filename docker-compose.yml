@@ -10,7 +10,10 @@
 # with this compose file and have the MCP client `docker exec` into it, so the
 # rust-analyzer process stays hot between sessions:
 #
-#   RUST_PROJECT=/abs/path/to/your/rust/project docker compose up -d
+#   RUST_PROJECT=/abs/path/to/your/rust/project docker compose up -d rust-lsp-mcp
+#
+# (Name the service explicitly — a bare `up -d` would ALSO start the
+# rust-lsp-mcp-isolated variant below, giving you two containers on one volume.)
 #
 # Then point the MCP client at:
 #   "command": "docker",
@@ -29,8 +32,27 @@ services:
     volumes:
       # The target Rust project, read-only. Set RUST_PROJECT to its host path.
       - "${RUST_PROJECT:?set RUST_PROJECT to your Rust project's absolute path}:/project:ro"
-      # Persistent caches (chroma store, cargo target + registry, embedding model).
+      # Persistent caches (chroma store + cargo target/registry). The embedding
+      # model is baked into the image, not stored here.
       - rlm-data:/data
+
+  # Network-isolated warm-start variant. Same as above but with NO network, so
+  # untrusted build.rs / proc-macro code executed by rust-analyzer cannot reach
+  # outbound. Prime the cargo cache first (scripts/prime-cache.sh) or analysis of
+  # un-cached external crates will be degraded — see README "Network isolation".
+  #   RUST_PROJECT=/abs/project docker compose up -d rust-lsp-mcp-isolated
+  rust-lsp-mcp-isolated:
+    extends:
+      service: rust-lsp-mcp
+    container_name: rust-lsp-mcp-isolated
+    network_mode: none
+    environment:
+      CARGO_NET_OFFLINE: "true"
 
 volumes:
   rlm-data:
+    # Pin the real volume name so it matches the `docker run` / prime-cache.sh
+    # default (rust-lsp-mcp-data). Without this, compose would prefix it to
+    # `<project>_rlm-data`, and priming the default volume would warm a DIFFERENT
+    # cache than the isolated service reads — shipping degraded offline analysis.
+    name: rust-lsp-mcp-data
