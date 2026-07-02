@@ -797,6 +797,77 @@ class TestReapWindowCancellation:
 
         asyncio.run(_scenario())
 
+    def test_fast_path_abandoned_exception_is_drained(self) -> None:
+        """A reap-window cancel must not abandon a stored request exception.
+
+        Adversarial round 2: on the fast path the ``cancelling()`` re-raise
+        fires BEFORE ``request_task.result()`` is ever called — if the request
+        completed WITH AN EXCEPTION and an external cancel landed in the reap
+        window, that stored exception was abandoned → "Task exception was
+        never retrieved" via the LOOP exception handler at GC time (the
+        teardown branch is immune: its suppress-await already retrieves).
+        The fix drains ``request_task.exception()`` before re-raising.  Sweeps
+        the same turn offsets as the happy-path test; at every offset,
+        whatever the outcome (CancelledError honoured, or the exception
+        surfaced normally), the loop handler must see zero never-retrieved
+        events.
+        """
+        import gc
+
+        instances: list[NavLsp] = []
+
+        async def _scenario() -> None:
+            handler_events: list[dict[str, Any]] = []
+            asyncio.get_running_loop().set_exception_handler(
+                lambda loop, ctx: handler_events.append(ctx)
+            )
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(analyzer_module, "PatchedRustAnalyzer", _factory(NavLsp, instances))
+                for k in range(7):
+                    mgr = _make_manager()
+                    try:
+                        await mgr.start()
+                        inst = await _await_instance(instances, k)
+                        await asyncio.wait_for(mgr._ready_event.wait(), 2)
+                        assert mgr.is_ready
+
+                        inst.exc = RuntimeError(f"request failed at k={k}")
+                        inst.request_gate.set()
+
+                        d = asyncio.create_task(mgr.request_definition("src/main.rs", 0, 0))
+                        for _ in range(k):
+                            await asyncio.sleep(0)
+                        requested = d.cancel()
+                        if requested:
+                            # Cancel accepted while pending — must be honoured
+                            # (same invariant as the happy-path sweep).
+                            with pytest.raises(asyncio.CancelledError):
+                                await asyncio.wait_for(d, 2)
+                        else:
+                            # d already completed with the request's exception;
+                            # result() retrieves it (keeping OUR side clean so
+                            # any leak seen below is _race_teardown's).
+                            with pytest.raises(RuntimeError, match="request failed"):
+                                d.result()
+
+                        # Drop the delegate task and force collection while
+                        # the loop is still running — an abandoned request
+                        # exception fires the handler here.
+                        del d
+                        gc.collect()
+                        await asyncio.sleep(0)
+                        leaks = [
+                            ctx
+                            for ctx in handler_events
+                            if "never retrieved" in ctx.get("message", "")
+                        ]
+                        assert leaks == [], f"k={k}: abandoned request exception: {leaks}"
+                    finally:
+                        await mgr.shutdown()
+                await _cancel_leaked_tasks()
+
+        asyncio.run(_scenario())
+
     def test_teardown_reap_external_cancel_not_converted(self) -> None:
         """A cancel landing in the teardown-branch reap must NOT become
         AnalyzerTornDownError.
