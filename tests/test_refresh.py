@@ -520,10 +520,10 @@ class TestFinding3ConcurrentRefreshSerialized:
 
         def _init_doc_store_sync(settings: Any) -> MagicMock:
             # init_doc_store is called via anyio.to_thread.run_sync, which
-            # runs it in a worker thread — but the surrounding
-            # _doc_store_refresh_lock is an asyncio.Lock held on the event
-            # loop for the DURATION of that run_sync call, so overlapping
-            # calls are still impossible. We simulate "slow" work with a
+            # runs it in a worker thread — but the surrounding per-loop lock
+            # (via _get_doc_store_refresh_lock()) is an asyncio.Lock held on
+            # the event loop for the DURATION of that run_sync call, so
+            # overlapping calls are still impossible. We simulate "slow" work with a
             # blocking sleep here (this runs off-loop, in the thread pool).
             import time
 

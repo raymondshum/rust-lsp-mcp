@@ -50,7 +50,9 @@ _log = logging.getLogger(__name__)
 # otherwise accumulate one dead, closed loop per test run for the life of
 # the process. ``WeakKeyDictionary`` lets each entry disappear as soon as its
 # loop is garbage-collected, with no behavioural difference for the single
-# long-lived production loop.
+# long-lived production loop.  Mutation of the WeakKeyDictionary is not
+# thread-safe, which is fine because the accessor is only ever invoked from
+# coroutines on the server's single event-loop thread (never off-loop).
 _doc_store_refresh_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
     weakref.WeakKeyDictionary()
 )
