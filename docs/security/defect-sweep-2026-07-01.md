@@ -44,8 +44,8 @@ and the **GitHub issue** tracking it.
 | DS-14 | Med | docs | `status` can't report doc-index readiness; recovery path loops | #58 ✅ |
 | DS-15 | Med | infra | `setup.sh` disables host-global git commit signing | #59 ✅ |
 | DS-16 | Med | infra | `status` git-staleness always null on rootful Linux Docker | #60 ✅ |
-| DS-17 | Med | tests | Malformed-LSP-response branch has zero CI coverage | #61 |
-| DS-18 | Med | tests | `_lifespan` / `analyzer_lifespan` have zero coverage | #62 |
+| DS-17 | Med | tests | Malformed-LSP-response branch has zero CI coverage | #61 ✅ |
+| DS-18 | Med | tests | `_lifespan` / `analyzer_lifespan` have zero coverage | #62 ✅ |
 | DS-19 | Low | core | `status` runs `subprocess.run` synchronously on the event loop | #63 |
 | DS-20 | Low | tools | Null `documentSymbol` → `error` envelope; `None`-check is dead code | #63 |
 | DS-21 | Low | core | Concurrent `refresh` not serialized → duplicate analyzer processes | #63 ✅ |
@@ -55,7 +55,7 @@ and the **GitHub issue** tracking it.
 | DS-25 | Low | docs | Model-persistence advice contradicts the baked-model design | #63 ✅ |
 | DS-26 | Low | infra | Dockerfile comment claims RA reads `RA_TARGET_DIR`; it doesn't | #63 ✅ |
 | DS-27 | Low | infra | `prime-cache.sh` SELinux relabel applied only to project mount | #63 |
-| DS-28 | Low | tests | No test asserts tools are actually registered on the app | #63 |
+| DS-28 | Low | tests | No test asserts tools are actually registered on the app | #63 ✅ |
 
 Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up #63).
 
@@ -357,6 +357,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   `except AssertionError: return None` (the exact historical bug), genuine
   protocol failures get reported as `not_found` and CI stays green. Verified by
   mutation.
+- **Resolved:** 2026-07-02 (PR #83). `_run_with_fake_lsp` now builds a fake-ready
+  manager (no live analyzer), so the two malformed-response tests run in the fast
+  tier; mutation-verified they fail under the blanket-catch regression.
 
 ### DS-18 — `_lifespan` / `analyzer_lifespan` have zero test coverage
 - **Where:** `src/rust_lsp_mcp/core.py:55`.
@@ -366,6 +369,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** A refactor that lets `init_doc_store`'s exception propagate
   out of `_lifespan` would crash startup whenever ChromaDB is unavailable —
   violating the documented guarantee — with no failing test.
+- **Resolved:** 2026-07-02 (PR #83, atop the readiness unit's test_lifespan_startup.py).
+  Fast-tier tests now assert a doc-store init failure is swallowed and nav continues,
+  and that analyzer_lifespan wires start→yield→shutdown.
 
 ---
 
@@ -482,6 +488,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** If discovery regresses (an underscore rename, altered
   iteration, a tool moved out of the package), the deployed server silently
   exposes a reduced/empty tool set while the whole suite passes.
+- **Resolved:** 2026-07-02 (PR #83). `tests/test_tool_registration.py` asserts the
+  core tool set is registered via `mcp.list_tools()` (branch-safe subset) and that no
+  registered tool name starts with `_`. (Issue #63 stays open for the other lows.)
 
 ---
 
