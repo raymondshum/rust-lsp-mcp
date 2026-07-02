@@ -34,14 +34,14 @@ and the **GitHub issue** tracking it.
 | DS-04 | High | core | Drain-timeout cancel orphans the rust-analyzer subprocess | #48 ✅ |
 | DS-05 | High | rag | Doc store adopts an existing collection with zero freshness check | #49 ✅ |
 | DS-06 | High | tests | The real `init_doc_store()` is executed by no test | #50 ✅ |
-| DS-07 | Med | core | Failed analyzer startup is swallowed — `indexing` forever | #51 |
-| DS-08 | Med | core | Blocking doc rebuild on the event loop during lifespan startup | #52 |
+| DS-07 | Med | core | Failed analyzer startup is swallowed — `indexing` forever | #51 ✅ |
+| DS-08 | Med | core | Blocking doc rebuild on the event loop during lifespan startup | #52 ✅ |
 | DS-09 | Med | tools | `document_symbols` returns `range.start`, not `selectionRange` | #53 |
 | DS-10 | Med | rag | `---` after a closing code fence misparsed as a setext header | #54 |
 | DS-11 | Med | rag | Doc starting with `---` swallowed whole as frontmatter | #55 |
 | DS-12 | Med | rag | `refresh` rebuild races in-flight `search_docs` (no lock) | #56 |
 | DS-13 | Med | infra | `RLM_CARGO_*` / `RLM_RUST_ANALYZER_TARGET_DIR` are dead knobs | #57 |
-| DS-14 | Med | docs | `status` can't report doc-index readiness; recovery path loops | #58 |
+| DS-14 | Med | docs | `status` can't report doc-index readiness; recovery path loops | #58 ✅ |
 | DS-15 | Med | infra | `setup.sh` disables host-global git commit signing | #59 |
 | DS-16 | Med | infra | `status` git-staleness always null on rootful Linux Docker | #60 |
 | DS-17 | Med | tests | Malformed-LSP-response branch has zero CI coverage | #61 |
@@ -200,6 +200,11 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   server starts cleanly and answers every navigation call `not_ready`/"retry"
   forever; clients loop on `status` indefinitely with only a stderr log as
   evidence.
+- **Resolved:** 2026-07-02 (PR #71). `_run` sets `STATE_ERROR` (gen-guarded) with a
+  recorded reason; `require_ready()` returns an `error` envelope (not `not_ready`) so
+  every gated tool surfaces it; `status`/`analyzer_status` report `state="error"`.
+  `refresh` clears the error and re-indexes; `_drain_task` drains a failing outgoing run
+  so a single refresh recovers.
 
 ### DS-08 — Blocking doc rebuild on the event loop during lifespan startup
 - **Where:** `src/rust_lsp_mcp/core.py:56`; also `docs/guide/architecture.md:195`
@@ -214,6 +219,10 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   client gets no responses until the corpus is embedded; clients with startup
   timeouts (e.g. Claude Desktop) can declare the server dead. Contradicts the
   architecture doc's "available to clients immediately" claim.
+- **Resolved:** 2026-07-02 (PR #71). `init_doc_store` splits into a cheap synchronous
+  prepare (construct + publish singleton + adopt check) and a background thread for
+  `rebuild()`; the loop serves `initialize`/`status` immediately with
+  `doc_index_state="building"`. architecture.md updated to match.
 
 ### DS-09 — `document_symbols` reports `range.start` instead of `selectionRange`
 - **Where:** `src/rust_lsp_mcp/core.py:252` (`symbol_to_external` doc-symbol branch).
@@ -287,6 +296,11 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** An agent following the documented "poll `status` until
   ready, then retry" path loops indefinitely; no exposed tool distinguishes
   "rebuilding" from "permanently unavailable".
+- **Resolved:** 2026-07-02 (PR #71, with DS-07/DS-08). `status` now reports
+  `doc_index_state` (building/ready/error) + `doc_index_error`; `search_docs` returns
+  `error` on permanent failure (not eternal `not_ready`); `refresh` re-initialises an
+  absent/errored store instead of skipping — so the documented poll-then-refresh recovery
+  terminates. tools.md updated so "check with `status`" names the field.
 
 ### DS-15 — `setup.sh` disables host-global git commit signing when run outside the container
 - **Where:** `scripts/setup.sh:34`; `scripts/teardown.sh:19-22,62`.
