@@ -18,6 +18,21 @@ Readiness contract (load-bearing — mirrors the analyzer's readiness gate):
     misleading empty/partial answer mid-rebuild, and surfaces a permanent
     failure (``"error"``) distinctly from a transient one (``"building"``).
 
+Read/write coordination (DS-12):
+    A fast-path ``is_ready``/``state`` check on the event loop followed by an
+    ``await run_sync(store.search)`` on a worker thread leaves a window where
+    a concurrent ``rebuild()`` can flip ``state``/``_collection`` out from
+    under an in-flight ``search()`` — the two genuinely race on separate
+    threads (mcp 1.12.4 dispatches tool requests concurrently and runs sync
+    tools inline).  ``DocStore`` closes that window with two locks:
+    ``_build_lock`` (serializes whole rebuilds, held for the entire body) and
+    ``_read_lock`` (guards only the readiness check + collection snapshot +
+    count/query in ``search()``, and the two brief state transitions at the
+    start/end of ``_rebuild_locked``).  ``search()`` raises
+    :class:`DocStoreNotReady` — a control-flow signal, not an error — instead
+    of returning a misleading ``[]``/partial result when it observes the
+    store mid-rebuild; ``search_docs`` translates that into ``not_ready``.
+
 Startup split (DS-08):
     ``init_doc_store`` (synchronous) does the cheap part — construct the
     store, set the module singleton, and attempt to adopt an already-built
@@ -55,6 +70,17 @@ _ADD_BATCH_SIZE = 500
 DOC_STATE_BUILDING = "building"
 DOC_STATE_READY = "ready"
 DOC_STATE_ERROR = "error"
+
+
+class DocStoreNotReady(Exception):
+    """Raised by :meth:`DocStore.search` when the store is not in a queryable state.
+
+    This is a CONTROL-FLOW SIGNAL, not an error: it means "the readiness check
+    (or an atomic snapshot taken immediately after it) found the store mid-rebuild
+    or without a collection yet" — i.e. exactly the race DS-12 closes.  Callers
+    (``search_docs``) must translate this into a ``not_ready`` envelope, distinct
+    from a genuine exception (which maps to ``error``).
+    """
 
 
 def _project_fingerprint(settings: Settings) -> str:
@@ -97,9 +123,23 @@ class DocStore:
         self._collection: Any = None
         self._state: str = DOC_STATE_BUILDING
         self._error: str | None = None
-        # Guards rebuild() against concurrent invocation (e.g. the DS-08
-        # background build task racing a synchronous refresh() rebuild).
+        # Two distinct locks (DS-12):
+        #   _build_lock — guards rebuild() against concurrent invocation (e.g.
+        #       the DS-08 background build task racing a synchronous refresh()
+        #       rebuild).  Held for the ENTIRE rebuild (long: globbing,
+        #       chunking, embedding, batch-add).
+        #   _read_lock — guards the _state/_collection reads in search() and
+        #       their transitions in _rebuild_locked().  Held only BRIEFLY: by
+        #       search() across its readiness-check + snapshot + count/query,
+        #       and by _rebuild_locked() only around its two brief start/end
+        #       transitions (not around the long build body).
+        # Ordering/no-deadlock: rebuild() always acquires _build_lock (outer)
+        # before _read_lock (inner, and only briefly); search() acquires only
+        # _read_lock and never _build_lock.  Since no code path acquires
+        # _read_lock first and then blocks on _build_lock, there is no cycle
+        # and thus no deadlock.
         self._build_lock = threading.Lock()
+        self._read_lock = threading.Lock()
 
     @property
     def is_ready(self) -> bool:
@@ -140,31 +180,44 @@ class DocStore:
 
     def _rebuild_locked(self) -> int:
         """The actual rebuild body; must only be called while holding ``_build_lock``."""
-        # Mark not ready at the very start — never ready mid-build.  Clearing
-        # _error here (rather than only on success) means a rebuild that is
-        # itself interrupted mid-flight (e.g. process killed) leaves the
-        # store honestly "building" rather than replaying a stale error from
-        # a previous failed attempt.
-        self._state = DOC_STATE_BUILDING
-        self._error = None
-        self._collection = None
-
         collection_name = self._settings.doc_collection
         # Computed once up front; stamped into collection metadata below so a
         # later init_doc_store() can refuse to adopt a collection built for a
         # different project_root (DS-05).
         project_fingerprint = _project_fingerprint(self._settings)
 
-        # Drop existing collection if present.
-        try:
-            self._client.delete_collection(collection_name)
-            _log.debug("doc_store: deleted existing collection %r", collection_name)
-        except NotFoundError:
-            # Expected on first build.
-            pass
-        except Exception as exc:
-            _log.debug("doc_store: delete_collection raised %r (ignored)", exc)
+        # --- Start transition (DS-12): under _read_lock, briefly -----------
+        # Mark not ready at the very start — never ready mid-build.  Clearing
+        # _error here (rather than only on success) means a rebuild that is
+        # itself interrupted mid-flight (e.g. process killed) leaves the
+        # store honestly "building" rather than replaying a stale error from
+        # a previous failed attempt.  The delete is INSIDE this locked
+        # section (not after it) so no in-flight search() can be mid-query on
+        # the collection being deleted: search() holds _read_lock across its
+        # own count()+query(), so the delete here waits for it to finish, and
+        # any search() that starts after this section observes
+        # state=BUILDING/collection=None and raises DocStoreNotReady instead
+        # of racing a half-deleted collection.
+        with self._read_lock:
+            self._state = DOC_STATE_BUILDING
+            self._error = None
+            self._collection = None
 
+            # Drop existing collection if present.
+            try:
+                self._client.delete_collection(collection_name)
+                _log.debug("doc_store: deleted existing collection %r", collection_name)
+            except NotFoundError:
+                # Expected on first build.
+                pass
+            except Exception as exc:
+                _log.debug("doc_store: delete_collection raised %r (ignored)", exc)
+
+        # --- Long section: NO lock held --------------------------------
+        # create_collection into a LOCAL variable (never assigned to
+        # self._collection until the end transition below) so any
+        # concurrent state-check race is doubly safe: self._collection stays
+        # None for the whole build, not just until create_collection returns.
         # Recreate with cosine distance.
         # Note: passing embedding_function=None explicitly disables the default EF in
         # chromadb 1.5.x.  When no custom EF is provided, omit the parameter entirely so
@@ -175,7 +228,6 @@ class DocStore:
         if self._ef is not None:
             create_kwargs["embedding_function"] = self._ef
         collection = self._client.create_collection(collection_name, **create_kwargs)
-        self._collection = collection
 
         # Glob markdown files.
         src_root = pathlib.Path(self._settings.project_root)
@@ -240,7 +292,10 @@ class DocStore:
             collection.modify(
                 metadata={"build_complete": True, "project_root": project_fingerprint}
             )
-            self._state = DOC_STATE_READY
+            # --- End transition (empty-corpus path): under _read_lock -----
+            with self._read_lock:
+                self._collection = collection
+                self._state = DOC_STATE_READY
             return 0
 
         # Batch-add to avoid ChromaDB memory issues with large corpora.
@@ -258,8 +313,14 @@ class DocStore:
         # it (DS-05) so a later init_doc_store() can detect cross-project reuse.
         collection.modify(metadata={"build_complete": True, "project_root": project_fingerprint})
 
-        # Only mark ready after ALL adds AND the sentinel are written.
-        self._state = DOC_STATE_READY
+        # --- End transition (DS-12): under _read_lock, briefly -------------
+        # Only mark ready after ALL adds AND the sentinel are written, and only
+        # publish self._collection now — never earlier — so no state-check
+        # race during the (unlocked) build above can observe a half-built
+        # collection.
+        with self._read_lock:
+            self._collection = collection
+            self._state = DOC_STATE_READY
         return total
 
     def search(self, query: str, n_results: int = 5) -> list[dict[str, Any]]:
@@ -276,23 +337,37 @@ class DocStore:
 
         Returns an empty list only if the collection is empty.  (Semantic search
         over a non-empty collection always returns the top-k nearest neighbours.)
+
+        Raises:
+            DocStoreNotReady: the store is not ``"ready"`` (or has no collection
+                yet) at the moment this call takes its atomic snapshot.  This is
+                the DS-12 fix: the readiness check, the collection snapshot, and
+                the count()+query() calls all happen while holding
+                ``_read_lock``, so a concurrent rebuild's destructive start
+                transition (which also takes ``_read_lock``, briefly) cannot
+                interleave with this method mid-query — it either happens
+                entirely before this call starts, or waits for this call to
+                finish.  Callers (``search_docs``) must translate this into a
+                ``not_ready`` envelope, not treat it as "no results".
         """
-        if self._collection is None:
-            return []
+        with self._read_lock:
+            if self._state != DOC_STATE_READY or self._collection is None:
+                raise DocStoreNotReady()
+            collection = self._collection
+            count = collection.count()
+            if count == 0:
+                return []
 
-        count = self._collection.count()
-        if count == 0:
-            return []
+            # Clamp n_results to the number of available documents.
+            effective_n = min(n_results, count)
 
-        # Clamp n_results to the number of available documents.
-        effective_n = min(n_results, count)
+            result = collection.query(
+                query_texts=[query],
+                n_results=effective_n,
+            )
 
-        result = self._collection.query(
-            query_texts=[query],
-            n_results=effective_n,
-        )
-
-        # Map row 0 of each list-of-lists into the documented shape.
+        # Map row 0 of each list-of-lists into the documented shape — pure
+        # dict work, done OUTSIDE the lock.
         docs_row = result.get("documents", [[]])[0]
         metas_row = result.get("metadatas", [[]])[0]
         dists_row = result.get("distances", [[]])[0]
@@ -404,8 +479,17 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
                 "doc_store: adopting existing collection (%d chunks) — skipping rebuild",
                 existing.count(),
             )
-            store._collection = existing
-            store._state = DOC_STATE_READY
+            # Publish collection+state atomically under _read_lock (DS-12),
+            # uniform with rebuild's start/end transitions.  _prepare_store
+            # publishes the singleton BEFORE calling _try_adopt, and a
+            # concurrent refresh re-init runs on a worker thread while
+            # searches run on others, so this adopt IS concurrently reachable —
+            # the lock makes the two writes atomic w.r.t. an in-flight
+            # search()'s snapshot rather than relying on statement-order-
+            # under-GIL.
+            with store._read_lock:
+                store._collection = existing
+                store._state = DOC_STATE_READY
             return True
         if existing.count() > 0 and meta.get("build_complete"):
             # Sentinel present but built for a different project_root (or a

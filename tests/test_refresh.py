@@ -478,3 +478,136 @@ class TestRefreshEndToEndDocStoreRecovery:
         assert recovered_result["status"] in (STATUS_OK, STATUS_NOT_FOUND)
 
         doc_store_mod.clear_doc_store()
+
+
+# ---------------------------------------------------------------------------
+# finding-3: concurrent refresh() calls on an absent/errored store must not
+# race two DocStore re-inits against the same on-disk collection.
+# ---------------------------------------------------------------------------
+
+
+class TestFinding3ConcurrentRefreshSerialized:
+    """Two concurrent refresh() calls with an absent/errored store must
+    serialize their init_doc_store invocations — never overlapping.
+    """
+
+    def test_concurrent_refresh_init_doc_store_never_overlaps(self) -> None:
+        """Patch init_doc_store to record an in-flight counter and assert it
+        never exceeds 1 — i.e. the two calls never interleave, even though
+        both refresh() calls run "concurrently" (interleaved on the event
+        loop via asyncio.gather).
+
+        NOTE: all patches are applied ONCE, OUTSIDE the gather — applying
+        ``unittest.mock.patch.object`` as a context manager independently
+        from two coroutines racing on the SAME target attribute is itself
+        racy (save/restore on __enter__/__exit__ isn't safe against
+        interleaved concurrent use), so both calls share one patched
+        environment; that's sufficient to prove serialization since
+        ``core._manager``/``refresh_mod.get_doc_store`` are read-only for
+        this test's purposes and ``init_doc_store`` is the thing under test.
+
+        ALSO NOTE: ``refresh_mod._doc_store_refresh_lock`` is swapped for a
+        fresh ``asyncio.Lock()`` for the duration of this test.  A plain
+        ``asyncio.Lock`` binds to whichever event loop first genuinely
+        contends it; reusing the real module-level lock across multiple
+        ``asyncio.run()``-per-test invocations (this test suite's style)
+        would bind it to THIS test's loop and then blow up with "bound to a
+        different event loop" in any later test that also contends it. Using
+        a fresh instance keeps this test hermetic without changing
+        production behaviour (the production lock still lives for the
+        server's single long-running event loop).
+        """
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        in_flight = 0
+        max_in_flight = 0
+
+        def _init_doc_store_sync(settings: Any) -> MagicMock:
+            # init_doc_store is called via anyio.to_thread.run_sync, which
+            # runs it in a worker thread — but the surrounding
+            # _doc_store_refresh_lock is an asyncio.Lock held on the event
+            # loop for the DURATION of that run_sync call, so overlapping
+            # calls are still impossible. We simulate "slow" work with a
+            # blocking sleep here (this runs off-loop, in the thread pool).
+            import time
+
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.05)
+            in_flight -= 1
+            return MagicMock()
+
+        mgr = _FakeManager()
+
+        async def _one_refresh() -> dict[str, Any]:
+            return await refresh_mod.refresh()
+
+        async def _run_both() -> list[dict[str, Any]]:
+            return list(await asyncio.gather(_one_refresh(), _one_refresh()))
+
+        with (
+            patch.object(core, "_manager", mgr),
+            patch.object(refresh_mod, "get_doc_store", return_value=None),
+            patch.object(refresh_mod, "init_doc_store", _init_doc_store_sync),
+            patch.object(refresh_mod, "_doc_store_refresh_lock", asyncio.Lock()),
+        ):
+            results = asyncio.run(_run_both())
+
+        assert all(r["status"] == STATUS_OK for r in results)
+        assert max_in_flight == 1, (
+            f"init_doc_store overlapped across concurrent refresh() calls "
+            f"(max_in_flight={max_in_flight}); finding-3 serialization failed"
+        )
+
+    def test_concurrent_refresh_calls_init_doc_store_at_most_expected(self) -> None:
+        """Three concurrent refresh() calls on an absent store each still call
+        init_doc_store exactly once apiece (serialized, not skipped or
+        duplicated) — total call count is exactly 3, with no overlap.
+
+        Patches are applied ONCE outside the gather, including a fresh
+        ``_doc_store_refresh_lock`` instance — see the docstring on
+        ``test_concurrent_refresh_init_doc_store_never_overlaps`` for why
+        both of those are necessary for a hermetic test.
+        """
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        call_count = 0
+        in_flight = 0
+        max_in_flight = 0
+
+        def _init_doc_store_sync(settings: Any) -> MagicMock:
+            nonlocal call_count, in_flight, max_in_flight
+            import time
+
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.02)
+            call_count += 1
+            in_flight -= 1
+            return MagicMock()
+
+        mgr = _FakeManager()
+
+        async def _one_refresh() -> dict[str, Any]:
+            return await refresh_mod.refresh()
+
+        async def _run_all() -> list[dict[str, Any]]:
+            return list(await asyncio.gather(_one_refresh(), _one_refresh(), _one_refresh()))
+
+        with (
+            patch.object(core, "_manager", mgr),
+            patch.object(refresh_mod, "get_doc_store", return_value=None),
+            patch.object(refresh_mod, "init_doc_store", _init_doc_store_sync),
+            patch.object(refresh_mod, "_doc_store_refresh_lock", asyncio.Lock()),
+        ):
+            results = asyncio.run(_run_all())
+
+        assert all(r["status"] == STATUS_OK for r in results)
+        assert call_count == 3
+        assert max_in_flight == 1, (
+            f"init_doc_store overlapped across concurrent refresh() calls "
+            f"(max_in_flight={max_in_flight}); finding-3 serialization failed"
+        )

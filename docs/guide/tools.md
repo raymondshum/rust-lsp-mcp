@@ -321,7 +321,7 @@ exact words do not appear.
 | `ok` | `results`: list of chunk objects, best match first (see below). |
 | `not_ready` | `message` — the documentation index is still building (transient — the initial build, or a `refresh`-triggered rebuild, is in flight). Do not interpret this as "no matching docs". Retry once the index is ready (poll `status`, or wait for `refresh` to return). |
 | `not_found` | `message` — the index is ready and the collection is genuinely empty. |
-| `error` | `message` — the documentation index **failed to build or initialise** (permanent until recovered — unlike `not_ready`, retrying immediately will not help; the message includes the underlying reason), or an unexpected failure from the search layer itself. Call `refresh` to rebuild the index and clear the failure. |
+| `error` | `message` — either (a) `query` is empty or whitespace-only (rejected immediately, before any readiness check or search — no index round-trip), (b) the documentation index **failed to build or initialise** (permanent until recovered — unlike `not_ready`, retrying immediately will not help; the message includes the underlying reason), or (c) an unexpected failure from the search layer itself. For (b)/(c), call `refresh` to rebuild the index and clear the failure. |
 
 `not_ready` and `error` mean different things here: `not_ready` is transient
 (the index is actively being built and will become `ready` on its own),
