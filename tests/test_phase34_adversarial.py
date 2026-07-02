@@ -35,6 +35,9 @@ dead code for references/definition — multilspy asserts on ``null`` *before*
 returning, so the delegate never observes ``None`` for these two calls.
 """
 
+import asyncio
+from typing import Any
+
 import anyio
 import pytest
 
@@ -191,7 +194,12 @@ def test_find_references_zero_callers_is_ok_empty(settings) -> None:
 #
 # These tests need no live analyzer: they inject a fake ``_lsp`` whose delegate
 # raises the SAME malformed-shape AssertionError multilspy raises, then assert
-# the tool surfaces ``error`` (NOT not_found).  They FAIL against current code.
+# the tool surfaces ``error`` (NOT not_found).  ``AnalyzerManager`` already
+# narrows the catch via ``_is_null_response_assertion`` (see analyzer.py), so
+# these PASS against current code — they are a regression guard against that
+# narrowing being reverted to a blanket ``except AssertionError: return None``,
+# not a falsifier.  Fast-tier: no live analyzer is warm-started (see
+# ``_make_fake_ready_manager``).
 # ---------------------------------------------------------------------------
 
 
@@ -210,22 +218,52 @@ class _MalformedLSP:
         raise AssertionError("Unexpected response from Language Server: {'garbage': 1}")
 
 
-def _run_with_fake_lsp(settings, coro_factory):
-    """Warm-start a manager, then swap _lsp for the malformed fake before calling."""
+def _make_fake_ready_manager(settings: Any) -> AnalyzerManager:
+    """Build a fake READY ``AnalyzerManager`` wired to the malformed-LSP fake.
 
-    async def _inner(manager):
+    Constructed via ``__new__`` (bypassing ``__init__``) so no real
+    rust-analyzer process is ever spawned — mirrors
+    ``test_phase34_delegates.py``'s ``_make_ready_manager`` pattern.  Only the
+    fields the delegates and the ``require_ready()``/``is_ready`` gate read
+    are set.  This lets the malformed-response tests run at fast-tier speed
+    instead of warm-starting a real analyzer (via ``_with_warm_manager``) just
+    to immediately overwrite its ``_lsp`` with the fake.
+    """
+    manager = AnalyzerManager.__new__(AnalyzerManager)
+    manager._rust_analyzer_bin = settings.rust_analyzer_bin
+    manager._repository_root = settings.project_root
+    manager.state = STATE_READY
+    manager._task = None
+    manager._ready_event = asyncio.Event()
+    manager._shutdown_event = asyncio.Event()
+    manager._lsp = _MalformedLSP()
+    manager._indexed_commit = None
+    manager._error = None
+    manager._generation = 0
+    manager._lifecycle_lock = asyncio.Lock()
+    manager._closed = False
+    return manager
+
+
+def _run_with_fake_lsp(settings, coro_factory):
+    """Run ``coro_factory()`` against a fake-ready manager with the malformed LSP.
+
+    No live analyzer is started (see ``_make_fake_ready_manager``); this is
+    the fast-tier counterpart of ``_run``/``_with_warm_manager`` above.
+    """
+
+    async def _inner() -> Any:
         from unittest.mock import patch
 
         import rust_lsp_mcp.core as core
 
-        manager._lsp = _MalformedLSP()
+        manager = _make_fake_ready_manager(settings)
         with patch.object(core, "_manager", manager):
             return await coro_factory()
 
-    return anyio.run(_with_warm_manager, settings, _inner)
+    return anyio.run(_inner)
 
 
-@pytest.mark.integration
 def test_find_references_malformed_response_is_error_not_found(settings) -> None:
     """A malformed (non-null) references response is an LSP failure -> error.
 
@@ -244,7 +282,6 @@ def test_find_references_malformed_response_is_error_not_found(settings) -> None
     )
 
 
-@pytest.mark.integration
 def test_goto_definition_malformed_response_is_error_not_found(settings) -> None:
     """A malformed (non-null) definition response is an LSP failure -> error.
 
