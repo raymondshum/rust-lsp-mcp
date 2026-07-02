@@ -36,14 +36,18 @@ Test coverage:
           ``AssertionError`` is still visible to ``_is_null_response_assertion``
           (→ ``None``); a malformed-payload ``AssertionError`` still
           propagates unchanged.
-    vii.  ``_drain_task``'s hardened timeout branch: an EXTERNAL cancellation
-          of the drain coroutine itself (while its own post-timeout
-          ``await self._task`` is parked on a task that swallowed its own
-          cancellation and is still not done) must propagate
-          ``CancelledError`` rather than being swallowed — otherwise
-          ``restart()`` would proceed to swap ``_shutdown_event`` while the
-          old run might still be alive (the pairing invariant ``_race_teardown``
-          depends on would break).
+    vii.  Invariant-pinning (this one was GREEN pre-fix): an EXTERNAL
+          cancellation of restart() while its drain is wedged on an undead
+          task (one that swallows its own cancellation) propagates
+          ``CancelledError`` without restart() ever swapping
+          ``_shutdown_event``.  On 3.12+ this is guaranteed by ``wait_for``
+          itself — its timeout cancels-and-awaits, DELEGATING the cancellation
+          to the drained task, so the drain stays parked inside ``wait_for``
+          and can only get past it once the drained task is provably done.
+          ``_drain_task``'s ``done()``-checked re-raise additionally guards
+          the razor-thin ``_must_cancel`` race (timeout firing between the
+          drain's suspension points).  Together they preserve the event/_lsp
+          pairing invariant ``_race_teardown`` depends on.
 """
 
 import asyncio
@@ -58,6 +62,7 @@ import rust_lsp_mcp.core as core
 from rust_lsp_mcp import analyzer as analyzer_module
 from rust_lsp_mcp.analyzer import (
     STATE_READY,
+    TORN_DOWN_RETRY_MESSAGE,
     AnalyzerManager,
     AnalyzerTornDownError,
 )
@@ -135,13 +140,16 @@ class UndeadLsp(FakeLsp):
     """FakeLsp whose ``start_server`` swallows a cancellation pre-yield.
 
     Simulates an outgoing run that refuses to die within
-    ``DRAIN_TIMEOUT_SECONDS``: the first cancellation (delivered by
-    ``_drain_task``'s own ``except TimeoutError`` branch) is caught and the
-    coroutine re-parks on ``second_gate`` (never set by the test) instead of
-    completing — so ``self._task`` is still not done by the time
-    ``_drain_task`` reaches its own ``await self._task``.  ``cancel_seen`` is
-    an event-driven signal for the test: it fires the instant that first
-    cancellation has landed, so the test never has to guess with a sleep.
+    ``DRAIN_TIMEOUT_SECONDS``.  On 3.12+ ``wait_for``'s timeout does NOT raise
+    ``TimeoutError`` while the awaited task is pending — it cancels the DRAIN
+    task, and since the drain's ``_fut_waiter`` is the drained task,
+    ``Task.cancel()`` DELEGATES that cancellation to it.  This fake catches
+    that delegated cancellation and re-parks on ``second_gate`` (never set by
+    the test) instead of completing, so the drain stays parked inside
+    ``wait_for`` — it never enters the ``except TimeoutError`` branch.
+    ``cancel_seen`` is an event-driven signal for the test: it fires the
+    instant the delegated cancellation lands, so the test never has to guess
+    with a sleep.
     """
 
     def __init__(self, **kw: Any) -> None:
@@ -193,11 +201,13 @@ class TestRestartUnblocksHungDelegate:
                     assert first.request_cancelled.is_set()
 
                     # Recovery: the replacement run reaches ready normally.
-                    assert len(instances) == 2
-                    second = instances[1]
+                    # (Instance count asserted only AFTER the ready event —
+                    # the replacement task is not guaranteed to have had a
+                    # turn, i.e. constructed its NavLsp, any earlier.)
                     await asyncio.wait_for(mgr._ready_event.wait(), 2)
                     assert mgr.is_ready
-                    assert mgr._lsp is second
+                    assert len(instances) == 2
+                    assert mgr._lsp is instances[1]
                 finally:
                     await mgr.shutdown()
                     await _cancel_leaked_tasks()
@@ -403,7 +413,7 @@ async def _call_find_references_declaration_definition_raises() -> dict[str, Any
 def test_tool_returns_not_ready_envelope(factory: Any) -> None:
     result = asyncio.run(factory())
     assert result["status"] == STATUS_NOT_READY, result
-    assert "retry" in result["message"].lower()
+    assert result["message"] == TORN_DOWN_RETRY_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -532,14 +542,27 @@ class TestAssertionErrorTransparency:
 
 
 # ---------------------------------------------------------------------------
-# vii — _drain_task's hardened timeout branch propagates an external cancel
+# vii — external cancel during an undead drain preserves the pairing invariant
 # ---------------------------------------------------------------------------
 
 
-class TestDrainCancelPropagatesWhenTaskUndead:
-    def test_drain_cancel_propagates_when_task_undead(
+class TestExternalCancelDuringUndeadDrain:
+    def test_external_cancel_during_undead_drain_preserves_pairing_invariant(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Invariant-pinning test (GREEN pre-fix), not a regression test.
+
+        Pins the pre-existing behavior guaranteed by ``wait_for``'s own 3.12+
+        semantics: its timeout cancels-and-awaits, delegating the cancellation
+        to the drained task, so ``restart()`` can only get past ``_drain_task``
+        once the drained task is provably done — the event/_lsp pairing
+        invariant ``_race_teardown`` depends on.  The hardened
+        ``done()``-checked re-raise in ``_drain_task``'s ``except TimeoutError``
+        branch is NOT exercised here (that branch is only reachable via the
+        razor-thin ``_must_cancel`` race, which is not deterministically
+        drivable); this test guards the observable contract both mechanisms
+        serve.
+        """
         monkeypatch.setattr(analyzer_module, "DRAIN_TIMEOUT_SECONDS", 0.05)
         instances: list[UndeadLsp] = []
 
@@ -552,20 +575,28 @@ class TestDrainCancelPropagatesWhenTaskUndead:
                     await mgr.start()
                     first = await _await_first_instance(instances)
                     await asyncio.wait_for(first.entered.wait(), 2)
-                    # first is now parked on quiesce_gate.wait() (never set) —
-                    # restart()'s drain will time out, cancel it once, and it
-                    # will swallow that cancellation and re-park on
-                    # second_gate — event-driven signal: cancel_seen.
+                    # first is now parked on quiesce_gate.wait() (never set).
+                    # The drain's wait_for timeout will cancel the DRAIN task,
+                    # which DELEGATES the cancellation to the drained task
+                    # (the drain's _fut_waiter); UndeadLsp swallows it and
+                    # re-parks on second_gate — event-driven signal:
+                    # cancel_seen.
 
                     r = asyncio.create_task(mgr.restart())
                     await asyncio.wait_for(first.cancel_seen.wait(), 2)
-                    # restart() is now parked inside _drain_task's own
-                    # `await self._task` (post-timeout), which will never
-                    # complete on its own since the old task is undead.
+                    # restart() is still parked INSIDE _drain_task's wait_for
+                    # (it never enters the except TimeoutError branch — the
+                    # drained task is still pending), and it can never get
+                    # past it on its own since the old task is undead.
 
                     shutdown_event_before = mgr._shutdown_event
                     assert shutdown_event_before.is_set()
 
+                    # The external cancel likewise DELEGATES through the
+                    # parked drain to the undead task, which finally dies;
+                    # the CancelledError propagates out of wait_for as-is
+                    # (an external cancellation is never converted to
+                    # TimeoutError) and up through restart().
                     r.cancel()
                     with pytest.raises(asyncio.CancelledError):
                         await r

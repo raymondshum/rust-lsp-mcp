@@ -98,6 +98,14 @@ class AnalyzerTornDownError(RuntimeError):
     before the request completed.  Maps to a not_ready envelope at the tool layer."""
 
 
+# Canonical tool-layer not_ready message for AnalyzerTornDownError — every tool
+# call site returns this verbatim.
+TORN_DOWN_RETRY_MESSAGE = (
+    "The analyzer was restarted or shut down while this request was in flight. "
+    "Retry after analyzer_status reports ready."
+)
+
+
 def _is_null_response_assertion(exc: AssertionError) -> bool:
     """Whether a multilspy AssertionError signals a *null* LSP response.
 
@@ -671,15 +679,14 @@ class AnalyzerManager:
         (it would take a *second* refresh to recover).  ``CancelledError`` is
         deliberately NOT swallowed here (only ``TimeoutError`` from our own
         wait_for is handled, via the cancel path); a cancellation of *this*
-        coroutine must still propagate as before — including one delivered
-        while parked in the post-timeout ``await self._task`` below: if the
-        drained task is STILL not done when that cancellation lands (it swallowed
-        its own cancellation and kept running), this is an EXTERNAL cancellation
-        of the drain coroutine itself, not a report on the drained task, and must
-        propagate rather than be swallowed — otherwise a caller (``restart()``)
-        would proceed to swap ``_shutdown_event``/``_ready_event`` while the old
-        run might still be alive, breaking the synchronous-pairing invariant
-        ``_race_teardown`` (KI-9 / #87) depends on.
+        coroutine must still propagate as before.  3.12+ note: a ``wait_for``
+        timeout cancels-and-awaits, DELEGATING the cancellation to the drained
+        task, so the ``except TimeoutError`` branch below is entered only once
+        that task is already done — except for the razor-thin ``_must_cancel``
+        race (timeout firing while this coroutine is between suspension points).
+        The ``done()``-checked re-raise in that branch guards exactly that race,
+        preserving the event/``_lsp`` pairing invariant ``_race_teardown``
+        (KI-9 / #87) depends on.
         """
         self._generation += 1
         self._shutdown_event.set()

@@ -6,7 +6,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
-from rust_lsp_mcp.analyzer import AnalyzerTornDownError
+from rust_lsp_mcp.analyzer import TORN_DOWN_RETRY_MESSAGE, AnalyzerTornDownError
 from rust_lsp_mcp.core import (
     get_manager,
     location_to_external,
@@ -88,10 +88,7 @@ async def goto_definition(file: str, line: int, character: int) -> dict[str, Any
     try:
         locs = await mgr.request_definition(file, pos.line, pos.character)
     except AnalyzerTornDownError:
-        return not_ready(
-            "The analyzer was restarted or shut down while this request was in flight. "
-            "Retry after analyzer_status reports ready."
-        )
+        return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("goto_definition: LSP error for %r line=%d char=%d", file, line, character)
         return error(f"LSP error: {exc}")
