@@ -118,16 +118,18 @@ Full suite: `uv run --frozen pytest`.
 `main → bob_prototype` via cherry-pick (see the [branch-flow rule](../../../docs/impl/known-issues.md) and
 project memory). Apply it to where the handoff artifacts land:
 
-- **Handoff docs under `docs/handoff/` are `main`-first** (owner's directive, 2026-07-02): a next-session
-  seed and its `index.md` entry are general reference docs — branch off `origin/main`, PR to `main`, then
-  cherry-pick onto `bob_prototype`, so the handoff is discoverable and usable on the canonical branch. When a
-  handoff links a `bob_prototype`-only target (a `.bob/` skill, `AGENTS.md`, `custom_modes.yaml`, or a prior
-  `bob_prototype`-only seed), render that pointer as **plain text noting the branch**, not a relative link, so
-  the `main` copy has no dangling links. This skill itself lives on `main` at
-  `.bob/skills/session-handoff/SKILL.md` (the one `.bob/` file mirrored to `main`).
-- **Bob-harness scaffolding** — the *rest* of `.bob/` (custom modes, the other skills like `resolve-defect-sweep`
-  / `continue-build`, `AGENTS.md`) stays **`bob_prototype`-only**: commit directly to `bob_prototype`; do **not**
-  cherry-pick it to `main`.
+- **Governing principle (owner's directive, 2026-07-02): no Bob-driven effort may affect both branches.** If an
+  effort touches general code / reference docs (anything on `main`), it is a **Claude Code / Fable-orchestrated
+  effort**, and **all** its artifacts — the audit/plan, the next-session seed, AND the driving skill (e.g.
+  `resolve-defect-sweep`, `session-handoff`) — are **`main`-first**: branch off `origin/main`, PR to `main`,
+  cherry-pick onto `bob_prototype`. This is why those two skills live on `main` under `.bob/skills/` even though
+  most of `.bob/` does not. A skill/seed that documents or drives cross-branch work is a general artifact, not
+  Bob-harness scaffolding.
+- **Genuinely Bob-only** — the Bob custom-modes harness that drives *`bob_prototype`-only experimentation*:
+  `.bob/custom_modes.yaml`, the `continue-build` dispatcher, `AGENTS.md`, and the diverged Bob `grill-me` copy.
+  These stay **`bob_prototype`-only**; do **not** cherry-pick them to `main`. When a `main`-first handoff links
+  one of them, render the pointer as **plain text noting the branch**, not a relative link, so the `main` copy
+  has no dangling links.
 - **General code / reference docs** (`src/`, `tests/`, `docs/security/` audits, `docs/guide/`, `Dockerfile`,
   `scripts/`) go **`main`-first**: branch off `origin/main`, commit, open a PR against `main`, then
   cherry-pick onto `bob_prototype`. Never merge `bob_prototype → main`.
