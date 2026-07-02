@@ -32,8 +32,8 @@ and the **GitHub issue** tracking it.
 | DS-02 | High | tools | Out-of-workspace definitions leak as `..`-prefixed "relative" paths | #46 ✅ |
 | DS-03 | High | core | `refresh` during indexing sticks state at a stale `ready` | #47 ✅ |
 | DS-04 | High | core | Drain-timeout cancel orphans the rust-analyzer subprocess | #48 ✅ |
-| DS-05 | High | rag | Doc store adopts an existing collection with zero freshness check | #49 |
-| DS-06 | High | tests | The real `init_doc_store()` is executed by no test | #50 |
+| DS-05 | High | rag | Doc store adopts an existing collection with zero freshness check | #49 ✅ |
+| DS-06 | High | tests | The real `init_doc_store()` is executed by no test | #50 ✅ |
 | DS-07 | Med | core | Failed analyzer startup is swallowed — `indexing` forever | #51 |
 | DS-08 | Med | core | Blocking doc rebuild on the event loop during lifespan startup | #52 |
 | DS-09 | Med | tools | `document_symbols` returns `range.start`, not `selectionRange` | #53 |
@@ -156,6 +156,10 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   meta.get("build_complete")`. No file mtimes, content hashes, file list, glob
   patterns, or `project_root` are recorded or compared. `doc_collection`
   defaults to `"project_docs"` and `chroma_path` is a persistent mount.
+- **Resolved:** 2026-07-02 (PR #69, scope = cross-project only). `rebuild()` stamps the
+  resolved `project_root` into collection metadata; `init_doc_store` adopts only when the
+  stored fingerprint matches the current project, else rebuilds. Build-once persistence is
+  preserved; stale-after-edit remains the documented trade-off (out of scope).
 - **Why it matters:** Repointing `RLM_PROJECT_ROOT` at a different project
   while keeping the default collection/path — the README's documented
   repo-agnostic flow with one shared volume — makes `search_docs` return the
@@ -176,6 +180,10 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   dropping the sentinel check (adopt a partial collection), or forgetting the
   singleton assignment (`search_docs` permanently `not_ready`) all pass CI
   green. Verified by mutation.
+- **Resolved:** 2026-07-02 (PR #69). `init_doc_store` gained an optional
+  `embedding_function` param (forwarded to `DocStore`/`get_collection`) so tests exercise
+  the REAL function offline; `_init_with_fake_ef` and the dead `__wrapped__` ternary are
+  removed. Adopt gate, sentinel fallback, and singleton assignment are now mutation-guarded.
 
 ---
 
