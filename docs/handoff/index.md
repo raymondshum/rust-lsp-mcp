@@ -16,12 +16,19 @@ pointers — detail lives in the plan and `docs/reference/`; these files only or
   (the `adversarial` mode, run in a **fresh Bob session**) applied after QA on every
   phase, and gate-zero over this folder.
 
-## Defect-sweep resolution (next effort)
+## Defect-sweep resolution (done)
 
-- [defect-sweep-resolution-handoff.md](defect-sweep-resolution-handoff.md) — session seed for driving the
-  2026-07-01 defect sweep (issues #45–#63) to completion. Kicked off with
+- [defect-sweep-resolution-handoff.md](defect-sweep-resolution-handoff.md) — session seed that drove the
+  2026-07-01 defect sweep (issues #45–#63, DS-01…DS-28) to **completion** (PRs #65–#85). Kicked off with
   [`/resolve-defect-sweep`](../../.bob/skills/resolve-defect-sweep/SKILL.md); evidence in
-  [docs/security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md).
+  [docs/security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md) (all rows ✅).
+
+## Post-sweep hardening follow-ups (next effort)
+
+- [post-sweep-followups-handoff.md](post-sweep-followups-handoff.md) — session seed for the follow-up work
+  surfaced by the sweep: KI-9 (#87, nav-delegate hang), a production-image smoke test (#88), and the Lows
+  #89–#92. Tracker: GitHub issues **#87–#92** (label `followup-2026-07-02`); living register
+  [docs/impl/known-issues.md](../impl/known-issues.md) (KI-8, KI-9).
 
 ## Bob harness port (the current effort)
 
