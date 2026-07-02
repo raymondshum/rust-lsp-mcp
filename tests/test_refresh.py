@@ -611,3 +611,66 @@ class TestFinding3ConcurrentRefreshSerialized:
             f"init_doc_store overlapped across concurrent refresh() calls "
             f"(max_in_flight={max_in_flight}); finding-3 serialization failed"
         )
+
+
+# ---------------------------------------------------------------------------
+# #91: the doc-store refresh lock must be usable across separate event loops
+# without any lock-swapping/patching -- this test suite's own style (a fresh
+# asyncio.run() per test) is exactly the scenario that trips the loop-binding
+# hazard described on the lock itself.
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshLockCrossEventLoop:
+    """Regression for #91: contending the doc-store refresh lock across two
+    separate ``asyncio.run()`` invocations (i.e. two different event loops)
+    must not raise, and serialization within a single loop must be preserved.
+
+    NOTE: no lock-swapping/patching here on purpose -- that workaround is
+    exactly what #91 says future tests shouldn't need.
+    """
+
+    def test_refresh_lock_usable_across_event_loops(self) -> None:
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        async def _contend(lock: asyncio.Lock) -> None:
+            """Force REAL contention (a holder plus a queued waiter), not just
+            an uncontended acquire.  asyncio's lazy loop-binding (``_get_loop()``
+            in ``Lock.acquire()``) is only reached on the contended path — an
+            uncontended acquire short-circuits before ever calling it — so an
+            honest repro of #91 needs two tasks actually queuing on the lock.
+            """
+
+            async def _holder() -> None:
+                async with lock:
+                    await asyncio.sleep(0.02)
+
+            async def _contender() -> None:
+                await asyncio.sleep(0)  # yield so _holder acquires first
+                async with lock:
+                    pass
+
+            await asyncio.gather(_holder(), _contender())
+
+        async def _contend_and_return_lock() -> asyncio.Lock:
+            lock = refresh_mod._doc_store_refresh_lock
+            await _contend(lock)
+            return lock
+
+        async def _contend_twice_same_loop() -> tuple[asyncio.Lock, asyncio.Lock]:
+            first = await _contend_and_return_lock()
+            second = await _contend_and_return_lock()
+            return first, second
+
+        # Same loop, two contended acquisitions -> same lock object
+        # (serialization within one loop is preserved).
+        first, second = asyncio.run(_contend_twice_same_loop())
+        assert first is second
+
+        # A SEPARATE event loop contending the SAME lock must not blow up
+        # with "... is bound to a different event loop" -- this is the crux
+        # of #91.  Pre-fix, this second asyncio.run() raises RuntimeError
+        # because the module-level lock lazily bound to the FIRST loop
+        # above.  Post-fix, this loop gets its own (different) lock object.
+        third = asyncio.run(_contend_and_return_lock())
+        assert third is not first
