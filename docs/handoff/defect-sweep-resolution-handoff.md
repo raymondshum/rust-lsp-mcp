@@ -22,7 +22,9 @@ docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve
     (cherry-pick `6edd96e`); record PR #68. Surfaced [[KI-9]] (out-of-scope, recorded).
   - Unit 3 — DS-05 (#49) + DS-06 (#50): closed via PR #69 → `main` (cherry-pick `0746f11`);
     record PR #70.
-  - **13 issues remain open** (#51–#63; #63 stays open until the other roll-up lows land).
+  - Unit 4 — DS-07 (#51) + DS-08 (#52) + DS-14 (#58): closed via PR #71 → `main`
+    (cherry-pick `8adac0e`); record PR #72. Recorded [[KI-9]]-adjacent hardening.
+  - **10 issues remain open** (#53–#63; #63 stays open until the other roll-up lows land).
 - Nothing is deferred by decision yet — sequencing below is a recommendation, not a commitment.
 
 ## What's left (grounded)
@@ -38,14 +40,14 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 | DS-04 | #48 | High | `analyzer.py:440` | ✅ Done — PR #67 (same commit). `_run` finally force-stops the subprocess on every reachable cancel window. |
 | DS-05 | #49 | High | `doc_store.py:274` | ✅ Done — PR #69 → `main`, cherry-picked to `bob_prototype` (`0746f11`). `project_root` fingerprint in collection metadata; cross-project adoption refused. Build-once kept; stale-after-edit out of scope. |
 | DS-06 | #50 | High | `tests/test_doc_store.py:317` | ✅ Done — PR #69 (same commit). Real `init_doc_store()` now tested offline via injected EF; dead `__wrapped__` reimplementation removed. |
-| DS-07 | #51 | Med | `analyzer.py:262` | Open. Failed startup swallowed → `indexing` forever; needs an error surface. |
-| DS-08 | #52 | Med | `core.py:56` (+architecture.md:195, tools.md) | Open. Blocking rebuild on the loop at startup; also a doc-mismatch. |
+| DS-07 | #51 | Med | `analyzer.py:262` | ✅ Done — PR #71 → `main`, cherry-picked to `bob_prototype` (`8adac0e`). `STATE_ERROR` + `require_ready` error envelope; refresh recovers. |
+| DS-08 | #52 | Med | `core.py:56` | ✅ Done — PR #71 (same commit). Doc build offloaded to a background thread; loop serves immediately. |
 | DS-09 | #53 | Med | `core.py:252` | Open. `document_symbols` uses `range.start`, not `selectionRange`. |
 | DS-10 | #54 | Med | `doc_chunking.py:347` | Open. `---` after a code fence → setext misparse (reproduced). |
 | DS-11 | #55 | Med | `doc_chunking.py:293` | Open. Leading `---` swallowed as frontmatter (reproduced). |
 | DS-12 | #56 | Med | `doc_store.py:81` / `search_docs.py:68` | Open. `refresh`/`search` race; no lock. (Low #63 DS-22 is the tool-side view.) |
 | DS-13 | #57 | Med | `settings.py:63` (+configuration.md, env.sample, Dockerfile) | Open. Dead `RLM_CARGO_*` knobs — wire through or remove + doc. `Dockerfile` part is `bob_prototype`-only. |
-| DS-14 | #58 | Med | `docs/guide/tools.md:315` | Open. `status` can't report doc-index readiness; recovery path loops. |
+| DS-14 | #58 | Med | `tools/status.py` | ✅ Done — PR #71 (same commit). `status.doc_index_state`; search_docs errors on permanent failure; refresh re-inits an absent/errored store. |
 | DS-15 | #59 | Med | `scripts/setup.sh:34` | Open. Disables host-global git signing; guard on a container marker. |
 | DS-16 | #60 | Med | `Dockerfile:80` | Open. `status` staleness null on rootful Linux (no `safe.directory`). `bob_prototype`-only if Dockerfile diverges. |
 | DS-17 | #61 | Med | `tests/test_phase34_adversarial.py:228` | Open. Malformed-response branch never runs in CI. Fix = drop `integration` marker on the two `_MalformedLSP` tests (they need no live analyzer). |
