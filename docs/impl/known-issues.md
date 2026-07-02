@@ -43,9 +43,9 @@ Check this list at these lifecycle checkpoints (see
   hangs instead of getting a prompt `not_ready`/`error`.
 - **Status:** `open` — **out of the 2026-07-01 defect-sweep scope** (not among DS-01…DS-28).
   Pre-existing; surfaced by the adversarial pass on the DS-03/04/21 lifecycle fix
-  (2026-07-02), **not introduced by it**. Recorded so it isn't rediscovered; decide
-  separately whether to fix (e.g. wrap the delegate await with a timeout, or fail pending
-  requests on teardown).
+  (2026-07-02), **not introduced by it**. Tracked as **GitHub #87** (label
+  `followup-2026-07-02`); fix direction: wrap the delegate await with a timeout, or fail
+  pending requests on teardown.
 
 ---
 
