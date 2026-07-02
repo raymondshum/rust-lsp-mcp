@@ -453,6 +453,11 @@ class AnalyzerManager:
             # of returning a result to a caller that already cancelled us.
             cur = asyncio.current_task()
             if cur is not None and cur.cancelling():
+                # request_task is done; retrieve any stored exception so GC
+                # never warns about it — we are abandoning the result either
+                # way (mirrors _drain_task's drain idiom).
+                if not request_task.cancelled():
+                    request_task.exception()
                 raise asyncio.CancelledError
             return request_task.result()
         request_task.cancel()
