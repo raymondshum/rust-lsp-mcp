@@ -133,6 +133,12 @@ file you passed in):
 `container` is almost always `null` for document symbols — rust-analyzer rarely
 populates the enclosing-scope field in this response.
 
+`line`/`character` point at the symbol's **name**, not the start of the full
+declaration — so a symbol preceded by doc comments or `#[attributes]` still
+resolves to the name itself. This makes the position directly usable as input
+to `hover`, `goto_definition`, or `find_references`. (Falls back to the start
+of the declaration only if a provider omits the name-position data.)
+
 **Example response**
 
 ```json
