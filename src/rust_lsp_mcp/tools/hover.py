@@ -6,7 +6,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
-from rust_lsp_mcp.core import get_manager, mcp, require_ready
+from rust_lsp_mcp.core import get_manager, mcp, require_ready, validate_workspace_file
 from rust_lsp_mcp.envelope import error, not_found, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
@@ -85,7 +85,10 @@ async def hover(file: str, line: int, character: int) -> dict[str, Any]:
       ``analyzer_status`` reports ``"ready"``.
 
     - ``error`` — invalid input (line/character < 1) or an unexpected
-      exception from the LSP layer; includes a message.
+      exception from the LSP layer; includes a message.  ``file`` must be a
+      workspace-relative path that does not resolve outside the workspace
+      root (absolute paths and ``..``-escaping paths are rejected
+      immediately, without calling the analyzer).
 
     Positions are 1-indexed (same convention as ``find_symbol`` output).
     Nothing to hover → ``not_found``; rust-analyzer returns the info as
@@ -99,14 +102,21 @@ async def hover(file: str, line: int, character: int) -> dict[str, Any]:
     if line < 1 or character < 1:
         return error(f"line and character must be >= 1 (got line={line}, character={character})")
 
-    # 2. Readiness gate.
+    # 2. Validate the file path (reject absolute/escaping paths before the
+    # analyzer ever sees them).  The normalized form is forwarded so a
+    # symlink+``..`` combination cannot resolve outside the root at the OS level.
+    file, guard = validate_workspace_file(file)
+    if guard is not None:
+        return guard
+
+    # 3. Readiness gate.
     if (guard := require_ready()) is not None:
         return guard
 
     manager = get_manager()
     assert manager is not None  # guaranteed by require_ready()
 
-    # 3. Convert to 0-indexed LSP position and call the delegate.
+    # 4. Convert to 0-indexed LSP position and call the delegate.
     pos = external_to_lsp(line, character)
     try:
         hov = await manager.request_hover(file, pos.line, pos.character)
@@ -114,14 +124,14 @@ async def hover(file: str, line: int, character: int) -> dict[str, Any]:
         _log.exception("hover: LSP error at %s:%d:%d", file, line, character)
         return error(f"LSP error: {exc}")
 
-    # 4. Handle None (no hover info).
+    # 5. Handle None (no hover info).
     if hov is None:
         return not_found(f"No hover information at {file}:{line}:{character}.")
 
-    # 5. Normalize contents to a string.
+    # 6. Normalize contents to a string.
     contents_str = _contents_to_str(hov["contents"])
 
-    # 6. Empty/whitespace contents → not_found.
+    # 7. Empty/whitespace contents → not_found.
     if not contents_str or not contents_str.strip():
         return not_found(f"No hover information at {file}:{line}:{character}.")
 

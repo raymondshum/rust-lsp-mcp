@@ -10,6 +10,11 @@ Test coverage:
     - Existing directory → exists=True, size_bytes=None (not a regular file).
     - ".." escape attempt → error envelope.
     - Absolute path outside the workspace → error envelope.
+    - Absolute path INSIDE the workspace → error envelope (containment rule is
+      the same as the position tools': only workspace-relative paths are valid).
+    - Empty string / NUL byte → error envelope (same rule).
+    - "src/../src/main.rs" → accepted; probed in normalized form so the
+      reported absolute_path has the ".." collapsed (symlink+".." hardening).
     - Unconfigured workspace root → error envelope.
 """
 
@@ -123,6 +128,51 @@ class TestEscapeRejected:
         # An absolute path pointing outside the workspace must be rejected.
         result = _call(str(tmp_path), "/etc/passwd")
         assert result["status"] == STATUS_ERROR
+
+    def test_absolute_inside_workspace_is_error(self, tmp_path: pathlib.Path) -> None:
+        # Containment rule alignment: the position tools reject ALL absolute
+        # paths, so this tool must too — even one pointing inside the root.
+        # Otherwise validate_file_path would say "ok" for an input that
+        # hover/goto_definition would reject with "error".
+        target = tmp_path / "main.rs"
+        target.write_bytes(b"fn main() {}\n")
+        result = _call(str(tmp_path), str(target))
+        assert result["status"] == STATUS_ERROR
+
+    def test_empty_file_is_error(self, tmp_path: pathlib.Path) -> None:
+        # "" is not a valid workspace-relative file path (same rule as the
+        # position tools) — previously it probed the root directory itself.
+        result = _call(str(tmp_path), "")
+        assert result["status"] == STATUS_ERROR
+
+    def test_nul_byte_is_error(self, tmp_path: pathlib.Path) -> None:
+        result = _call(str(tmp_path), "src/\x00/main.rs")
+        assert result["status"] == STATUS_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Normalized probing (symlink+".." hardening)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizedProbing:
+    def test_dotdot_within_root_is_probed_normalized(self, tmp_path: pathlib.Path) -> None:
+        """ "src/../src/main.rs" is accepted and probed with the ".." collapsed.
+
+        Probing the normalized form means the OS never sees the ".." segment,
+        so a symlink in the raw path's prefix cannot launder the probe outside
+        the workspace (POSIX resolves symlinks before "..").
+        """
+        src = tmp_path / "src"
+        src.mkdir()
+        target = src / "main.rs"
+        target.write_bytes(b"fn main() {}\n")
+
+        result = _call(str(tmp_path), "src/../src/main.rs")
+
+        assert result["status"] == STATUS_OK
+        assert result["exists"] is True
+        assert result["absolute_path"] == str(target)  # ".." collapsed
 
 
 # ---------------------------------------------------------------------------

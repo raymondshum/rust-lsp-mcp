@@ -107,7 +107,7 @@ List every symbol defined in one file, in declaration order.
 
 | Name | Type | Required | Meaning |
 |---|---|---|---|
-| `file` | string | yes | Path relative to the project root, e.g. `"src/main.rs"`. |
+| `file` | string | yes | Path relative to the project root, e.g. `"src/main.rs"`. Checked lexically before the analyzer is called — absolute paths and `..`-escaping paths are rejected. The check is purely textual (it does not resolve symlinks), so a symlink *inside* the workspace that points outside it is not caught. |
 
 **Returns**
 
@@ -115,7 +115,7 @@ List every symbol defined in one file, in declaration order.
 |---|---|
 | `ok` | `symbols`: list of symbol objects (see below). The list may be empty — a file with only comments or macros is a valid result with zero symbols. |
 | `not_ready` | `message` — the analyzer is still indexing. |
-| `error` | `message` — the language server raised an exception for this request (for example, the file path does not exist in the project or cannot be read). Note: a valid file with no symbols returns `ok` with an empty list, not `error`. |
+| `error` | `message` — the language server raised an exception for this request (for example, the file path does not exist in the project or cannot be read), or `file` is an absolute path or escapes the project root via `..` (rejected before the analyzer is called). Note: a valid file with no symbols returns `ok` with an empty list, not `error`. |
 
 Each item in `symbols` (there is no `file` field — all entries belong to the
 file you passed in):
@@ -156,7 +156,7 @@ Find where the item at a given position is defined.
 
 | Name | Type | Required | Meaning |
 |---|---|---|---|
-| `file` | string | yes | Path relative to the project root. |
+| `file` | string | yes | Path relative to the project root. Checked lexically before the analyzer is called — absolute paths and `..`-escaping paths are rejected. The check is purely textual (it does not resolve symlinks), so a symlink *inside* the workspace that points outside it is not caught. |
 | `line` | integer | yes | 1-based line number of the cursor position. |
 | `character` | integer | yes | 1-based character offset of the cursor position. |
 
@@ -165,9 +165,9 @@ Find where the item at a given position is defined.
 | Status | Fields |
 |---|---|
 | `ok` | `definitions`: list of location objects (see below). More than one is possible, e.g. a trait method that has several implementations. |
-| `not_found` | `message` — no definition was found at that position (the position holds no symbol — whitespace, comment, or unknown token — or every returned location could not be mapped back to a project file). |
+| `not_found` | `message` — no definition was found at that position (the position holds no symbol — whitespace, comment, or unknown token — or every returned location fell outside the project root, e.g. a standard-library or dependency definition, and was skipped). |
 | `not_ready` | `message` — the analyzer is still indexing. |
-| `error` | `message` — `line` or `character` is less than 1, or an unexpected LSP failure. |
+| `error` | `message` — `line` or `character` is less than 1, `file` is an absolute path or escapes the project root via `..` (rejected before the analyzer is called), or an unexpected LSP failure. |
 
 Each item in `definitions`:
 
@@ -178,6 +178,12 @@ Each item in `definitions`:
   "character": 1
 }
 ```
+
+Every entry in `definitions` is guaranteed to be inside the project root.
+Definitions that resolve outside it (e.g. into the Rust standard library or a
+crates.io dependency) are silently skipped rather than returned with a
+`..`-prefixed path; if every candidate is skipped the tool returns
+`not_found`.
 
 **Example response**
 
@@ -200,7 +206,7 @@ Find all uses of the item at a given position.
 
 | Name | Type | Default | Meaning |
 |---|---|---|---|
-| `file` | string | required | Path relative to the project root. |
+| `file` | string | required | Path relative to the project root. Checked lexically before the analyzer is called — absolute paths and `..`-escaping paths are rejected. The check is purely textual (it does not resolve symlinks), so a symlink *inside* the workspace that points outside it is not caught. |
 | `line` | integer | required | 1-based line number. |
 | `character` | integer | required | 1-based character offset. |
 | `include_declaration` | boolean | `false` | When `true`, also include the definition site in the results (merged and deduplicated). |
@@ -209,10 +215,10 @@ Find all uses of the item at a given position.
 
 | Status | Fields |
 |---|---|
-| `ok` | `references`: list of location objects. The list may be empty — see note below. |
+| `ok` | `references`: list of location objects. The list may be empty — see note below. References that resolve outside the project root (e.g. into the standard library) are silently skipped. |
 | `not_found` | `message` — no symbol at that position (whitespace, comment, or unknown token). |
 | `not_ready` | `message` — the analyzer is still indexing. |
-| `error` | `message` — `line` or `character` is less than 1, or an unexpected failure. |
+| `error` | `message` — `line` or `character` is less than 1, `file` is an absolute path or escapes the project root via `..` (rejected before the analyzer is called), or an unexpected failure. |
 
 Each item in `references`:
 
@@ -263,7 +269,7 @@ Show the type signature and documentation for the item at a given position.
 
 | Name | Type | Required | Meaning |
 |---|---|---|---|
-| `file` | string | yes | Path relative to the project root. |
+| `file` | string | yes | Path relative to the project root. Checked lexically before the analyzer is called — absolute paths and `..`-escaping paths are rejected. The check is purely textual (it does not resolve symlinks), so a symlink *inside* the workspace that points outside it is not caught. |
 | `line` | integer | yes | 1-based line number. |
 | `character` | integer | yes | 1-based character offset. |
 
@@ -274,7 +280,7 @@ Show the type signature and documentation for the item at a given position.
 | `ok` | `contents`: a Markdown string containing the type signature and any rustdoc comments, exactly as rust-analyzer produces them. |
 | `not_found` | `message` — nothing to show at that position (whitespace, comment, or unsupported construct). |
 | `not_ready` | `message` — the analyzer is still indexing. |
-| `error` | `message` — `line` or `character` is less than 1, or an unexpected LSP failure. |
+| `error` | `message` — `line` or `character` is less than 1, `file` is an absolute path or escapes the project root via `..` (rejected before the analyzer is called), or an unexpected LSP failure. |
 
 **Example response**
 
