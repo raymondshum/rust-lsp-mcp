@@ -72,5 +72,6 @@ minversion = "8.0"
 testpaths = ["tests"]
 markers = [
     "integration: live rust-analyzer + real ripgrep fixture (slow; local QA gate only).",
+    "image: builds + smoke-tests the production Docker image (opt-in: RLM_IMAGE_SMOKE=1 + podman/docker; not part of the fast or integration tiers).",
 ]
 addopts = "-ra"
