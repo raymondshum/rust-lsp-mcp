@@ -172,10 +172,14 @@ def estimate_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 # Regex for ATX headers: one-to-six ``#`` chars followed by a space/tab and content.
-_HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)")
+# Per CommonMark, up to 3 leading spaces are allowed (4+ leading spaces is
+# indented code, which is NOT a header).
+_HEADER_RE = re.compile(r"^ {0,3}(#{1,6})\s+(.*)")
 
 # Regex for fenced-code block delimiters (``` or ~~~, optionally followed by info string).
-_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+# Per CommonMark, up to 3 leading spaces are allowed (4+ leading spaces is
+# indented code, which is NOT a fence delimiter).
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 # Regex for setext underline: a line of one or more ``=`` chars (h1) or ``-`` chars (h2),
 # optionally preceded/followed by spaces, with nothing else.
@@ -225,6 +229,69 @@ def _could_be_setext_preceding(line: str) -> bool:
     return not re.match(r"^[-*_]{3,}\s*$", stripped)
 
 
+def _detect_frontmatter_span(lines: list[str]) -> tuple[int, int] | None:
+    """Return the inclusive ``(start, end)`` line-index range of a leading
+    YAML frontmatter block in *lines*, or ``None`` if there is none.
+
+    A leading ``---`` block is only treated as frontmatter when ALL of the
+    following hold:
+
+    1. The first non-blank line (skipping leading blank lines) is exactly
+       ``---`` (after stripping surrounding whitespace).
+    2. The line immediately after that opening ``---`` is NOT blank — a
+       ``---`` followed by a blank line is a thematic break, not frontmatter.
+    3. There is a later line (after the opening) that is exactly ``---`` or
+       ``...`` (the closing delimiter, after stripping surrounding whitespace),
+       and NO blank line appears before that closing delimiter — real leading
+       YAML frontmatter is a compact contiguous block; a blank line inside the
+       ``---…---`` region means it is prose plus a later thematic break, not
+       frontmatter.
+
+    Delimiter comparisons strip surrounding whitespace so that trailing-space
+    variants (Jekyll accepts ``^---\\s*$`` / ``^\\.\\.\\.\\s*$``) are honored.
+
+    If any condition fails, there is no frontmatter and ``None`` is returned;
+    the leading ``---`` (if any) is then ordinary content, subject to normal
+    thematic-break / setext / header handling.
+
+    Args:
+        lines: The document split into lines via ``str.splitlines(keepends=True)``.
+
+    Returns:
+        ``(start_index, end_index)`` inclusive, or ``None``.
+    """
+    start: int | None = None
+    for i, line in enumerate(lines):
+        stripped = line.rstrip("\n").rstrip("\r")
+        if stripped.strip():
+            start = i
+            break
+    if start is None:
+        return None  # Document is blank/whitespace-only.
+
+    opening = lines[start].rstrip("\n").rstrip("\r").strip()
+    if opening != "---":
+        return None  # Condition 1 failed.
+
+    if start + 1 >= len(lines):
+        return None  # Nothing follows the opening ``---`` at all.
+
+    next_line = lines[start + 1].rstrip("\n").rstrip("\r")
+    if not next_line.strip():
+        return None  # Condition 2 failed: opening ``---`` is a thematic break.
+
+    for j in range(start + 1, len(lines)):
+        candidate = lines[j].rstrip("\n").rstrip("\r").strip()
+        if not candidate:
+            # Condition 3 failed: a blank line before the closer means this is
+            # prose plus a later thematic break, not a compact frontmatter block.
+            return None
+        if candidate in ("---", "..."):
+            return (start, j)  # Condition 3 satisfied.
+
+    return None  # Condition 3 failed: no closing delimiter anywhere.
+
+
 def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
     """Split *text* into (level, header_title, body) tuples.
 
@@ -267,11 +334,12 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
     fence_len: int = 0  # the length of the opening fence sequence
 
     # YAML frontmatter: a leading ``---`` block at the very start of the document.
-    # We track whether we are inside one and suppress setext detection inside it.
-    # Detection: if the very first non-empty line is exactly ``---``, we're in frontmatter.
-    # Frontmatter ends at the next ``---`` or ``...`` line.
-    in_frontmatter: bool = False
-    frontmatter_possible: bool = True  # can still open frontmatter (no non-empty line seen)
+    # Computed up front via a pre-scan (see ``_detect_frontmatter_span``) so that
+    # only a genuinely valid frontmatter block (non-blank content after the
+    # opening ``---``, and a closing ``---``/``...`` later in the document) is
+    # ever treated as opaque.  An invalid leading ``---`` (thematic break or
+    # unterminated) falls through to ordinary body/header handling.
+    frontmatter_span = _detect_frontmatter_span(lines)
 
     # For setext detection we need to look at the previous body line.
     # We keep track of the most recently emitted body line (stripped) so we can
@@ -283,24 +351,16 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
         body = "".join(current_body_lines).strip("\n")
         sections.append((current_level, current_title, body))
 
-    for line in lines:
+    for idx, line in enumerate(lines):
         stripped = line.rstrip("\n").rstrip("\r")
 
-        # YAML frontmatter: detect a leading ``---`` block and treat it as opaque body.
-        # A frontmatter block begins when the very first non-empty line is exactly ``---``.
-        if frontmatter_possible and stripped:
-            frontmatter_possible = False  # Only the first non-empty line can open frontmatter.
-            if stripped == "---":
-                in_frontmatter = True
-                current_body_lines.append(line)
-                # Don't update prev_body_stripped: frontmatter cannot be a setext title.
-                continue
-        if in_frontmatter:
-            # Inside YAML frontmatter: pass through verbatim.
-            # Close on ``---`` or ``...`` (YAML document end marker).
+        # YAML frontmatter: lines within the pre-scanned span are opaque body,
+        # never subject to setext/ATX detection and never eligible to seed
+        # ``prev_body_stripped`` (frontmatter content cannot be a setext title).
+        if frontmatter_span is not None and frontmatter_span[0] <= idx <= frontmatter_span[1]:
             current_body_lines.append(line)
-            if stripped in ("---", "..."):
-                in_frontmatter = False
+            prev_body_stripped = ""
+            prev_body_raw = ""
             continue
 
         # Fence tracking: only open a new fence when we are not already in one.
@@ -317,8 +377,12 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
                     fence_len = 3
                 in_fence = True
                 current_body_lines.append(line)
-                prev_body_stripped = stripped
-                prev_body_raw = line
+                # DS-10: a fence delimiter line (open or close) must NEVER be
+                # eligible as a setext-preceding text line — otherwise a
+                # ``---``/``===`` immediately following (no blank line) would
+                # be misparsed as a setext underline for the fence line itself.
+                prev_body_stripped = ""
+                prev_body_raw = ""
             else:
                 # Potential closing fence: must use the same delimiter character
                 # AND have length >= the opening fence length (CommonMark §4.5).
@@ -328,8 +392,9 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
                     fence_char = ""
                     fence_len = 0
                 current_body_lines.append(line)
-                prev_body_stripped = stripped
-                prev_body_raw = line
+                # DS-10: same rationale as the opening-fence branch above.
+                prev_body_stripped = ""
+                prev_body_raw = ""
             continue
 
         # Inside a fence: never split on headers.
