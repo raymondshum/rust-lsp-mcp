@@ -6,7 +6,11 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
-from rust_lsp_mcp.analyzer import TORN_DOWN_RETRY_MESSAGE, AnalyzerTornDownError
+from rust_lsp_mcp.analyzer import (
+    TORN_DOWN_RETRY_MESSAGE,
+    AnalyzerNotReadyError,
+    AnalyzerTornDownError,
+)
 from rust_lsp_mcp.core import (
     get_manager,
     location_to_external,
@@ -126,6 +130,13 @@ async def find_references(
     # Step 5: request references from the live analyzer.
     try:
         refs = await mgr.request_references(file, pos.line, pos.character)
+    except AnalyzerNotReadyError:
+        # The analyzer stopped being ready between our require_ready() check
+        # and the delegate call (e.g. a concurrent refresh); re-consult
+        # require_ready() so a permanently-errored analyzer still maps to
+        # error, not a misleading not_ready (#98).
+        guard = require_ready()
+        return guard if guard is not None else not_ready()
     except AnalyzerTornDownError:
         return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
@@ -157,6 +168,13 @@ async def find_references(
     if include_declaration:
         try:
             defs = await mgr.request_definition(file, pos.line, pos.character)
+        except AnalyzerNotReadyError:
+            # The analyzer stopped being ready between our require_ready()
+            # check and the delegate call (e.g. a concurrent refresh);
+            # re-consult require_ready() so a permanently-errored analyzer
+            # still maps to error, not a misleading not_ready (#98).
+            guard = require_ready()
+            return guard if guard is not None else not_ready()
         except AnalyzerTornDownError:
             return not_ready(TORN_DOWN_RETRY_MESSAGE)
         except Exception as exc:
