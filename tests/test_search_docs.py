@@ -29,6 +29,7 @@ import contextlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from rust_lsp_mcp.doc_store import DocStoreNotReady
 from rust_lsp_mcp.envelope import STATUS_ERROR, STATUS_NOT_FOUND, STATUS_NOT_READY, STATUS_OK
 
 # ---------------------------------------------------------------------------
@@ -370,3 +371,131 @@ class TestLimitHandling:
         store = _make_ready_store(search_return=[_FAKE_HIT])
         _run_search_docs(query="foo", limit=100, store=store)
         store.search.assert_called_once_with("foo", n_results=100)
+
+
+# ---------------------------------------------------------------------------
+# DS-12: DocStoreNotReady from store.search() maps to not_ready, not error.
+# ---------------------------------------------------------------------------
+
+
+class TestDocStoreNotReadySignal:
+    """The fast-path is_ready check can pass just before a concurrent rebuild
+    flips state — store.search() then raises DocStoreNotReady.  This must map
+    to not_ready (transient), distinctly from a genuine exception (-> error).
+    """
+
+    def test_doc_store_not_ready_maps_to_not_ready(self) -> None:
+        store = _make_ready_store(search_side_effect=DocStoreNotReady())
+        result = _run_search_docs(store=store)
+        assert result["status"] == STATUS_NOT_READY
+
+    def test_doc_store_not_ready_has_message(self) -> None:
+        store = _make_ready_store(search_side_effect=DocStoreNotReady())
+        result = _run_search_docs(store=store)
+        assert "message" in result
+        assert result["message"]
+
+    def test_doc_store_not_ready_is_not_error(self) -> None:
+        """DocStoreNotReady must not be swallowed by the generic Exception
+        handler and surfaced as error — it has its own dedicated branch.
+        """
+        store = _make_ready_store(search_side_effect=DocStoreNotReady())
+        result = _run_search_docs(store=store)
+        assert result["status"] != STATUS_ERROR
+
+    def test_genuine_exception_still_maps_to_error(self) -> None:
+        """A real exception (not DocStoreNotReady) from search() still maps
+        to error — confirms the new except branch didn't swallow the
+        pre-existing generic exception handling.
+        """
+        store = _make_ready_store(search_side_effect=RuntimeError("db boom"))
+        result = _run_search_docs(store=store)
+        assert result["status"] == STATUS_ERROR
+        assert "db boom" in result["message"]
+
+    def test_not_ready_rechecks_error_state(self) -> None:
+        """Nit 2: if a concurrent rebuild transitions the store to ERROR
+        between the fast-path state check and search()'s snapshot, the
+        DocStoreNotReady handler re-reads state and returns error (permanent),
+        not not_ready — so a now-errored store is not briefly mislabelled.
+        """
+        store = MagicMock()
+        store.is_ready = True
+        store.state = "ready"  # passes the fast-path DOC_STATE_ERROR check
+        store.error_message = "RuntimeError: embedding model died mid-rebuild"
+
+        def _search_that_errors_then_signals(*_args: Any, **_kwargs: Any) -> Any:
+            # Simulate the rebuild flipping the store to ERROR before this
+            # call's snapshot decides the store is not queryable.
+            store.state = "error"
+            raise DocStoreNotReady()
+
+        store.search.side_effect = _search_that_errors_then_signals
+
+        result = _run_search_docs(store=store)
+        assert result["status"] == STATUS_ERROR
+        assert "embedding model died mid-rebuild" in result["message"]
+        assert "refresh" in result["message"].lower()
+
+    def test_not_ready_without_error_state_stays_not_ready(self) -> None:
+        """The re-check only escalates to error when state is genuinely ERROR;
+        a plain transient DocStoreNotReady (state still non-error) stays
+        not_ready.
+        """
+        store = _make_ready_store(search_side_effect=DocStoreNotReady())
+        store.state = "building"
+        result = _run_search_docs(store=store)
+        assert result["status"] == STATUS_NOT_READY
+
+
+# ---------------------------------------------------------------------------
+# DS-22: empty/whitespace query is rejected before any readiness check.
+# ---------------------------------------------------------------------------
+
+
+class TestDS22EmptyQueryValidation:
+    """Empty/whitespace queries must return error immediately, never ok+top-k."""
+
+    def test_empty_string_query_returns_error(self) -> None:
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        result = _run_search_docs(query="", store=store)
+        assert result["status"] == STATUS_ERROR
+
+    def test_whitespace_space_query_returns_error(self) -> None:
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        result = _run_search_docs(query="   ", store=store)
+        assert result["status"] == STATUS_ERROR
+
+    def test_whitespace_newline_tab_query_returns_error(self) -> None:
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        result = _run_search_docs(query="\n\t", store=store)
+        assert result["status"] == STATUS_ERROR
+
+    def test_empty_query_search_not_called(self) -> None:
+        """search() must not be invoked at all for an empty query."""
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        _run_search_docs(query="", store=store)
+        store.search.assert_not_called()
+
+    def test_whitespace_query_search_not_called(self) -> None:
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        _run_search_docs(query="\n\t", store=store)
+        store.search.assert_not_called()
+
+    def test_empty_query_error_has_message(self) -> None:
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        result = _run_search_docs(query="", store=store)
+        assert "message" in result
+        assert result["message"]
+
+    def test_empty_query_rejected_even_when_store_none(self) -> None:
+        """Validation happens FIRST, before the store-None readiness gate."""
+        result = _run_search_docs(query="", store=None, doc_store_state_return=("building", None))
+        assert result["status"] == STATUS_ERROR
+
+    def test_valid_query_still_works(self) -> None:
+        """A non-empty query is unaffected by the DS-22 validation gate."""
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        result = _run_search_docs(query="install cargo", store=store)
+        assert result["status"] == STATUS_OK
+        store.search.assert_called_once_with("install cargo", n_results=5)

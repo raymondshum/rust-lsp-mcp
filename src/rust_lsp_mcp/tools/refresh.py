@@ -3,6 +3,7 @@
 Registered with the FastMCP app at import time via ``@mcp.tool()``.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -14,6 +15,29 @@ from rust_lsp_mcp.envelope import error, ok
 from rust_lsp_mcp.settings import get_settings
 
 _log = logging.getLogger(__name__)
+
+# finding-3: serializes the doc-store re-init/rebuild block below across
+# concurrent refresh() calls.  Without this, two concurrent refresh() calls
+# hitting an absent/errored store both take the re-init branch and construct
+# two DocStore instances against the same on-disk collection (DocStore's
+# _build_lock is per-instance, so two separate instances don't coordinate at
+# all) — worst case a spurious transient error.  This is an asyncio.Lock (not
+# threading.Lock) because it only needs to serialize coroutines on the event
+# loop, one at a time, before each one offloads its own doc-store work to a
+# worker thread via run_sync.  Scoped to ONLY the doc-store block, not
+# mgr.restart() — the analyzer side is already serialized by its own
+# lifecycle lock.
+#
+# Loop-binding hazard: a module-level asyncio.Lock binds to the event loop
+# that first CONTENDS it (Python's lazy _get_loop()), not the one that
+# constructs it.  This is safe in production because the MCP server runs a
+# single persistent event loop for its entire lifetime, so every refresh()
+# contends the same loop.  But a test that contends this lock across separate
+# asyncio.run() invocations (each a fresh, then-closed loop) would trip
+# "bound to a different event loop" on the second run — such tests MUST patch
+# in a fresh asyncio.Lock() per test (as the finding-3 tests in
+# tests/test_refresh.py do).
+_doc_store_refresh_lock = asyncio.Lock()
 
 
 @mcp.tool()
@@ -57,6 +81,14 @@ async def refresh() -> dict[str, Any]:
           ``state = "error"`` on failure (not left in a stale ``"ready"``), so
           ``search_docs`` will correctly return ``error`` (not a misleading
           ``ok``) afterward — the invariant holds.
+        - **Doc-store re-init serialization (finding-3)**: the doc-store
+          recovery block (the ``get_doc_store()`` read through the
+          ``init_doc_store``/``rebuild`` call) is serialized behind a
+          module-level ``asyncio.Lock`` so two concurrent ``refresh`` calls on
+          an absent/errored store cannot both construct a fresh ``DocStore``
+          against the same on-disk collection.  Only that block is locked —
+          ``mgr.restart()`` above is already serialized by the analyzer's own
+          lifecycle lock.
 
     Returns:
         ``ok`` envelope with ``state="indexing"`` and a polling hint message,
@@ -85,19 +117,23 @@ async def refresh() -> dict[str, Any]:
     # Either way this is synchronous/blocking work offloaded to a worker
     # thread so we don't block the event loop.
     #
-    # DS-12 (DEFERRED — not fixed here): concurrent refresh() calls on an
-    # absent/errored store both take the re-init path and build two DocStore
-    # instances against the same collection.  The worst case is a spurious
-    # transient error (never a misleading ``ok``), so this is left unserialized
-    # for now; proper doc-store locking is scheduled under DS-12 (the
-    # refresh/search race work).
-    store = get_doc_store()
+    # finding-3: serialized behind _doc_store_refresh_lock so two concurrent
+    # refresh() calls on an absent/errored store cannot both take the re-init
+    # path and construct two DocStore instances against the same on-disk
+    # collection — see the lock's module-level docstring.  (DS-12's
+    # search/rebuild race itself is fixed inside DocStore via _read_lock; this
+    # lock only serializes refresh()'s OWN doc-store block.)  ``get_doc_store``
+    # is read INSIDE the lock too, so a refresh() that waited behind another
+    # one observes the just-re-initialised singleton rather than a stale
+    # absent/errored snapshot taken before the wait.
     try:
-        if store is None or getattr(store, "state", None) == DOC_STATE_ERROR:
-            _log.info("refresh: doc store absent or errored — re-initialising")
-            await run_sync(lambda: init_doc_store(get_settings()))
-        else:
-            await run_sync(store.rebuild)
+        async with _doc_store_refresh_lock:
+            store = get_doc_store()
+            if store is None or getattr(store, "state", None) == DOC_STATE_ERROR:
+                _log.info("refresh: doc store absent or errored — re-initialising")
+                await run_sync(lambda: init_doc_store(get_settings()))
+            else:
+                await run_sync(store.rebuild)
     except Exception as exc:
         # DocStore.rebuild() sets state="error" on failure, so search_docs
         # will correctly surface the failure after this — the invariant holds.
