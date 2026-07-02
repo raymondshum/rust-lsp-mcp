@@ -1,8 +1,8 @@
 # Handoff — resolve the 2026-07-01 defect sweep to completion
 
 Seed for a fresh session that drives the defect-sweep findings to done. Produced by the
-[session-handoff skill](../../.bob/skills/session-handoff/SKILL.md). **Read this first**, then the anchor
-docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve-defect-sweep/SKILL.md).
+[session-handoff skill](../../.claude/skills/session-handoff/SKILL.md). **Read this first**, then the anchor
+docs below. Kickoff command: [`/resolve-defect-sweep`](../../.claude/skills/resolve-defect-sweep/SKILL.md).
 
 - **Anchor (evidence):** [docs/security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md)
   — 28 findings DS-01…DS-28, each with Where / What / Why / verifier reasoning.
@@ -116,9 +116,9 @@ Full suite: `uv run --frozen pytest`. Run one issue's tests during dev with `-k`
 | Adversarial pass contract | `docs/handoff/adversarial-review.md` |
 | Research policy (Context7-first) | `docs/conventions/research-policy.md` |
 | Delivery lifecycle | `docs/conventions/lifecycle.md` |
-| Kickoff command | `.bob/skills/resolve-defect-sweep/SKILL.md` |
+| Kickoff command | `.claude/skills/resolve-defect-sweep/SKILL.md` |
 | Config to keep in lockstep | `pyproject.toml`, `env.sample`, `.github/workflows/ci.yml` |
-| Bob orchestration alt. | `docs/handoff/roles.md`, `.bob/custom_modes.yaml` |
+| Bob orchestration alt. | `docs/handoff/roles.md`, `.bob/custom_modes.yaml` (`bob_prototype` only) |
 
 ## Gotchas / things NOT to retry
 

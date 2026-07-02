@@ -1,7 +1,7 @@
 # Handoff — post-defect-sweep hardening follow-ups
 
 Seed for a fresh session that drives the follow-up work surfaced while resolving the 2026-07-01 defect
-sweep. Produced by the [session-handoff skill](../../.bob/skills/session-handoff/SKILL.md). **Read this
+sweep. Produced by the [session-handoff skill](../../.claude/skills/session-handoff/SKILL.md). **Read this
 first**, then the anchors below. Kickoff: "resolve the post-sweep follow-ups" (see the paste-ready prompt the
 producing session surfaced).
 

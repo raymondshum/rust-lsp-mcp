@@ -24,8 +24,9 @@ plan and `docs/reference/`; these files only orchestrate.
 
 ## Effort seeds (session handoffs)
 
-Next-session seeds produced by the [session-handoff skill](../../.bob/skills/session-handoff/SKILL.md), which
-lives on `main` at `.bob/skills/session-handoff/SKILL.md`:
+Next-session seeds produced by the [session-handoff skill](../../.claude/skills/session-handoff/SKILL.md), which
+lives on `main` at `.claude/skills/session-handoff/SKILL.md` (its Bob adaptation lives on
+`bob_prototype` at `.bob/skills/session-handoff/SKILL.md`):
 
 - [post-sweep-followups-handoff.md](post-sweep-followups-handoff.md) — seed for the post-defect-sweep
   hardening follow-ups: KI-9 (#87, nav-delegate hang), a production-image smoke test (#88), and the Lows
@@ -34,6 +35,6 @@ lives on `main` at `.bob/skills/session-handoff/SKILL.md`:
 - [defect-sweep-resolution-handoff.md](defect-sweep-resolution-handoff.md) — seed that drove the 2026-07-01
   defect-sweep resolution (issues #45–#63, DS-01…DS-28) to **completion** (PRs #65–#85); evidence in
   [../security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md) (all rows ✅). Kicked off
-  with the [resolve-defect-sweep skill](../../.bob/skills/resolve-defect-sweep/SKILL.md) — a
+  with the [resolve-defect-sweep skill](../../.claude/skills/resolve-defect-sweep/SKILL.md) — a
   Fable-orchestrated Claude Code effort, so both it and this seed are `main`-first (cherry-picked to
   `bob_prototype`), like the code and audit they cover.
