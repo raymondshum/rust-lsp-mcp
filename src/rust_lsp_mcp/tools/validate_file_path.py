@@ -6,11 +6,10 @@ This tool is UNGATED: it touches only the filesystem and needs no live
 rust-analyzer index, so it never returns ``not_ready``.
 """
 
-import os
 import pathlib
 from typing import Any
 
-from rust_lsp_mcp.core import get_manager, mcp
+from rust_lsp_mcp.core import get_manager, mcp, validate_workspace_file
 from rust_lsp_mcp.envelope import error, ok
 from rust_lsp_mcp.settings import get_settings
 
@@ -42,27 +41,29 @@ def validate_file_path(file: str) -> dict[str, Any]:
       ``exists: false`` is a valid answer, not an error.
 
     - ``error`` — a genuine failure: the workspace root is unconfigured, or
-      ``file`` escapes the workspace root (via ``..`` or an absolute path
-      pointing outside it).
+      ``file`` fails the workspace containment rule.
 
-    The path is collapsed lexically with ``os.path.normpath`` (no filesystem
-    access, no symlink resolution) before the containment check, so ``..``
-    sequences cannot escape the workspace.
+    Containment rule: identical to the position tools
+    (``core.validate_workspace_file``) so this tool's verdict never
+    contradicts theirs — ``file`` must be a workspace-relative path; empty
+    strings, NUL-containing paths, absolute paths (even ones pointing inside
+    the workspace), and ``..``-escaping paths are all rejected.  The check is
+    purely lexical (``os.path.normpath`` — no filesystem access, no symlink
+    resolution), and the *normalized* form is what gets probed, so a
+    symlink+``..`` combination cannot resolve outside the workspace.
     """
     mgr = get_manager()
     repo_root = mgr.repository_root if mgr is not None else get_settings().project_root
     if not repo_root:
         return error("Workspace root is not configured.")
 
-    root = pathlib.Path(repo_root)
-    # Lexical resolution: an absolute ``file`` overrides ``root``; normpath then
-    # collapses any ``..`` so the containment check below cannot be fooled.
-    abs_path = pathlib.Path(os.path.normpath(root / file))
+    # Shared containment rule (core helper) — reject absolute/escaping paths
+    # and probe the normalized form so symlink+".." cannot escape the root.
+    file, guard = validate_workspace_file(file)
+    if guard is not None:
+        return guard
 
-    try:
-        abs_path.relative_to(root)
-    except ValueError:
-        return error(f"Path {file!r} escapes the workspace root.")
+    abs_path = pathlib.Path(repo_root) / file
 
     size_bytes: int | None = abs_path.stat().st_size if abs_path.is_file() else None
 
