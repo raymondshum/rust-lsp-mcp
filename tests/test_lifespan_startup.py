@@ -20,17 +20,27 @@ Test coverage:
       the background task.
     - A ``DocStore`` construction failure (before any rebuild) is recorded via
       ``doc_store_state()`` without ``init_doc_store_background`` raising.
+    - A doc-store init failure (``init_doc_store_background`` itself raising,
+      e.g. a bug in the background-init plumbing rather than a recorded
+      rebuild/construction failure) is swallowed by ``core._lifespan``'s own
+      ``try/except`` — the lifespan body still runs and ``core._manager`` is
+      set, so navigation tools keep working even when the doc index is
+      completely broken (DS-18 gap 1).
+    - ``analyzer.analyzer_lifespan`` itself wires ``start()`` before the
+      ``yield`` and ``shutdown()`` after it, with no live rust-analyzer
+      process (``AnalyzerManager.start``/``shutdown`` patched) (DS-18 gap 2).
 """
 
 import asyncio
 import pathlib
 import threading
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import chromadb
 import numpy as np
 
+import rust_lsp_mcp.analyzer as analyzer_mod
 import rust_lsp_mcp.core as core_mod
 import rust_lsp_mcp.doc_store as doc_store_mod
 import rust_lsp_mcp.tools.status as status_mod
@@ -269,5 +279,74 @@ class TestConstructionFailureRecordsInitError:
             assert "construction boom" in err
 
             doc_store_mod.clear_doc_store()
+
+        asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
+
+
+# ---------------------------------------------------------------------------
+# 5. DS-18 gap 1 — a doc-store init failure is swallowed by core._lifespan;
+#    navigation tools (gated on core._manager) keep working regardless.
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanSwallowsDocStoreInitFailure:
+    def test_doc_store_init_failure_does_not_break_nav(self) -> None:
+        """``init_doc_store_background`` raising must not propagate out of
+        ``core._lifespan``, and ``core._manager`` must still be set inside the
+        ``async with`` body (i.e. nav tools relying on ``require_ready()`` /
+        ``get_manager()`` are unaffected by a broken doc index)."""
+
+        async def _scenario() -> None:
+            doc_store_mod.clear_doc_store()
+            fake_manager = _FakeManager()
+            with (
+                patch.object(
+                    core_mod, "analyzer_lifespan", _fake_analyzer_lifespan_factory(fake_manager)
+                ),
+                patch.object(
+                    core_mod,
+                    "init_doc_store_background",
+                    AsyncMock(side_effect=RuntimeError("doc-store init boom")),
+                ),
+            ):
+                # Must not raise — core._lifespan's own try/except around the
+                # init_doc_store_background call must swallow this.
+                async with core_mod._lifespan(object()) as ctx:  # ty: ignore[invalid-argument-type]
+                    assert ctx["manager"] is fake_manager
+                    # The readiness gate / get_manager() that nav tools rely
+                    # on must be wired up despite the doc-store failure.
+                    assert core_mod._manager is fake_manager
+
+            # Teardown must still clear the singleton.
+            assert core_mod._manager is None
+
+        asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
+
+
+# ---------------------------------------------------------------------------
+# 6. DS-18 gap 2 — analyzer.analyzer_lifespan wires start() before the yield
+#    and shutdown() after it, with no live rust-analyzer process.
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyzerLifespanStartShutdownWiring:
+    def test_start_then_shutdown_wiring(self) -> None:
+        """Drive the REAL ``analyzer_lifespan`` with ``AnalyzerManager.start``/
+        ``shutdown`` patched to async no-ops — proves the start -> yield ->
+        shutdown wiring without spawning a real rust-analyzer process."""
+
+        async def _scenario() -> None:
+            start_mock = AsyncMock()
+            shutdown_mock = AsyncMock()
+            with (
+                patch.object(analyzer_mod.AnalyzerManager, "start", start_mock),
+                patch.object(analyzer_mod.AnalyzerManager, "shutdown", shutdown_mock),
+            ):
+                async with analyzer_mod.analyzer_lifespan(object()) as ctx:
+                    assert isinstance(ctx["manager"], analyzer_mod.AnalyzerManager)
+                    start_mock.assert_awaited_once()
+                    shutdown_mock.assert_not_awaited()
+
+                shutdown_mock.assert_awaited_once()
 
         asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
