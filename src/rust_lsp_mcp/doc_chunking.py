@@ -183,13 +183,18 @@ _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 # Regex for setext underline: a line of one or more ``=`` chars (h1) or ``-`` chars (h2),
 # optionally preceded/followed by spaces, with nothing else.
-_SETEXT_H1_RE = re.compile(r"^=+\s*$")
-_SETEXT_H2_RE = re.compile(r"^-+\s*$")
+# Per CommonMark, up to 3 leading spaces are allowed (4+ leading spaces is
+# indented code, which is NOT a setext underline) — same 0-3 space allowance
+# as _HEADER_RE/_FENCE_RE above (DS-23).
+_SETEXT_H1_RE = re.compile(r"^ {0,3}=+\s*$")
+_SETEXT_H2_RE = re.compile(r"^ {0,3}-+\s*$")
 
 # Regex for table separator rows: ``| --- | --- |`` style lines.
 # These look like setext underlines when the row is ``|---|---|`` but must not fire
 # as setext headers.  We detect them by the presence of ``|`` on the line.
-_TABLE_SEP_RE = re.compile(r"^\|")
+# Per CommonMark, up to 3 leading spaces are allowed before the row (same
+# 0-3 space allowance as above).
+_TABLE_SEP_RE = re.compile(r"^ {0,3}\|")
 
 
 def _is_fence_delimiter(line: str) -> bool:

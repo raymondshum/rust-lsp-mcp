@@ -1210,9 +1210,7 @@ class TestDS89IndentedSetextAndThematicBreak:
         md = "# T\n\n| a | b |\n   |---|---|\n| x | y |\n"
         chunks = chunk_markdown(md, "d.md")
         assert len(chunks) == 1, f"Expected 1 chunk, got {len(chunks)}"
-        assert "|---|---|" in chunks[0].text, (
-            "Indented table separator was incorrectly consumed"
-        )
+        assert "|---|---|" in chunks[0].text, "Indented table separator was incorrectly consumed"
 
 
 # ---------------------------------------------------------------------------
