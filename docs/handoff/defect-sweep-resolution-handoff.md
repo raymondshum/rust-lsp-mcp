@@ -16,9 +16,11 @@ docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve
   1 refuted, 2 recovered from overloaded agents and hand-verified.
 - The **audit doc shipped**: PR **#64** merged to `main`, cherry-picked onto `bob_prototype` (commit
   `3f93b34`). It exists on both branches.
-- **19 issues opened** (#45–#63). **First unit landed 2026-07-01:** DS-01 (#45) + DS-02 (#46)
-  closed via PR #65 to `main` (cherry-picked to `bob_prototype` `0fb8627`); the audit record was
-  updated in PR #66. **17 issues remain open** (#47–#63).
+- **19 issues opened** (#45–#63). **Progress (continuous drive, started 2026-07-01):**
+  - Unit 1 — DS-01 (#45) + DS-02 (#46): closed via PR #65 → `main` (cherry-pick `0fb8627`); record PR #66.
+  - Unit 2 — DS-03 (#47) + DS-04 (#48) + DS-21 (roll-up #63): closed via PR #67 → `main`
+    (cherry-pick `6edd96e`); record PR #68. Surfaced [[KI-9]] (out-of-scope, recorded).
+  - **15 issues remain open** (#49–#63; #63 stays open until the other roll-up lows land).
 - Nothing is deferred by decision yet — sequencing below is a recommendation, not a commitment.
 
 ## What's left (grounded)
@@ -30,8 +32,8 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 |----|-------|-----|-------|-----------------|
 | DS-01 | #45 | High | `tools/goto_definition.py:72` (+hover/find_references/document_symbols) | ✅ Done — PR #65 → `main`, cherry-picked to `bob_prototype` (`0fb8627`). Shared lexical containment guard rejects out-of-workspace `file` before the delegate; adversarial `no-breaks`. |
 | DS-02 | #46 | High | `core.py:181` | ✅ Done — PR #65 (same commit). `location_to_external` containment-checks `relativePath`; out-of-workspace locations fall back to URI or are skipped. |
-| DS-03 | #47 | High | `analyzer.py:489` | Open. `refresh` mid-index → stale `ready`; couple with DS-04/DS-21. |
-| DS-04 | #48 | High | `analyzer.py:440` | Open. Drain-timeout orphans subprocess (multilspy teardown has no `finally`). |
+| DS-03 | #47 | High | `analyzer.py:489` | ✅ Done — PR #67 → `main`, cherry-picked to `bob_prototype` (`6edd96e`). Generation counter; superseded `_run` can't stamp stale `ready`. |
+| DS-04 | #48 | High | `analyzer.py:440` | ✅ Done — PR #67 (same commit). `_run` finally force-stops the subprocess on every reachable cancel window. |
 | DS-05 | #49 | High | `doc_store.py:274` | Open. Adopt-without-freshness. **Only** cross-project + stale-after-edit is in scope; build-once persistence is intended. |
 | DS-06 | #50 | High | `tests/test_doc_store.py:317` | Open. Real `init_doc_store()` untested (dead `__wrapped__` branch). |
 | DS-07 | #51 | Med | `analyzer.py:262` | Open. Failed startup swallowed → `indexing` forever; needs an error surface. |
@@ -46,7 +48,7 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 | DS-16 | #60 | Med | `Dockerfile:80` | Open. `status` staleness null on rootful Linux (no `safe.directory`). `bob_prototype`-only if Dockerfile diverges. |
 | DS-17 | #61 | Med | `tests/test_phase34_adversarial.py:228` | Open. Malformed-response branch never runs in CI. Fix = drop `integration` marker on the two `_MalformedLSP` tests (they need no live analyzer). |
 | DS-18 | #62 | Med | `core.py:55` | Open. `_lifespan`/`analyzer_lifespan` untested (swallow contract + teardown). |
-| DS-19…DS-28 | #63 | Low | (roll-up) | Open. `status` sync subprocess, dead null-check, unserialized refresh, empty-query, indented fences, dead sentinel, model-persistence doc, `RA_TARGET_DIR` comment, SELinux relabel, no tool-registration test. |
+| DS-19…DS-28 | #63 | Low | (roll-up) | Open. **DS-21 ✅ done** (PR #67, with DS-03/04). Remaining: `status` sync subprocess (DS-19), dead null-check (DS-20), empty-query (DS-22), indented fences (DS-23), dead sentinel (DS-24), model-persistence doc (DS-25), `RA_TARGET_DIR` comment (DS-26), SELinux relabel (DS-27), no tool-registration test (DS-28). Issue closes when all land. |
 
 **Recommended sequencing (human's call):** DS-01/02 → DS-03/04/21 → DS-05/06 → Mediums by area (RAG
 DS-10/11/23; docs/config DS-13/25/26; test-gaps DS-17/18/28) → Lows opportunistically.
