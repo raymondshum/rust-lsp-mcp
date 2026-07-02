@@ -29,7 +29,23 @@ Check this list at these lifecycle checkpoints (see
 
 ## Open
 
-_(none — all currently-tracked issues are resolved.)_
+### KI-9 — an in-flight nav delegate can hang across a `refresh` drain of a wedged analyzer
+- **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py) (the
+  `request_*` delegates) + multilspy 0.0.15 `lsp_protocol_handler/server.py`
+  (`send_request` waits on `request.cv`; `stop()` does not fail pending
+  `_response_handlers`).
+- **What:** If a navigation tool is awaiting `self._lsp.request_*(...)` at the moment a
+  `refresh` (→`restart`) drains and tears down a **wedged/unresponsive** analyzer, the
+  pending request never receives a response and multilspy never cancels it on `stop()`,
+  so the delegate await can hang indefinitely. This is the analyzer-side analog of the
+  doc-store race **DS-12** (which covers only the `search_docs`/`rebuild` side).
+- **Why it matters:** a real (if narrow) robustness gap on the refresh path; the caller
+  hangs instead of getting a prompt `not_ready`/`error`.
+- **Status:** `open` — **out of the 2026-07-01 defect-sweep scope** (not among DS-01…DS-28).
+  Pre-existing; surfaced by the adversarial pass on the DS-03/04/21 lifecycle fix
+  (2026-07-02), **not introduced by it**. Recorded so it isn't rediscovered; decide
+  separately whether to fix (e.g. wrap the delegate await with a timeout, or fail pending
+  requests on teardown).
 
 ---
 

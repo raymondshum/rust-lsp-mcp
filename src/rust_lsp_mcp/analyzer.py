@@ -17,15 +17,34 @@ Responsibilities:
        - Provides a clean ``shutdown()`` coroutine for teardown.
        - Provides a ``restart()`` coroutine for live re-indexing (Phase 4).
 
-Refresh seam (implemented in Phase 3-4):
-    ``restart()`` resets ``state = STATE_INDEXING`` as its **very first** action —
-    before signalling or awaiting the old task — so callers never observe a stale
-    ``"ready"`` during re-indexing.  After the old task is torn down cleanly (same
-    drain logic as ``shutdown()``), fresh ``asyncio.Event`` objects are created
-    (the old ones are set/consumed and cannot be reused) and ``start()`` is called
-    again to spawn a new background ``_run`` coroutine.  The new ``_run`` captures
-    ``indexed_commit`` from ``git rev-parse HEAD`` at start, so the commit reflects
-    the tree being indexed after each restart.
+Refresh seam (implemented in Phase 3-4; races closed in the DS-03/DS-04/DS-21
+follow-up):
+    ``restart()`` and ``shutdown()`` both serialize behind a single
+    ``_lifecycle_lock`` — concurrent callers queue up rather than racing each
+    other's teardown/respawn sequence.  ``restart()`` resets
+    ``state = STATE_INDEXING`` as its first action after acquiring the lock —
+    before signalling or awaiting the old task — so callers never observe a
+    stale ``"ready"`` during re-indexing.  A monotonically increasing
+    ``_generation`` counter (bumped by ``_drain_task`` before anything else)
+    is threaded through each background ``_run`` invocation: a run whose
+    generation no longer matches ``self._generation`` has been superseded by
+    a later restart and exits immediately, without ever publishing
+    ``state``, ``_lsp``, or ``_ready_event`` — this is what stops a
+    slow-to-quiesce outgoing run from clobbering a newer one's readiness.
+    After the old task is torn down cleanly (same drain logic as
+    ``shutdown()``), ``restart()`` re-asserts ``state = STATE_INDEXING`` and
+    re-clears ``_indexed_commit`` (defense-in-depth: the outgoing run's
+    in-flight commit capture may have landed during the drain window), fresh
+    ``asyncio.Event`` objects are created (the old ones are set/consumed and
+    cannot be reused), and ``start()`` is called again to spawn a new
+    background ``_run`` coroutine.  The new ``_run`` captures
+    ``indexed_commit`` from ``git rev-parse HEAD`` at start, so the commit
+    reflects the tree being indexed after each restart.  Every ``_run``'s
+    ``finally`` clause force-stops the underlying rust-analyzer subprocess
+    (``lsp.server.stop()``, idempotent) regardless of how the run exits —
+    multilspy's own ``start_server()`` has no try/finally around its
+    ``yield``, so a cancellation (e.g. a drain timeout) or a pre-yield
+    failure would otherwise leak the subprocess.
 
 Live LSP exposure (Phase 2):
     ``_lsp`` is set to the live ``PatchedRustAnalyzer`` instance *only* while inside
@@ -58,6 +77,12 @@ from multilspy.multilspy_types import Hover, Location, UnifiedSymbolInformation
 # Readiness flag values — treated as an opaque string by callers.
 STATE_INDEXING = "indexing"
 STATE_READY = "ready"
+
+# How long _drain_task() waits for the outgoing background task to finish on
+# its own before cancelling it.  Module-level (not a class default / __init__
+# capture) so tests can monkeypatch it and have _drain_task observe the new
+# value at call time.
+DRAIN_TIMEOUT_SECONDS: float = 10.0
 
 _log = logging.getLogger(__name__)
 
@@ -177,6 +202,15 @@ class AnalyzerManager:
         self._lsp: PatchedRustAnalyzer | None = None
         # Git commit hash of the tree being indexed; None until _run captures it.
         self._indexed_commit: str | None = None
+        # Bumped by _drain_task() before anything else; a _run() invocation
+        # whose captured generation no longer matches this value has been
+        # superseded and must exit without publishing state/_lsp/_ready_event.
+        self._generation: int = 0
+        # Serializes restart()/shutdown() so concurrent callers queue up
+        # instead of racing each other's teardown/respawn sequence.
+        self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
+        # Set by shutdown(); restart() becomes a no-op once this is True.
+        self._closed: bool = False
 
     @property
     def repository_root(self) -> str:
@@ -193,14 +227,22 @@ class AnalyzerManager:
         """True only when state is "ready" AND the live LSP context is set.
 
         This guards the teardown window where _run's finally has cleared
-        _lsp but state has not been reset (Phase 4 owns that reset).
-        Callers must use this instead of checking state == STATE_READY alone.
+        _lsp but state has not been reset, and the analogous window during a
+        restart() where a superseded run's generation check kept it from
+        ever setting _lsp/state in the first place (see the ``_generation``
+        mechanism on ``_run``).  Callers must use this instead of checking
+        state == STATE_READY alone.
         """
         return self.state == STATE_READY and self._lsp is not None
 
     async def start(self) -> None:
-        """Spawn the background indexing task.  Returns immediately."""
-        self._task = asyncio.create_task(self._run(), name="analyzer-lifecycle")
+        """Spawn the background indexing task.  Returns immediately.
+
+        Does NOT acquire ``_lifecycle_lock`` — ``restart()`` calls this while
+        already holding the lock.  Never call this directly while a restart
+        or shutdown may be concurrently in flight; go through ``restart()``.
+        """
+        self._task = asyncio.create_task(self._run(self._generation), name="analyzer-lifecycle")
 
     async def _capture_head_commit(self) -> None:
         """Capture git HEAD commit into ``_indexed_commit``.
@@ -232,10 +274,40 @@ class AnalyzerManager:
             _log.debug("AnalyzerManager: could not capture HEAD commit", exc_info=True)
             self._indexed_commit = None
 
-    async def _run(self) -> None:
-        """Background task: enter start_server(), flip state, wait for shutdown."""
+    async def _run(self, gen: int) -> None:
+        """Background task: enter start_server(), flip state, wait for shutdown.
+
+        Args:
+            gen: The generation this run was spawned under (``self._generation``
+                at the time ``start()`` created this task).  ``_drain_task()``
+                bumps ``self._generation`` before draining, so if a restart()
+                races ahead of this run reaching quiescence, ``gen`` no longer
+                matches ``self._generation`` by the time we get there.  A
+                superseded run writes nothing (no ``state``/``_lsp``/
+                ``_ready_event``) and exits the ``async with`` immediately —
+                which drives multilspy's own clean shutdown()/stop() sequence
+                for that (doomed) run.
+
+        Teardown: on any exit path, ``finally`` clears ``_lsp`` (identity-
+        guarded — only if it still points at *this* run's ``lsp``) and then
+        unconditionally, idempotently force-stops the subprocess via
+        ``lsp.server.stop()``.  This is required because multilspy 0.0.15's
+        ``start_server()`` has no try/finally around its ``yield``: a
+        cancellation (e.g. a drain timeout) or a pre-yield failure would
+        otherwise skip multilspy's own teardown and leak the rust-analyzer
+        process.  ``server.stop()`` is a no-op on an already-clean exit
+        (multilspy already called it; the process handle is already None).
+        """
         # Capture the commit being indexed before starting the server.
         await self._capture_head_commit()
+        if gen != self._generation:
+            _log.info(
+                "AnalyzerManager: superseded run (gen %d != current %d) after "
+                "commit capture; tearing down without spawning",
+                gen,
+                self._generation,
+            )
+            return
 
         config = MultilspyConfig(code_language=Language.RUST)
         logger = MultilspyLogger()
@@ -248,8 +320,16 @@ class AnalyzerManager:
         try:
             async with lsp.start_server():
                 # We are now inside the context: indexing is complete (quiescent).
-                # Expose the live instance before flipping state so that any
-                # caller that sees state=ready is guaranteed _lsp is set.
+                if gen != self._generation:
+                    _log.info(
+                        "AnalyzerManager: superseded run (gen %d != current %d); tearing down",
+                        gen,
+                        self._generation,
+                    )
+                    return
+                # Gen-check and the three writes below are one synchronous
+                # block with no await between them — inserting an await here
+                # would reopen the race this check exists to close.
                 self._lsp = lsp
                 self.state = STATE_READY
                 self._ready_event.set()
@@ -265,7 +345,21 @@ class AnalyzerManager:
         finally:
             # Clear the reference on any exit path so the object is never
             # reachable after the start_server() context has exited.
-            self._lsp = None
+            # Identity-guarded: a superseded run must not clear a newer
+            # run's already-published _lsp.
+            if self._lsp is lsp:
+                self._lsp = None
+            # DS-04: multilspy's start_server() has no try/finally around its
+            # yield; on cancellation mid-__aenter__ (or a pre-yield failure)
+            # its shutdown()/stop() never run and the rust-analyzer process
+            # leaks. server.stop() is multilspy's own idempotent teardown (a
+            # no-op after a normal exit — the process handle is already None).
+            # Covers every cancel window where a process handle exists; the one
+            # residual gap is a cancel landing *inside* multilspy's
+            # create_subprocess_shell before it assigns self.process, which is
+            # not reachable from here (no handle to terminate yet).
+            with contextlib.suppress(Exception):
+                await lsp.server.stop()
 
     # -----------------------------------------------------------------------
     # LSP delegate methods — each guards against not-ready state
@@ -424,17 +518,31 @@ class AnalyzerManager:
     # -----------------------------------------------------------------------
 
     async def _drain_task(self) -> None:
-        """Signal ``_shutdown_event`` and drain the current task to completion.
+        """Bump the generation, signal ``_shutdown_event``, and drain the task.
 
-        Used by both ``shutdown()`` and ``restart()``.  Safe to call when
+        Used by both ``shutdown()`` and ``restart()``; callers are expected to
+        hold ``_lifecycle_lock`` (both public methods do).  Safe to call when
         ``_task`` is None.
+
+        The generation bump is the FIRST thing this method does — it
+        immediately supersedes whatever run is currently outstanding, so even
+        if that run reaches quiescence during the drain window below, its
+        gen-check in ``_run`` aborts before publishing ``state``/``_lsp``/
+        ``_ready_event``.
+
+        If the task does not finish within ``DRAIN_TIMEOUT_SECONDS`` it is
+        cancelled; cancellation drives ``_run``'s ``finally`` to force-stop
+        the underlying subprocess (see ``_run`` and DS-04), so this method's
+        own await may legitimately take longer than ``DRAIN_TIMEOUT_SECONDS``
+        while that teardown completes.
         """
+        self._generation += 1
         self._shutdown_event.set()
         if self._task is None:
             return
         if not self._task.done():
             try:
-                await asyncio.wait_for(self._task, timeout=10.0)
+                await asyncio.wait_for(self._task, timeout=DRAIN_TIMEOUT_SECONDS)
             except TimeoutError:
                 _log.warning("AnalyzerManager: drain timed out; cancelling task")
                 self._task.cancel()
@@ -455,53 +563,86 @@ class AnalyzerManager:
     async def shutdown(self) -> None:
         """Signal shutdown and wait for the background task to finish.
 
+        Serializes behind ``_lifecycle_lock`` and sets ``_closed = True``
+        before draining, so any ``restart()`` call that arrives afterward
+        (whether already queued on the lock or issued later) becomes a no-op.
+
         Signals the shutdown event so ``_run`` exits its ``start_server()``
-        context cleanly (triggering the server's own shutdown/stop sequence).
+        context cleanly (triggering the server's own shutdown/stop sequence,
+        followed by ``_run``'s own idempotent force-stop).
 
         Exception draining: if the task has already finished (e.g. it raised
         unexpectedly), its exception is retrieved here so asyncio does not emit
         a "Task exception was never retrieved" warning at GC time.
         """
-        await self._drain_task()
+        async with self._lifecycle_lock:
+            self._closed = True
+            await self._drain_task()
 
     async def restart(self) -> None:
         """Re-index the workspace by tearing down and restarting the analyzer.
 
-        State-reset-first contract: ``state`` is set to ``STATE_INDEXING`` as the
-        very first action — before signalling or awaiting the old task — so that
-        callers never observe a stale ``"ready"`` during re-indexing.
+        Lock-serialized: the entire sequence below runs under
+        ``_lifecycle_lock``, so concurrent ``restart()``/``shutdown()`` calls
+        queue up behind each other rather than racing.  If ``shutdown()`` has
+        already run (``_closed``), this is a no-op — once closed, the manager
+        never restarts.
+
+        State-reset-first contract: ``state`` is set to ``STATE_INDEXING`` as
+        the first action after acquiring the lock — before signalling or
+        awaiting the old task — so that callers never observe a stale
+        ``"ready"`` during re-indexing.
 
         Sequence:
-            1. Set ``self.state = STATE_INDEXING`` (must be first).
-            2. Clear ``_indexed_commit`` to None so ``status`` reports an honest
+            1. Acquire ``_lifecycle_lock``; if ``_closed``, log and return.
+            2. Set ``self.state = STATE_INDEXING`` (must be first after 1).
+            3. Clear ``_indexed_commit`` to None so ``status`` reports an honest
                "unknown" during the re-index window instead of the *previous*
                cycle's commit (which would let ``stale`` read ``false`` mid-reindex).
-               The new ``_run`` recaptures it from git HEAD before going ready.
-            3. Drain the old task cleanly (same logic as ``shutdown()``).
-            4. Replace ``_shutdown_event`` and ``_ready_event`` with fresh instances
-               (the old ones are set/consumed and cannot be reused for the next cycle).
-            5. Call ``start()`` to spawn a new background ``_run`` task, which
+            4. Drain the old task cleanly (same logic as ``shutdown()``); this
+               bumps ``_generation``, which is the primary defence against a
+               stale run publishing readiness after this point.
+            5. Re-assert ``state = STATE_INDEXING`` and re-clear
+               ``_indexed_commit`` — defense-in-depth: the old run's
+               in-flight ``_capture_head_commit()`` may have landed during the
+               drain window in step 4.  This is race-free because the old
+               task is now provably done.
+            6. Replace ``_shutdown_event`` and ``_ready_event`` with fresh
+               instances (the old ones are set/consumed and cannot be reused).
+            7. Call ``start()`` to spawn a new background ``_run`` task, which
                recaptures ``indexed_commit`` from git HEAD.
 
         Safe to call even if ``_task`` is None (e.g. before the first ``start()``).
         """
-        # Step 1: mark not-ready FIRST so callers see indexing immediately.
-        self.state = STATE_INDEXING
+        async with self._lifecycle_lock:
+            if self._closed:
+                _log.warning("AnalyzerManager.restart() called after shutdown; ignoring")
+                return
 
-        # Step 2: forget the old indexed commit — during the re-index window the
-        # previous value is no longer what's indexed; None → status reports
-        # indexed_commit=null, stale=null (honest "unknown") until _run recaptures.
-        self._indexed_commit = None
+            # Step 2: mark not-ready FIRST so callers see indexing immediately.
+            self.state = STATE_INDEXING
 
-        # Step 3: drain the old task.
-        await self._drain_task()
+            # Step 3: forget the old indexed commit — during the re-index window
+            # the previous value is no longer what's indexed; None → status
+            # reports indexed_commit=null, stale=null (honest "unknown") until
+            # _run recaptures.
+            self._indexed_commit = None
 
-        # Step 3: fresh events — old ones are spent.
-        self._shutdown_event = asyncio.Event()
-        self._ready_event = asyncio.Event()
+            # Step 4: drain the old task (bumps _generation).
+            await self._drain_task()
 
-        # Step 4: spawn new background task (recaptures indexed_commit internally).
-        await self.start()
+            # Step 5: re-assert — race-free, the old task is provably done, but
+            # its in-flight commit capture (or, pre-generation-check, its own
+            # state write) could otherwise have landed during the drain above.
+            self.state = STATE_INDEXING
+            self._indexed_commit = None
+
+            # Step 6: fresh events — old ones are spent.
+            self._shutdown_event = asyncio.Event()
+            self._ready_event = asyncio.Event()
+
+            # Step 7: spawn new background task (recaptures indexed_commit internally).
+            await self.start()
 
 
 # ---------------------------------------------------------------------------
