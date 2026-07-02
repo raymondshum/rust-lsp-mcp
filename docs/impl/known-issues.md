@@ -29,27 +29,36 @@ Check this list at these lifecycle checkpoints (see
 
 ## Open
 
+---
+
+## Resolved
+
 ### KI-9 — an in-flight nav delegate can hang across a `refresh` drain of a wedged analyzer
 - **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py) (the
   `request_*` delegates) + multilspy 0.0.15 `lsp_protocol_handler/server.py`
   (`send_request` waits on `request.cv`; `stop()` does not fail pending
   `_response_handlers`).
-- **What:** If a navigation tool is awaiting `self._lsp.request_*(...)` at the moment a
-  `refresh` (→`restart`) drains and tears down a **wedged/unresponsive** analyzer, the
-  pending request never receives a response and multilspy never cancels it on `stop()`,
-  so the delegate await can hang indefinitely. This is the analyzer-side analog of the
-  doc-store race **DS-12** (which covers only the `search_docs`/`rebuild` side).
-- **Why it matters:** a real (if narrow) robustness gap on the refresh path; the caller
-  hangs instead of getting a prompt `not_ready`/`error`.
-- **Status:** `open` — **out of the 2026-07-01 defect-sweep scope** (not among DS-01…DS-28).
-  Pre-existing; surfaced by the adversarial pass on the DS-03/04/21 lifecycle fix
-  (2026-07-02), **not introduced by it**. Tracked as **GitHub #87** (label
-  `followup-2026-07-02`); fix direction: wrap the delegate await with a timeout, or fail
-  pending requests on teardown.
-
----
-
-## Resolved
+- **What:** If a navigation tool was awaiting `self._lsp.request_*(...)` at the moment a
+  `refresh` (→`restart`) drained and tore down a **wedged/unresponsive** analyzer, the
+  pending request never received a response and multilspy never cancels it on `stop()`,
+  so the delegate await could hang indefinitely. Analyzer-side analog of the doc-store
+  race **DS-12**. Tracked as **GitHub #87** (label `followup-2026-07-02`).
+- **Resolved:** 2026-07-02. Every delegate now routes its LSP await through
+  `AnalyzerManager._race_teardown`, which races the request against the run's
+  `_shutdown_event` (set first by `_drain_task` on both `restart()` and `shutdown()`)
+  and fails the in-flight request with `AnalyzerTornDownError`; all six tool call
+  sites map it to a `not_ready` envelope (`TORN_DOWN_RETRY_MESSAGE`) — a refresh is
+  genuinely in flight, so `not_ready` is truthful. External cancellation (client
+  disconnect) still propagates as `CancelledError`, including across the helper's
+  reap windows (adversarial finding, fixed in the same unit). **Rule for future
+  delegates: every `self._lsp` await must go through `_race_teardown`** — a raw await
+  reopens the hang. Deliberately NO wall-clock timeout on delegate awaits (a fixed
+  timeout risks false `error`s on legitimately slow queries; the helper is the single
+  seam if one is ever needed). Guarded by
+  [tests/test_ki9_delegate_teardown.py](../../tests/test_ki9_delegate_teardown.py)
+  (17 tests: teardown races, tie-breaks, cancellation discipline, envelope mapping,
+  fail-fast, leak checks). Adversarial review: 1 finding (swallowed external cancel
+  in the reap windows), fixed + regression-tested; re-verified `closed`.
 
 ### KI-4 — `RLM_CHROMA_MODEL_CACHE` is a no-op setting
 - **Where:** [src/rust_lsp_mcp/settings.py](../../src/rust_lsp_mcp/settings.py).
