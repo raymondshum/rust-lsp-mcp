@@ -36,7 +36,7 @@ and the **GitHub issue** tracking it.
 | DS-06 | High | tests | The real `init_doc_store()` is executed by no test | #50 ✅ |
 | DS-07 | Med | core | Failed analyzer startup is swallowed — `indexing` forever | #51 ✅ |
 | DS-08 | Med | core | Blocking doc rebuild on the event loop during lifespan startup | #52 ✅ |
-| DS-09 | Med | tools | `document_symbols` returns `range.start`, not `selectionRange` | #53 |
+| DS-09 | Med | tools | `document_symbols` returns `range.start`, not `selectionRange` | #53 ✅ |
 | DS-10 | Med | rag | `---` after a closing code fence misparsed as a setext header | #54 |
 | DS-11 | Med | rag | Doc starting with `---` swallowed whole as frontmatter | #55 |
 | DS-12 | Med | rag | `refresh` rebuild races in-flight `search_docs` (no lock) | #56 |
@@ -233,6 +233,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   line. Feeding them back into `hover`/`goto_definition`/`find_references` — the
   intended workflow — returns `not_found`, and they disagree with `find_symbol`
   for the same symbol.
+- **Resolved:** 2026-07-02 (PR #73). The document-symbol branch now prefers
+  `selectionRange.start` (the name position), falling back to `range.start`;
+  multilspy 0.0.15 preserves `selectionRange` verbatim.
 
 ### DS-10 — `---` after a closing code fence misparsed as a setext header
 - **Where:** `src/rust_lsp_mcp/doc_chunking.py:347`.
