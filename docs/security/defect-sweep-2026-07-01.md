@@ -46,15 +46,15 @@ and the **GitHub issue** tracking it.
 | DS-16 | Med | infra | `status` git-staleness always null on rootful Linux Docker | #60 ✅ |
 | DS-17 | Med | tests | Malformed-LSP-response branch has zero CI coverage | #61 ✅ |
 | DS-18 | Med | tests | `_lifespan` / `analyzer_lifespan` have zero coverage | #62 ✅ |
-| DS-19 | Low | core | `status` runs `subprocess.run` synchronously on the event loop | #63 |
-| DS-20 | Low | tools | Null `documentSymbol` → `error` envelope; `None`-check is dead code | #63 |
+| DS-19 | Low | core | `status` runs `subprocess.run` synchronously on the event loop | #63 ✅ |
+| DS-20 | Low | tools | Null `documentSymbol` → `error` envelope; `None`-check is dead code | #63 ✅ |
 | DS-21 | Low | core | Concurrent `refresh` not serialized → duplicate analyzer processes | #63 ✅ |
 | DS-22 | Low | tools | `search_docs` accepts empty/whitespace query, returns arbitrary top-k | #63 ✅ |
 | DS-23 | Low | rag | Indented (1–3 space) fences/headers missed, swallowing later headers | #63 ✅ |
-| DS-24 | Low | rag | Empty-corpus `build_complete` sentinel is dead code | #63 |
+| DS-24 | Low | rag | Empty-corpus `build_complete` sentinel is dead code | #63 ✅ |
 | DS-25 | Low | docs | Model-persistence advice contradicts the baked-model design | #63 ✅ |
 | DS-26 | Low | infra | Dockerfile comment claims RA reads `RA_TARGET_DIR`; it doesn't | #63 ✅ |
-| DS-27 | Low | infra | `prime-cache.sh` SELinux relabel applied only to project mount | #63 |
+| DS-27 | Low | infra | `prime-cache.sh` SELinux relabel applied only to project mount | #63 ✅ |
 | DS-28 | Low | tests | No test asserts tools are actually registered on the app | #63 ✅ |
 
 Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up #63).
@@ -386,6 +386,8 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** Every `status` poll blocks the loop for a git fork+exec;
   on a cold/slow FS this stalls concurrent tool handling and the rust-analyzer
   pump — on the hottest polling path.
+- **Resolved:** 2026-07-02 (PR #85). `status` is async and offloads `_git_head` via
+  `asyncio.to_thread`; all in-process fields are read before the await.
 
 ### DS-20 — Null `documentSymbol` → `error` envelope; `None`-check is dead code
 - **Where:** `src/rust_lsp_mcp/analyzer.py:316`.
@@ -397,6 +399,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** A legal LSP null result becomes a confusing `error`
   instead of the documented `ok`+`symbols=[]`, inconsistent with the other
   delegates.
+- **Resolved:** 2026-07-02 (PR #85). `request_document_symbols` now mirrors
+  `request_definition`: a null `AssertionError` → `[]` (ok+empty), a malformed non-null
+  payload → re-raise → `error`.
 
 ### DS-21 — Concurrent `refresh` not serialized → duplicate analyzer processes
 - **Where:** `src/rust_lsp_mcp/analyzer.py:497` (`restart`).
@@ -441,6 +446,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   `count() > 0`, which a count-0 collection can never satisfy.
 - **Why it matters:** Empty corpora rebuild on every startup (harmless but
   wasted), and the comment misleads maintainers.
+- **Resolved:** 2026-07-02 (PR #85). The adopt gate keys on `build_complete` +
+  matching `project_root` (dropping `count()>0`), so an intentionally-empty completed
+  corpus is adopted, not rebuilt each startup; the sentinel is now meaningful.
 
 ### DS-25 — Model-persistence advice contradicts the baked-model design
 - **Where:** `docs/guide/configuration.md:59`.
@@ -479,6 +487,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   (cargo `EACCES` writing to `/data`), so the offline path can't be warmed that
   way; the `:z`/`,Z` mismatch can trigger the cross-container relabel conflict
   the script itself warns about.
+- **Resolved:** 2026-07-02 (PR #85). The SELinux relabel applies to both the `/project`
+  and `/data` mounts; README's `:ro,Z` becomes `:ro,z` (shared) to match prime-cache.sh
+  and avoid the per-container relabel conflict.
 
 ### DS-28 — No test asserts tools are actually registered on the app
 - **Where:** `src/rust_lsp_mcp/tools/__init__.py:18`.
