@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 import chromadb
 import numpy as np
+import pytest
 from chromadb.config import Settings as ChromaSettings
 
 from rust_lsp_mcp.doc_store import (
@@ -189,6 +190,46 @@ class TestDocStoreRebuild:
         count2 = store.rebuild()
         assert count1 == count2, "Rebuild is not idempotent"
         assert store.is_ready is True
+
+    def test_rebuild_failure_sets_error_state(self, tmp_path: pathlib.Path) -> None:
+        """A rebuild() that raises must set state="error" (not leave it "building").
+
+        error_message must carry the exception text; the exception itself must
+        still propagate (rebuild() re-raises after recording it).
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+
+        with (
+            patch("rust_lsp_mcp.doc_store.chunk_markdown", side_effect=RuntimeError("chunk boom")),
+            pytest.raises(RuntimeError, match="chunk boom"),
+        ):
+            store.rebuild()
+
+        assert store.state == "error"
+        assert store.is_ready is False
+        assert store.error_message == "RuntimeError: chunk boom"
+
+    def test_rebuild_failure_then_success_clears_error(self, tmp_path: pathlib.Path) -> None:
+        """A subsequent successful rebuild() must clear the error state."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+
+        with (
+            patch("rust_lsp_mcp.doc_store.chunk_markdown", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            store.rebuild()
+        assert store.state == "error"
+
+        store.rebuild()
+        assert store.state == "ready"
+        assert store.is_ready is True
+        assert store.error_message is None
 
     def test_empty_corpus_no_crash(self, tmp_path: pathlib.Path) -> None:
         """An empty corpus (no markdown files) should not crash; returns 0."""
@@ -439,6 +480,33 @@ class TestSingletonLifecycle:
         assert published is store
         assert published is not None
         assert published.is_ready is True
+        clear_doc_store()
+
+    def test_init_doc_store_sets_singleton_even_when_rebuild_raises(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """DS-08/DS-14: the singleton is set BEFORE rebuild(), so a failing rebuild
+        still leaves a (now-errored) store reachable via get_doc_store() —
+        never silently None.  init_doc_store itself must propagate the
+        exception (it does not swallow rebuild failures).
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        clear_doc_store()
+        with (
+            patch("rust_lsp_mcp.doc_store.chunk_markdown", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+
+        published = get_doc_store()
+        assert published is not None, (
+            "Singleton must be set before rebuild() runs, even if rebuild() raises"
+        )
+        assert published.state == "error"
+        assert published.error_message == "RuntimeError: boom"
         clear_doc_store()
 
 

@@ -10,12 +10,15 @@ Responsibilities:
     2. ``AnalyzerManager`` — lifecycle manager that:
        - Spawns ``start_server()`` as a background asyncio Task so the MCP server
          remains responsive while indexing is in progress.
-       - Maintains a ``state`` flag (``"indexing"`` → ``"ready"``) that flips only
-         after the context is live (i.e. rust-analyzer reports quiescent).
+       - Maintains a ``state`` flag (``"indexing"`` → ``"ready"``, or ``"error"``
+         if the background run raises) that flips to ``"ready"`` only after the
+         context is live (i.e. rust-analyzer reports quiescent).
        - Exposes narrow LSP delegate methods (Phase 2 / Phase 3-4) so tools
          can call the live analyzer without accessing the raw LSP object.
        - Provides a clean ``shutdown()`` coroutine for teardown.
-       - Provides a ``restart()`` coroutine for live re-indexing (Phase 4).
+       - Provides a ``restart()`` coroutine for live re-indexing (Phase 4) —
+         this is also the recovery path from ``"error"``: it clears
+         ``error_message`` and resets ``state`` to ``"indexing"``.
 
 Refresh seam (implemented in Phase 3-4; races closed in the DS-03/DS-04/DS-21
 follow-up):
@@ -77,6 +80,7 @@ from multilspy.multilspy_types import Hover, Location, UnifiedSymbolInformation
 # Readiness flag values — treated as an opaque string by callers.
 STATE_INDEXING = "indexing"
 STATE_READY = "ready"
+STATE_ERROR = "error"
 
 # How long _drain_task() waits for the outgoing background task to finish on
 # its own before cancelling it.  Module-level (not a class default / __init__
@@ -186,8 +190,12 @@ class AnalyzerManager:
 
     The ``state`` attribute is ``"indexing"`` until the ``start_server()`` context
     manager yields (i.e. rust-analyzer has reported quiescent), then ``"ready"``.
-    It never blocks the caller — callers must check ``state`` themselves via
-    ``require_ready`` or inspect ``manager.state`` directly.
+    If the background run raises before reaching quiescence, ``state`` becomes
+    ``"error"`` and ``error_message`` carries a diagnostic string; ``restart()``
+    (the ``refresh`` tool) is the recovery path — it clears the error and
+    resets ``state`` to ``"indexing"``.  It never blocks the caller — callers
+    must check ``state`` themselves via ``require_ready`` or inspect
+    ``manager.state`` directly.
     """
 
     def __init__(self, rust_analyzer_bin: str, repository_root: str) -> None:
@@ -202,6 +210,9 @@ class AnalyzerManager:
         self._lsp: PatchedRustAnalyzer | None = None
         # Git commit hash of the tree being indexed; None until _run captures it.
         self._indexed_commit: str | None = None
+        # Set (gen-guarded) when a background _run raises; cleared whenever
+        # restart() resets state back to STATE_INDEXING (the recovery path).
+        self._error: str | None = None
         # Bumped by _drain_task() before anything else; a _run() invocation
         # whose captured generation no longer matches this value has been
         # superseded and must exit without publishing state/_lsp/_ready_event.
@@ -221,6 +232,16 @@ class AnalyzerManager:
     def indexed_commit(self) -> str | None:
         """Git commit hash of the tree currently indexed, or None if not yet known."""
         return self._indexed_commit
+
+    @property
+    def error_message(self) -> str | None:
+        """Human-readable ``"{ExceptionType}: {message}"`` if the last run failed.
+
+        ``None`` while indexing/ready, or after ``restart()`` has cleared it.
+        Only set (gen-guarded) by ``_run``'s ``except Exception`` branch — never
+        by ``asyncio.CancelledError``, since cancellation is not a failure.
+        """
+        return self._error
 
     @property
     def is_ready(self) -> bool:
@@ -309,15 +330,22 @@ class AnalyzerManager:
             )
             return
 
-        config = MultilspyConfig(code_language=Language.RUST)
-        logger = MultilspyLogger()
-        lsp = PatchedRustAnalyzer(
-            config=config,
-            logger=logger,
-            repository_root_path=self._repository_root,
-            rust_analyzer_bin=self._rust_analyzer_bin,
-        )
+        # Bound to None first so the finally (and the gen-guarded error write
+        # below) are safe even if construction itself raises — see FINDING 2:
+        # PatchedRustAnalyzer(...) is INSIDE the try so a constructor failure
+        # (e.g. a bad rust_analyzer_bin path) also hits the gen-guarded
+        # ``except Exception`` and sets ``state = STATE_ERROR`` instead of
+        # leaving the manager stuck in ``"indexing"`` forever.
+        lsp: PatchedRustAnalyzer | None = None
         try:
+            config = MultilspyConfig(code_language=Language.RUST)
+            logger = MultilspyLogger()
+            lsp = PatchedRustAnalyzer(
+                config=config,
+                logger=logger,
+                repository_root_path=self._repository_root,
+                rust_analyzer_bin=self._rust_analyzer_bin,
+            )
             async with lsp.start_server():
                 # We are now inside the context: indexing is complete (quiescent).
                 if gen != self._generation:
@@ -339,27 +367,37 @@ class AnalyzerManager:
         except asyncio.CancelledError:
             _log.info("AnalyzerManager: background task cancelled")
             raise
-        except Exception:
+        except Exception as exc:
             _log.exception("AnalyzerManager: unexpected error in background task")
+            # Gen-guarded, synchronous (no await between the check and the
+            # writes) so a superseded run can never clobber a newer run's
+            # state with a stale error — mirrors the gen-check above.
+            if gen == self._generation:
+                self.state = STATE_ERROR
+                self._error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
-            # Clear the reference on any exit path so the object is never
-            # reachable after the start_server() context has exited.
-            # Identity-guarded: a superseded run must not clear a newer
-            # run's already-published _lsp.
-            if self._lsp is lsp:
-                self._lsp = None
-            # DS-04: multilspy's start_server() has no try/finally around its
-            # yield; on cancellation mid-__aenter__ (or a pre-yield failure)
-            # its shutdown()/stop() never run and the rust-analyzer process
-            # leaks. server.stop() is multilspy's own idempotent teardown (a
-            # no-op after a normal exit — the process handle is already None).
-            # Covers every cancel window where a process handle exists; the one
-            # residual gap is a cancel landing *inside* multilspy's
-            # create_subprocess_shell before it assigns self.process, which is
-            # not reachable from here (no handle to terminate yet).
-            with contextlib.suppress(Exception):
-                await lsp.server.stop()
+            # If construction failed, lsp is still None — there is no LSP object
+            # to clear or subprocess to stop, so skip the whole teardown.
+            if lsp is not None:
+                # Clear the reference on any exit path so the object is never
+                # reachable after the start_server() context has exited.
+                # Identity-guarded: a superseded run must not clear a newer
+                # run's already-published _lsp.
+                if self._lsp is lsp:
+                    self._lsp = None
+                # DS-04: multilspy's start_server() has no try/finally around
+                # its yield; on cancellation mid-__aenter__ (or a pre-yield
+                # failure) its shutdown()/stop() never run and the
+                # rust-analyzer process leaks. server.stop() is multilspy's own
+                # idempotent teardown (a no-op after a normal exit — the
+                # process handle is already None). Covers every cancel window
+                # where a process handle exists; the one residual gap is a
+                # cancel landing *inside* multilspy's create_subprocess_shell
+                # before it assigns self.process, which is not reachable from
+                # here (no handle to terminate yet).
+                with contextlib.suppress(Exception):
+                    await lsp.server.stop()
 
     # -----------------------------------------------------------------------
     # LSP delegate methods — each guards against not-ready state
@@ -535,6 +573,22 @@ class AnalyzerManager:
         the underlying subprocess (see ``_run`` and DS-04), so this method's
         own await may legitimately take longer than ``DRAIN_TIMEOUT_SECONDS``
         while that teardown completes.
+
+        Failure-swallowing contract (DS-07 recovery path): the outgoing run may
+        have *failed* (raised an ``Exception``) — either before this drain
+        started or during the ``wait_for`` below.  ``wait_for`` RE-RAISES the
+        awaited task's own exception, so we must catch that here and
+        log-and-continue rather than let it propagate: the whole purpose of
+        ``_drain_task`` is to tear the old run down, and its failure must never
+        abort the caller (``restart()`` must still go on to spawn the new run).
+        Were this exception allowed to escape, ``restart()`` would bail out
+        after step 4 — no new task spawned, ``state`` stuck at ``"indexing"``
+        forever, and the errored run's evidence erased — which would break the
+        documented ``status`` → ``refresh`` recovery from ``state == "error"``
+        (it would take a *second* refresh to recover).  ``CancelledError`` is
+        deliberately NOT swallowed here (only ``TimeoutError`` from our own
+        wait_for is handled, via the cancel path); a cancellation of *this*
+        coroutine must still propagate as before.
         """
         self._generation += 1
         self._shutdown_event.set()
@@ -548,10 +602,21 @@ class AnalyzerManager:
                 self._task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._task
+            except asyncio.CancelledError:
+                # Cancellation of *this* drain coroutine — propagate unchanged.
+                raise
+            except Exception as exc:
+                # The outgoing run itself failed during the drain window.
+                # Swallow it (the run is being torn down anyway) so restart()
+                # continues to spawn the replacement run — see the docstring.
+                _log.info("AnalyzerManager: drained failed outgoing run: %r", exc)
         # Drain any stored exception so GC does not warn about an un-retrieved
         # task exception.  This covers: (a) task already done when we arrived,
         # (b) task finished normally during wait_for above, (c) task that was
-        # already cancelled before shutdown was called.
+        # already cancelled before shutdown was called, (d) task that failed and
+        # whose exception we already logged in the except-Exception branch above
+        # (retrieving it here is idempotent — Future.exception() can be read
+        # repeatedly).
         if self._task.done() and not self._task.cancelled():
             exc = self._task.exception()
             if exc is not None:
@@ -621,6 +686,10 @@ class AnalyzerManager:
 
             # Step 2: mark not-ready FIRST so callers see indexing immediately.
             self.state = STATE_INDEXING
+            # refresh (restart()) is the recovery path from an errored
+            # analyzer — clear any stale failure the moment we commit to
+            # re-indexing.
+            self._error = None
 
             # Step 3: forget the old indexed commit — during the re-index window
             # the previous value is no longer what's indexed; None → status
@@ -635,6 +704,7 @@ class AnalyzerManager:
             # its in-flight commit capture (or, pre-generation-check, its own
             # state write) could otherwise have landed during the drain above.
             self.state = STATE_INDEXING
+            self._error = None
             self._indexed_commit = None
 
             # Step 6: fresh events — old ones are spent.

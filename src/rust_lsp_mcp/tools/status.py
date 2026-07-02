@@ -10,18 +10,27 @@ import subprocess
 from typing import Any
 
 from rust_lsp_mcp.core import get_manager, mcp
+from rust_lsp_mcp.doc_store import doc_store_state
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
 
 
 @mcp.tool()
 def status() -> dict[str, Any]:
-    """Return the full 4-field status of the rust-analyzer backend.
+    """Return the full status of the rust-analyzer backend and the doc index.
 
-    Returns an ``ok`` envelope with four fields:
+    Returns an ``ok`` envelope — this tool is always ``ok`` (never
+    ``not_ready``/``error``, even when the analyzer or doc index has failed;
+    failures are reported as *field values*, not as the envelope status):
 
     - ``state``          — ``"indexing"`` while warming up, ``"ready"`` when
-                           the analyzer is live.
+                           the analyzer is live, ``"error"`` if the background
+                           indexing run failed (see ``analyzer_error``).  Gated
+                           tools return an ``error`` envelope (not
+                           ``not_ready``) while ``state == "error"``; call
+                           ``refresh`` to retry.
+    - ``analyzer_error``  — diagnostic message when ``state == "error"``, else
+                           ``null``.
     - ``indexed_commit`` — git HEAD hash captured when indexing began, or
                            ``null`` if not yet captured or git is unavailable.
     - ``current_commit`` — git HEAD hash at call time (``git -C <repo> rev-parse
@@ -34,6 +43,11 @@ def status() -> dict[str, Any]:
                                      (no committed changes since indexing);
                            ``true``  if the commits differ (committed changes
                                      have landed since indexing began).
+    - ``doc_index_state`` — ``"building"``/``"ready"``/``"error"`` for the
+                           documentation search index (independent of
+                           ``state`` above — see ``search_docs``).
+    - ``doc_index_error`` — diagnostic message when ``doc_index_state ==
+                           "error"``, else ``null``.
 
     .. caution::
 
@@ -49,6 +63,7 @@ def status() -> dict[str, Any]:
     mgr = get_manager()
 
     state: str = mgr.state if mgr is not None else "indexing"
+    analyzer_error: str | None = mgr.error_message if mgr is not None else None
     indexed_commit: str | None = mgr.indexed_commit if mgr is not None else None
     repo_root: str = mgr.repository_root if mgr is not None else get_settings().project_root
 
@@ -60,11 +75,16 @@ def status() -> dict[str, Any]:
     else:
         stale = indexed_commit != current_commit
 
+    doc_state, doc_err = doc_store_state()
+
     return ok(
         state=state,
+        analyzer_error=analyzer_error,
         indexed_commit=indexed_commit,
         current_commit=current_commit,
         stale=stale,
+        doc_index_state=doc_state,
+        doc_index_error=doc_err,
     )
 
 

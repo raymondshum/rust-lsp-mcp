@@ -28,8 +28,8 @@ from urllib.parse import unquote, urlparse
 from mcp.server.fastmcp import FastMCP
 from multilspy.multilspy_types import SymbolKind
 
-from rust_lsp_mcp.analyzer import AnalyzerManager, analyzer_lifespan
-from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store
+from rust_lsp_mcp.analyzer import STATE_ERROR, AnalyzerManager, analyzer_lifespan
+from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store_background
 from rust_lsp_mcp.envelope import error, not_ready
 from rust_lsp_mcp.positions import lsp_to_external
 from rust_lsp_mcp.settings import get_settings
@@ -52,10 +52,15 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ign
     async with analyzer_lifespan(app) as ctx:
         _manager = ctx["manager"]
         try:
-            # Doc-store init runs after the analyzer context is up.
-            # Failures are logged and swallowed — nav tools must still work.
+            # Doc-store init runs after the analyzer context is up.  The heavy
+            # (embedding) part is offloaded to a background task by
+            # init_doc_store_background — the lifespan yields immediately
+            # rather than blocking server startup on the doc-index build.
+            # init_doc_store_background never raises, but the try/except is
+            # kept as defense-in-depth (log-and-swallow) so a bug there can
+            # never take down the analyzer/nav tools.
             try:
-                init_doc_store(get_settings())
+                await init_doc_store_background(get_settings())
             except Exception:
                 _log.exception(
                     "doc_store: init failed — search_docs will be unavailable; "
@@ -83,7 +88,7 @@ mcp: FastMCP[dict[str, Any]] = FastMCP(  # type: ignore[type-arg]
 
 
 def require_ready() -> dict[str, Any] | None:
-    """Check whether the analyzer is ready; return a ``not_ready`` envelope or None.
+    """Check whether the analyzer is ready; return a guard envelope or None.
 
     Usage in tools::
 
@@ -92,8 +97,18 @@ def require_ready() -> dict[str, Any] | None:
         # ... proceed with analyzer call ...
 
     Returns:
-        ``not_ready`` envelope dict if the analyzer is not yet ready, else ``None``.
+        An ``error`` envelope if the analyzer's background run failed
+        (``state == "error"`` — permanent until ``refresh`` recovers it), a
+        ``not_ready`` envelope if it is still indexing or the manager has not
+        started, else ``None`` once ready.
     """
+    if _manager is not None and _manager.state == STATE_ERROR:
+        return error(
+            "The analyzer failed to start and cannot serve navigation queries: "
+            f"{_manager.error_message or 'unknown error'}. "
+            "Call the refresh tool to retry, or check the server configuration "
+            "(e.g. RLM_RUST_ANALYZER_BIN)."
+        )
     if _manager is None or not _manager.is_ready:
         return not_ready()
     return None

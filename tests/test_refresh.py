@@ -10,17 +10,31 @@ Test coverage:
           state == "indexing".
         - Non-blocking: refresh returns even though the fake manager's state
           stays "indexing" after restart() (i.e. it does not wait for "ready").
-    Doc-store wiring (Phase 5):
-        - store present and ready → store.rebuild() is called (after restart()).
-        - store None → graceful skip; still returns ok (no crash).
-        - rebuild() is called after restart(), not before.
+    Doc-store wiring (DS-14 recovery path):
+        - store present, healthy → store.rebuild() is called (after restart());
+          init_doc_store is NOT called.
+        - store None → graceful re-init via init_doc_store; still returns ok.
+        - store in "error" state → re-init via init_doc_store (rebuild() is
+          NOT called on the known-broken store).
+        - rebuild()/init_doc_store is called after restart(), not before.
+        - re-init failure → error envelope; restart() still awaited once.
+    End-to-end doc-store recovery (real DocStore, fake embedding function,
+    tmp chroma path): a failed rebuild followed by a successful refresh
+    recovers search_docs from error to ok/not_found.
 """
 
 import asyncio
+import hashlib
+import pathlib
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from rust_lsp_mcp.analyzer import STATE_INDEXING
+import chromadb
+import numpy as np
+import pytest
+
+from rust_lsp_mcp.analyzer import STATE_INDEXING, STATE_READY
+from rust_lsp_mcp.doc_store import DOC_STATE_ERROR
 from rust_lsp_mcp.envelope import STATUS_ERROR, STATUS_OK
 
 # ---------------------------------------------------------------------------
@@ -43,12 +57,23 @@ class _FakeManager:
 
 
 def _run_refresh(manager: Any) -> dict[str, Any]:
-    """Patch core._manager with *manager* and call refresh(); return the envelope."""
+    """Patch core._manager with *manager* and call refresh(); return the envelope.
+
+    Also patches ``refresh_mod.get_doc_store`` to return ``None`` and
+    ``refresh_mod.init_doc_store`` to a no-op MagicMock, so these tests are
+    hermetic regardless of any real doc-store module state left over from
+    other test files (module-level singleton) and never touch a real
+    ChromaDB client.
+    """
     import rust_lsp_mcp.core as core
     import rust_lsp_mcp.tools.refresh as refresh_mod
 
     async def _inner() -> dict[str, Any]:
-        with patch.object(core, "_manager", manager):
+        with (
+            patch.object(core, "_manager", manager),
+            patch.object(refresh_mod, "get_doc_store", return_value=None),
+            patch.object(refresh_mod, "init_doc_store", MagicMock()),
+        ):
             return await refresh_mod.refresh()
 
     return asyncio.run(_inner())
@@ -97,6 +122,47 @@ class TestRefreshHappyPath:
         assert result["message"]  # non-empty polling hint
 
 
+class TestRefreshReturnedStateIsSnapshot:
+    """The returned ``state`` is snapshotted right after ``restart()`` — it must
+    not reflect a live analyzer that readied *during* the blocking doc rebuild.
+
+    Regression for the integration flakiness where a fast warm analyzer re-index
+    reached ``"ready"`` while a cold doc-store embed was still running, so the
+    old ``ok(state=mgr.state)`` at return time yielded a misleading ``"ready"``.
+    """
+
+    def test_state_stays_indexing_when_analyzer_readies_during_doc_rebuild(self) -> None:
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        mgr = _FakeManager()  # state == STATE_INDEXING after restart()
+
+        # A fake healthy store whose rebuild() flips the manager to "ready"
+        # mid-call — simulating the analyzer finishing its warm re-index while
+        # the (blocking) doc-store rebuild runs.
+        store = MagicMock()
+        store.state = "ready"
+
+        def _rebuild_that_readies_analyzer() -> int:
+            mgr.state = STATE_READY
+            return 0
+
+        store.rebuild = _rebuild_that_readies_analyzer
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(refresh_mod, "get_doc_store", return_value=store),
+            ):
+                return await refresh_mod.refresh()
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_OK
+        # Snapshot at restart time, NOT the post-rebuild live state.
+        assert result["state"] == STATE_INDEXING
+        assert mgr.state == STATE_READY  # the analyzer really did ready mid-rebuild
+
+
 class TestRefreshNonBlocking:
     """refresh() must return while the analyzer is still indexing (non-blocking).
 
@@ -117,24 +183,33 @@ class TestRefreshNonBlocking:
 
 
 # ---------------------------------------------------------------------------
-# Doc-store wiring (Phase 5)
+# Doc-store wiring (DS-14 recovery path)
 # ---------------------------------------------------------------------------
 
 
-def _run_refresh_with_store(manager: Any, store: Any) -> dict[str, Any]:
-    """Patch core._manager and refresh module's get_doc_store; call refresh().
+def _run_refresh_with_store(
+    manager: Any, store: Any, init_doc_store_mock: Any = None
+) -> dict[str, Any]:
+    """Patch core._manager and refresh module's get_doc_store/init_doc_store.
 
-    Monkeypatches both:
+    Monkeypatches:
       - ``core._manager`` (as the existing helper does) for get_manager().
       - ``rust_lsp_mcp.tools.refresh.get_doc_store`` to return *store*.
+      - ``rust_lsp_mcp.tools.refresh.init_doc_store`` to *init_doc_store_mock*
+        (defaulting to a no-op MagicMock) so a ``store is None``/errored path
+        never touches a real ChromaDB client.
     """
     import rust_lsp_mcp.core as core
     import rust_lsp_mcp.tools.refresh as refresh_mod
+
+    if init_doc_store_mock is None:
+        init_doc_store_mock = MagicMock()
 
     async def _inner() -> dict[str, Any]:
         with (
             patch.object(core, "_manager", manager),
             patch.object(refresh_mod, "get_doc_store", return_value=store),
+            patch.object(refresh_mod, "init_doc_store", init_doc_store_mock),
         ):
             return await refresh_mod.refresh()
 
@@ -142,10 +217,10 @@ def _run_refresh_with_store(manager: Any, store: Any) -> dict[str, Any]:
 
 
 class TestRefreshDocStoreWiring:
-    """Phase 5: refresh() triggers a doc-store rebuild when the store is present."""
+    """DS-14: refresh() re-initialises an absent/errored store, rebuilds a healthy one."""
 
     def test_store_present_rebuild_called(self) -> None:
-        """When get_doc_store() returns a store, rebuild() must be called."""
+        """When get_doc_store() returns a healthy store, rebuild() must be called."""
         mgr = _FakeManager()
         store = MagicMock()
         store.rebuild.return_value = 42  # number of chunks indexed
@@ -155,7 +230,7 @@ class TestRefreshDocStoreWiring:
         store.rebuild.assert_called_once()
 
     def test_store_present_returns_ok(self) -> None:
-        """Presence of a doc store must not change the ok return status."""
+        """Presence of a healthy doc store must not change the ok return status."""
         mgr = _FakeManager()
         store = MagicMock()
         store.rebuild.return_value = 10
@@ -174,11 +249,15 @@ class TestRefreshDocStoreWiring:
 
         assert result["state"] == STATE_INDEXING
 
-    def test_store_none_no_crash(self) -> None:
-        """When get_doc_store() returns None, refresh must not crash."""
+    def test_store_none_triggers_reinit(self) -> None:
+        """When get_doc_store() returns None, init_doc_store must be called once."""
         mgr = _FakeManager()
-        result = _run_refresh_with_store(mgr, None)
+        init_mock = MagicMock()
+
+        result = _run_refresh_with_store(mgr, None, init_doc_store_mock=init_mock)
+
         assert result["status"] == STATUS_OK
+        init_mock.assert_called_once()
 
     def test_store_none_still_returns_ok(self) -> None:
         """store=None must not degrade the ok envelope — analyzer restart still worked."""
@@ -241,3 +320,161 @@ class TestRefreshDocStoreWiring:
         )
         # restart() must still have been called before the failure
         mgr.restart.assert_awaited_once()
+
+    def test_errored_store_triggers_reinit(self) -> None:
+        """A store in DOC_STATE_ERROR must be re-initialised, not rebuilt in place."""
+        mgr = _FakeManager()
+        store = MagicMock()
+        store.state = DOC_STATE_ERROR
+        init_mock = MagicMock()
+
+        result = _run_refresh_with_store(mgr, store, init_doc_store_mock=init_mock)
+
+        assert result["status"] == STATUS_OK
+        init_mock.assert_called_once()
+        store.rebuild.assert_not_called()
+
+    def test_healthy_store_does_not_reinit(self) -> None:
+        """A healthy store must be rebuilt in place — init_doc_store must NOT be called."""
+        mgr = _FakeManager()
+        store = MagicMock()
+        store.state = "ready"
+        init_mock = MagicMock()
+
+        result = _run_refresh_with_store(mgr, store, init_doc_store_mock=init_mock)
+
+        assert result["status"] == STATUS_OK
+        store.rebuild.assert_called_once()
+        init_mock.assert_not_called()
+
+    def test_reinit_failure_returns_error_envelope(self) -> None:
+        """init_doc_store raising must produce an error envelope, not propagate.
+
+        restart() must still have been awaited exactly once before the failure —
+        the analyzer re-index is not rolled back by a doc-store failure.
+        """
+        mgr = _FakeManager()
+        init_mock = MagicMock(side_effect=RuntimeError("chroma path unwritable"))
+
+        result = _run_refresh_with_store(mgr, None, init_doc_store_mock=init_mock)
+
+        assert result["status"] == STATUS_ERROR
+        assert "chroma path unwritable" in result["message"]
+        mgr.restart.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# End-to-end doc-store recovery: real DocStore, fake embedding function.
+# ---------------------------------------------------------------------------
+
+
+def _hash_vec(text: str, dim: int = 8) -> "np.ndarray":  # type: ignore[type-arg]
+    """Produce a deterministic unit-range float32 array from text via MD5."""
+    digest = hashlib.md5(text.encode()).digest()
+    floats = [(digest[i % len(digest)] / 255.0) * 2.0 - 1.0 for i in range(dim)]
+    return np.array(floats, dtype=np.float32)
+
+
+class FakeEmbeddingFunction(chromadb.api.types.EmbeddingFunction[chromadb.api.types.Documents]):
+    """Deterministic fake EF: identical text always produces identical vector.
+
+    Mirrors tests/test_doc_store.py's FakeEmbeddingFunction — implements the
+    full chromadb 1.5.9 EF protocol so it works with both ``add`` and
+    ``query`` (unlike a bare callable, which chromadb's query path requires
+    ``embed_query`` on).
+    """
+
+    def __init__(self) -> None:
+        pass
+
+    def __call__(self, input: chromadb.api.types.Documents) -> chromadb.api.types.Embeddings:
+        return [_hash_vec(doc) for doc in input]
+
+    @staticmethod
+    def name() -> str:
+        return "fake-deterministic-refresh"
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> "FakeEmbeddingFunction":
+        return FakeEmbeddingFunction()
+
+    def get_config(self) -> dict[str, Any]:
+        return {}
+
+    @staticmethod
+    def validate_config(config: dict[str, Any]) -> None:
+        pass
+
+
+class TestRefreshEndToEndDocStoreRecovery:
+    """A failed doc-store build followed by refresh() recovers to a working store."""
+
+    def test_failed_build_then_refresh_recovers(self, tmp_path: pathlib.Path) -> None:
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.doc_store as doc_store_mod
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+        import rust_lsp_mcp.tools.search_docs as search_mod
+        from rust_lsp_mcp.envelope import STATUS_NOT_FOUND
+        from rust_lsp_mcp.settings import Settings
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir(parents=True, exist_ok=True)
+        (corpus / "guide.md").write_text(
+            "# Guide\n\nThis explains how to use the tool.\n", encoding="utf-8"
+        )
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md",
+        )
+        ef = FakeEmbeddingFunction()
+
+        doc_store_mod.clear_doc_store()
+        store = doc_store_mod.DocStore(settings, embedding_function=ef)
+
+        # First rebuild fails (monkeypatch chunk_markdown to raise).
+        with (
+            patch.object(doc_store_mod, "chunk_markdown", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            store.rebuild()
+
+        assert store.state == DOC_STATE_ERROR
+
+        async def _search(target_store: Any) -> dict[str, Any]:
+            with patch.object(search_mod, "get_doc_store", return_value=target_store):
+                return await search_mod.search_docs(query="guide")
+
+        result = asyncio.run(_search(store))
+        assert result["status"] == STATUS_ERROR
+
+        # Now refresh — patched manager/settings; init_doc_store is bound to
+        # inject the offline fake embedding function so the errored-store
+        # recovery branch runs for real against the same tmp chroma/corpus.
+        mgr = _FakeManager()
+
+        def _init_with_fake_ef(s: Settings) -> doc_store_mod.DocStore:
+            return doc_store_mod.init_doc_store(s, embedding_function=ef)
+
+        async def _do_refresh() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(refresh_mod, "get_doc_store", return_value=store),
+                patch.object(refresh_mod, "get_settings", return_value=settings),
+                patch.object(refresh_mod, "init_doc_store", _init_with_fake_ef),
+            ):
+                return await refresh_mod.refresh()
+
+        refresh_result = asyncio.run(_do_refresh())
+        assert refresh_result["status"] == STATUS_OK
+
+        # The refresh path called init_doc_store, which set a NEW singleton in
+        # doc_store module — fetch it directly to confirm recovery.
+        recovered_store = doc_store_mod.get_doc_store()
+        assert recovered_store is not None
+        assert recovered_store.is_ready is True
+
+        recovered_result = asyncio.run(_search(recovered_store))
+        assert recovered_result["status"] in (STATUS_OK, STATUS_NOT_FOUND)
+
+        doc_store_mod.clear_doc_store()
