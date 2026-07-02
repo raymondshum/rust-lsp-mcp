@@ -60,8 +60,8 @@ session at already-done work is worse than no handoff.
        logic subagents when Fable is unavailable (Sonnet's role unchanged).
      - *Bob custom-modes* (when driving under the Bob harness): the Orchestrator + `build`/`review`/`qa`/
        `adversarial` modes in `.bob/custom_modes.yaml`, **sequential** delegation, per
-       [docs/handoff/roles.md](../../../docs/handoff/roles.md) and the
-       [continue-build](../continue-build/SKILL.md) playbook.
+       [docs/handoff/roles.md](../../../docs/handoff/roles.md) and the `continue-build` playbook
+       (`.bob/skills/continue-build/SKILL.md` — `bob_prototype` only).
      Either way the gate sequence is the [implementation cycle](../../../docs/conventions/implementation-cycle.md):
      Orient → (gate-zero once) → pick → build → review → QA → adversarial → PR+record; one unit per pass,
      stop for human review. Research policy is Context7-first
@@ -80,8 +80,8 @@ session at already-done work is worse than no handoff.
 4. **Produce the paste-ready kickoff prompt** — a chat message (in a fenced ```text block) the user can paste
    to seed the next session. It states the goal, says **read the durable handoff doc first** (by path) as
    authoritative, names what's left + the recommended start, restates the model/orchestration prefs compactly,
-   and lists the top gotchas / don't-retry. If a companion goal command exists (e.g.
-   [resolve-defect-sweep](../resolve-defect-sweep/SKILL.md)), name it as the kickoff. Keep it self-contained
+   and lists the top gotchas / don't-retry. If a companion goal command exists (e.g. the
+   `resolve-defect-sweep` skill, `bob_prototype` only), name it as the kickoff. Keep it self-contained
    but lean — the detail lives in the committed doc.
 
 5. **Surface both.** Print the handoff-doc path and the kickoff prompt for review. Reconcile any stale status
@@ -118,10 +118,16 @@ Full suite: `uv run --frozen pytest`.
 `main → bob_prototype` via cherry-pick (see the [branch-flow rule](../../../docs/impl/known-issues.md) and
 project memory). Apply it to where the handoff artifacts land:
 
-- **Bob-harness scaffolding** — anything under `.bob/` (skills, modes) and effort-continuity docs that
-  reference it — is **`bob_prototype`-only**. Commit directly to `bob_prototype`; do **not** cherry-pick to
-  `main` (`.bob/` does not exist there). Handoff docs under `docs/handoff/` that seed a `bob_prototype`
-  effort ride the same rule.
+- **Handoff docs under `docs/handoff/` are `main`-first** (owner's directive, 2026-07-02): a next-session
+  seed and its `index.md` entry are general reference docs — branch off `origin/main`, PR to `main`, then
+  cherry-pick onto `bob_prototype`, so the handoff is discoverable and usable on the canonical branch. When a
+  handoff links a `bob_prototype`-only target (a `.bob/` skill, `AGENTS.md`, `custom_modes.yaml`, or a prior
+  `bob_prototype`-only seed), render that pointer as **plain text noting the branch**, not a relative link, so
+  the `main` copy has no dangling links. This skill itself lives on `main` at
+  `.bob/skills/session-handoff/SKILL.md` (the one `.bob/` file mirrored to `main`).
+- **Bob-harness scaffolding** — the *rest* of `.bob/` (custom modes, the other skills like `resolve-defect-sweep`
+  / `continue-build`, `AGENTS.md`) stays **`bob_prototype`-only**: commit directly to `bob_prototype`; do **not**
+  cherry-pick it to `main`.
 - **General code / reference docs** (`src/`, `tests/`, `docs/security/` audits, `docs/guide/`, `Dockerfile`,
   `scripts/`) go **`main`-first**: branch off `origin/main`, commit, open a PR against `main`, then
   cherry-pick onto `bob_prototype`. Never merge `bob_prototype → main`.

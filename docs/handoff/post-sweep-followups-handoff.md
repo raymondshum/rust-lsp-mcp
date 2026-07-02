@@ -8,10 +8,11 @@ producing session surfaced).
 - **Tracker:** GitHub issues **#87–#92** (label `followup-2026-07-02`).
 - **Living register:** [docs/impl/known-issues.md](../impl/known-issues.md) — **KI-9** (= #87) and **KI-8**
   (a separate open decision) live here.
-- **Origin:** these items were flagged (out of scope) during the defect-sweep resolution — see
-  [defect-sweep-resolution-handoff.md](defect-sweep-resolution-handoff.md) and the audit
-  [docs/security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md). That effort is
-  **complete** (all 28 findings DS-01…DS-28 resolved, issues #45–#63 closed).
+- **Origin:** these items were flagged (out of scope) during the defect-sweep resolution — evidence in the
+  audit [docs/security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md) (all rows ✅). That
+  effort's own session seed (`docs/handoff/defect-sweep-resolution-handoff.md`) lives on the `bob_prototype`
+  branch only. The resolution effort is **complete** (all 28 findings DS-01…DS-28 resolved, issues #45–#63
+  closed).
 
 ## Where we are
 
@@ -86,7 +87,7 @@ ripgrep + `HOME=/home/vscode` for the baked model cache), with named volumes for
 | Follow-up tracker | GitHub issues #87–#92 (`gh issue view <n>`) |
 | Living register (KI-8, KI-9) | `docs/impl/known-issues.md` |
 | Origin audit (context) | `docs/security/defect-sweep-2026-07-01.md` (all rows ✅) |
-| Prior effort's handoff | `docs/handoff/defect-sweep-resolution-handoff.md` |
+| Prior effort's handoff | `docs/handoff/defect-sweep-resolution-handoff.md` (`bob_prototype` only) |
 | KI-9 target | `src/rust_lsp_mcp/analyzer.py` (`request_*` delegates, `_run`, `restart`, `_drain_task`) |
 | Prod-image targets | `Dockerfile`, `.github/workflows/ci.yml`, `tests/test_infra_scripts.py` |
 | Chunker target | `src/rust_lsp_mcp/doc_chunking.py` |
