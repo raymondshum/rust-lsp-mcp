@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import threading
 from typing import Any
 from unittest.mock import patch
 
@@ -29,7 +30,9 @@ import pytest
 from chromadb.config import Settings as ChromaSettings
 
 from rust_lsp_mcp.doc_store import (
+    DOC_STATE_BUILDING,
     DocStore,
+    DocStoreNotReady,
     clear_doc_store,
     get_doc_store,
     init_doc_store,
@@ -313,16 +316,22 @@ class TestDocStoreSearch:
         for result in results:
             assert result["breadcrumb"], "Breadcrumb should not be empty"
 
-    def test_search_before_rebuild_returns_empty(self, tmp_path: pathlib.Path) -> None:
-        """search() before any rebuild returns [] (collection is None)."""
+    def test_search_before_rebuild_raises_not_ready(self, tmp_path: pathlib.Path) -> None:
+        """search() before any rebuild raises DocStoreNotReady (collection is None).
+
+        Contract change (DS-12): previously this returned [] (a misleading
+        "empty" answer indistinguishable from a genuinely empty collection).
+        Now it raises DocStoreNotReady so callers (search_docs) can
+        distinguish "not ready yet" from "ready and genuinely empty".
+        """
         corpus = tmp_path / "corpus"
         _write_corpus(corpus)
         settings = _make_settings(tmp_path, corpus)
         store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
 
         # No rebuild called yet.
-        results = store.search("anything")
-        assert results == []
+        with pytest.raises(DocStoreNotReady):
+            store.search("anything")
 
     def test_search_n_results_clamped(self, tmp_path: pathlib.Path) -> None:
         """n_results larger than collection size is clamped, not an error."""
@@ -335,6 +344,223 @@ class TestDocStoreSearch:
         # Request far more results than chunks exist.
         results = store.search("anything", n_results=count + 1000)
         assert len(results) <= count
+
+
+# ---------------------------------------------------------------------------
+# DS-12: search()/rebuild() atomic-snapshot race regression tests.
+# ---------------------------------------------------------------------------
+
+
+class TestDS12ReadWriteRace:
+    """Regression tests for the DS-12 refresh/search race.
+
+    A fast-path ``is_ready`` check on the event loop followed by an
+    ``await run_sync(store.search)`` on a worker thread left a window where a
+    concurrent ``rebuild()`` could flip ``state``/``_collection`` mid-search,
+    producing a misleading empty/partial/errored result.  These tests exercise
+    the fix: ``search()`` takes an atomic snapshot under ``_read_lock`` and
+    raises ``DocStoreNotReady`` instead.
+    """
+
+    def test_search_raises_when_state_building(self, tmp_path: pathlib.Path) -> None:
+        """search() on a store with _state=BUILDING raises DocStoreNotReady."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+        assert store.is_ready is True
+
+        # Simulate "mid-rebuild": force state back to BUILDING without
+        # touching _collection (mirrors the moment right after the start
+        # transition, before _collection is cleared is irrelevant here — the
+        # state check alone must be sufficient to reject).
+        store._state = DOC_STATE_BUILDING
+
+        with pytest.raises(DocStoreNotReady):
+            store.search("anything")
+
+    def test_search_raises_when_collection_none(self, tmp_path: pathlib.Path) -> None:
+        """search() with _collection=None raises DocStoreNotReady even if
+        _state were (incorrectly) READY — belt-and-suspenders on the guard.
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+        assert store.is_ready is True
+
+        store._collection = None
+
+        with pytest.raises(DocStoreNotReady):
+            store.search("anything")
+
+    def test_search_on_ready_store_returns_results(self, tmp_path: pathlib.Path) -> None:
+        """search() on a genuinely ready store still returns results normally."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+
+        results = store.search("ignore files", n_results=3)
+        assert isinstance(results, list)
+        assert len(results) > 0
+
+    def test_rebuild_keeps_collection_none_until_publish(self, tmp_path: pathlib.Path) -> None:
+        """_rebuild_locked must not assign self._collection until the end
+        transition — a patched create_collection/add observes self._collection
+        is None throughout the entire build body.
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+
+        observed_during_create: list[Any] = []
+        observed_during_add: list[Any] = []
+
+        orig_create_collection = store._client.create_collection
+
+        def _patched_create_collection(*args: Any, **kwargs: Any) -> Any:
+            observed_during_create.append(store._collection)
+            collection = orig_create_collection(*args, **kwargs)
+            orig_add = collection.add
+
+            def _patched_add(*a: Any, **kw: Any) -> Any:
+                observed_during_add.append(store._collection)
+                return orig_add(*a, **kw)
+
+            collection.add = _patched_add  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+            return collection
+
+        with patch.object(store._client, "create_collection", _patched_create_collection):
+            store.rebuild()
+
+        assert observed_during_create == [None]
+        assert observed_during_add, "add() was never called (corpus should be non-empty)"
+        assert all(c is None for c in observed_during_add)
+        # After the rebuild completes, the collection is published.
+        assert store._collection is not None
+        assert store.is_ready is True
+
+    def test_concurrent_rebuild_pauses_search_sees_not_ready(self, tmp_path: pathlib.Path) -> None:
+        """Real 2-thread transition-visibility test: once a rebuild() has
+        completed its start transition (state=BUILDING, collection=None) and
+        released _read_lock, a concurrent search() OBSERVES that transition and
+        raises DocStoreNotReady rather than returning a misleading
+        empty/partial result.  (The complementary lock-mutual-exclusion
+        property — that search holding _read_lock blocks the start transition —
+        is covered by test_concurrent_search_blocks_rebuild_start_transition.)
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+        assert store.is_ready is True
+
+        rebuild_paused = threading.Event()
+        release_rebuild = threading.Event()
+
+        orig_create_collection = store._client.create_collection
+
+        def _patched_create_collection(*args: Any, **kwargs: Any) -> Any:
+            # By the time create_collection is called, the start transition
+            # (state=BUILDING, collection=None, delete_collection) has already
+            # completed and _read_lock has been released.
+            rebuild_paused.set()
+            assert release_rebuild.wait(timeout=5), "test deadlocked waiting for release"
+            return orig_create_collection(*args, **kwargs)
+
+        rebuild_result: dict[str, Any] = {}
+
+        def _run_rebuild() -> None:
+            with patch.object(store._client, "create_collection", _patched_create_collection):
+                rebuild_result["count"] = store.rebuild()
+
+        rebuild_thread = threading.Thread(target=_run_rebuild)
+        rebuild_thread.start()
+        try:
+            assert rebuild_paused.wait(timeout=5), "rebuild never reached the paused point"
+
+            with pytest.raises(DocStoreNotReady):
+                store.search("anything")
+        finally:
+            release_rebuild.set()
+            rebuild_thread.join(timeout=5)
+            assert not rebuild_thread.is_alive(), "rebuild thread did not finish"
+
+        assert store.is_ready is True
+        assert rebuild_result["count"] > 0
+
+    def test_concurrent_search_blocks_rebuild_start_transition(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """A search() holding _read_lock mid-query blocks a concurrent
+        rebuild's start transition until the search finishes — the search
+        must see a consistent (not half-deleted) collection and return
+        results, never a NotFoundError from a collection deleted underneath it.
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+        assert store.is_ready is True
+
+        query_started = threading.Event()
+        release_query = threading.Event()
+
+        collection = store._collection
+        orig_query = collection.query
+
+        def _patched_query(*args: Any, **kwargs: Any) -> Any:
+            query_started.set()
+            assert release_query.wait(timeout=5), "test deadlocked waiting for release"
+            return orig_query(*args, **kwargs)
+
+        search_result: dict[str, Any] = {}
+
+        def _run_search() -> None:
+            with patch.object(collection, "query", _patched_query):
+                search_result["results"] = store.search("ignore files", n_results=3)
+
+        search_thread = threading.Thread(target=_run_search)
+        search_thread.start()
+        try:
+            assert query_started.wait(timeout=5), "search never reached the paused point"
+
+            # Start a rebuild concurrently — its start transition (which
+            # deletes the collection) must block until the search above
+            # releases _read_lock.
+            rebuild_result: dict[str, Any] = {}
+            rebuild_thread = threading.Thread(
+                target=lambda: rebuild_result.__setitem__("count", store.rebuild())
+            )
+            rebuild_thread.start()
+            try:
+                # Give the rebuild thread a moment to attempt (and block on)
+                # _read_lock; the search must still be holding it.
+                rebuild_thread.join(timeout=0.3)
+                assert rebuild_thread.is_alive(), (
+                    "rebuild should still be blocked on _read_lock while search holds it"
+                )
+            finally:
+                release_query.set()
+                rebuild_thread.join(timeout=5)
+                assert not rebuild_thread.is_alive(), "rebuild thread did not finish"
+        finally:
+            search_thread.join(timeout=5)
+            assert not search_thread.is_alive(), "search thread did not finish"
+
+        # The search that was in flight during the rebuild's attempted start
+        # must have returned consistent, real results — not an exception from
+        # a collection deleted underneath it.
+        assert search_result["results"], "search must have returned real results"
+        assert rebuild_result["count"] > 0
+        assert store.is_ready is True
 
 
 # ---------------------------------------------------------------------------
