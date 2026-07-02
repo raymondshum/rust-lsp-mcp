@@ -6,6 +6,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
+from rust_lsp_mcp.analyzer import AnalyzerTornDownError
 from rust_lsp_mcp.core import (
     get_manager,
     location_to_external,
@@ -13,7 +14,7 @@ from rust_lsp_mcp.core import (
     require_ready,
     validate_workspace_file,
 )
-from rust_lsp_mcp.envelope import error, not_found, ok
+from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
@@ -125,6 +126,11 @@ async def find_references(
     # Step 5: request references from the live analyzer.
     try:
         refs = await mgr.request_references(file, pos.line, pos.character)
+    except AnalyzerTornDownError:
+        return not_ready(
+            "The analyzer was restarted or shut down while this request was in flight. "
+            "Retry after analyzer_status reports ready."
+        )
     except Exception as exc:
         _log.exception("find_references: LSP error for %r at (%d, %d)", file, line, character)
         return error(f"LSP error: {exc}")
@@ -154,6 +160,11 @@ async def find_references(
     if include_declaration:
         try:
             defs = await mgr.request_definition(file, pos.line, pos.character)
+        except AnalyzerTornDownError:
+            return not_ready(
+                "The analyzer was restarted or shut down while this request was in flight. "
+                "Retry after analyzer_status reports ready."
+            )
         except Exception as exc:
             _log.exception(
                 "find_references: LSP error fetching definition for %r at (%d, %d)",
