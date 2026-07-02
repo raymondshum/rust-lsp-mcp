@@ -282,7 +282,15 @@ def _same_result_set(a: list[dict[str, Any]], b: list[dict[str, Any]], tol: floa
     within a small floating-point tolerance (real ONNX inference is
     deterministic for identical input text, but exact bit-for-bit float
     equality across two independently-computed embedding batches is not
-    guaranteed, e.g. multi-threaded reduction order)."""
+    guaranteed, e.g. multi-threaded reduction order).
+
+    Safety margin: strict order/membership equality across two INDEPENDENT
+    chroma builds is deterministic only because the total chunk count (~64
+    from the 32-doc corpus) stays under the default HNSW ef_search=100, so
+    the search is effectively exact — chromadb 1.5.9 builds the HNSW graph
+    multi-threaded and can reorder near-neighbours otherwise.  If
+    ``_RACE_CORPUS_SIZE`` or chunks-per-doc ever push past ef_search, this
+    check becomes approximate/flaky."""
     if len(a) != len(b):
         return False
     for ra, rb in zip(a, b, strict=True):
@@ -328,10 +336,9 @@ def test_search_during_live_rebuild_returns_not_ready_never_partial(
     steady_state = store.search(query, n_results=5)
     assert steady_state, "expected non-empty steady-state results for the race query"
 
-    async def _scenario() -> tuple[bool, bool]:
+    async def _scenario() -> bool:
         rebuild_task: asyncio.Task[int] = asyncio.create_task(asyncio.to_thread(store.rebuild))
         observed_not_ready = False
-        observed_ok = False
         deadline = time.monotonic() + 60
 
         try:
@@ -341,7 +348,17 @@ def test_search_during_live_rebuild_returns_not_ready_never_partial(
                 except DocStoreNotReady:
                     observed_not_ready = True
                     continue
-                observed_ok = True
+                # An in-loop ok observation is best-effort telemetry only —
+                # deliberately NOT asserted on: both windows that could yield
+                # one are missable under load (the rebuild's start transition
+                # can win the threadpool race before the first search reads
+                # READY, and the loop can see rebuild_task.done() before
+                # issuing another search after the end transition).  The
+                # pre-rebuild ``steady_state`` search above and the post-race
+                # ``final_results`` search below already prove the ok path;
+                # asserting an in-loop ok would reintroduce a load-sensitive
+                # spurious failure.  What IS load-bearing here: any ok that
+                # DOES land mid-loop must equal the steady state.
                 assert _same_result_set(result, steady_state), (
                     "search() returned a result set during a live rebuild "
                     "that differs from the steady state — a partial/"
@@ -353,9 +370,9 @@ def test_search_during_live_rebuild_returns_not_ready_never_partial(
             # regardless of how the polling loop above exited.
             await rebuild_task
 
-        return observed_not_ready, observed_ok
+        return observed_not_ready
 
-    observed_not_ready, observed_ok = anyio.run(_scenario)
+    observed_not_ready = anyio.run(_scenario)
 
     if not observed_not_ready:
         pytest.skip(
@@ -365,11 +382,6 @@ def test_search_during_live_rebuild_returns_not_ready_never_partial(
             "could interleave); DS-12 is still guarded by the fake-tier "
             "TestDS12ReadWriteRace tests in test_doc_store.py"
         )
-    assert observed_ok, (
-        "expected at least one search() call to also observe a complete ok "
-        "response (either before the rebuild's start transition or after "
-        "its end transition)"
-    )
 
     # Final sanity: the store is ready and consistent after the race.
     assert store.is_ready is True
@@ -397,20 +409,22 @@ def test_concurrent_refreshes_serialize_live() -> None:
     already-shut-down manager, which would require a cross-test-function
     shared fixture and re-introduce a full re-index anyway once shut down).
     Paying that cost would push this unit over its runtime budget for a
-    "cheap bonus" test.  DS-21's core serialization invariant (exactly one
-    live lifecycle task/process survives two overlapping restart() calls) is
-    fully covered live by ``test_refresh_during_live_indexing_recovers``
-    above for a SINGLE restart, and covered for the CONCURRENT case by the
-    fake-tier ``test_lifecycle_races.py::TestConcurrentRestart`` (which is
-    where the fake-vs-real drift risk for the locking/serialization logic
-    itself — as opposed to real subprocess timing — would show up first).
+    "cheap bonus" test.  Coverage split: the single-restart survivor
+    invariant (one live analyzer process after a restart-during-indexing,
+    the DS-03/04 half) is covered live by
+    ``test_refresh_during_live_indexing_recovers`` above; the
+    concurrent-serialization case — DS-21's actual point (two overlapping
+    restart() calls queueing behind the lifecycle lock) — stays fake-guarded
+    by ``test_lifecycle_races.py::TestConcurrentRestart``, which is where the
+    drift risk for the locking/serialization logic itself — as opposed to
+    real subprocess timing — would show up first.
     """
     pytest.skip(
         "skipped: a live concurrent-restart test needs a second full "
         "rust-analyzer index cycle beyond what "
         "test_refresh_during_live_indexing_recovers already pays for in "
-        "this gate; DS-21 serialization is covered live (single restart) "
-        "above and against fakes by test_lifecycle_races.py::"
-        "TestConcurrentRestart. See this test's docstring for the full "
-        "rationale."
+        "this gate; the single-restart survivor invariant is covered live "
+        "above, and the concurrent-serialization case (DS-21's point) stays "
+        "fake-guarded by test_lifecycle_races.py::TestConcurrentRestart. "
+        "See this test's docstring for the full rationale."
     )
