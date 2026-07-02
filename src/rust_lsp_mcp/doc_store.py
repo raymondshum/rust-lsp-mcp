@@ -284,11 +284,15 @@ class DocStore:
 
         # Handle empty corpus without crashing.
         if total == 0:
-            # Write completion sentinel so the adopt branch recognises an
-            # intentionally-empty corpus as a completed (not interrupted) build.
-            # project_root is stamped alongside it (DS-05) — modify() REPLACES
-            # metadata wholesale (verified against chromadb 1.5.9), so both keys
-            # must be written together in one call.
+            # Write completion sentinel so the adopt branch (DS-24) recognises
+            # an intentionally-empty corpus as a completed (not interrupted)
+            # build and ADOPTS it on the next startup instead of rebuilding
+            # every time — the adopt gate no longer requires count() > 0 (a
+            # count-0 collection can never satisfy that), it relies solely on
+            # this sentinel + the project_root fingerprint below. project_root
+            # is stamped alongside it (DS-05) — modify() REPLACES metadata
+            # wholesale (verified against chromadb 1.5.9), so both keys must be
+            # written together in one call.
             collection.modify(
                 metadata={"build_complete": True, "project_root": project_fingerprint}
             )
@@ -438,14 +442,25 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
     """Attempt to adopt an existing, fully-built ChromaDB collection onto *store*.
 
     Cheap (no embedding work): a single ``get_collection`` metadata check.
-    "Build once" persistence: if the ChromaDB collection already exists with
-    >0 items, was built for the SAME ``project_root`` (DS-05 identity check),
-    and carries the build-complete sentinel, adopt it (``store._collection``
-    and ``store._state = DOC_STATE_READY``) and return ``True`` WITHOUT
+    "Build once" persistence: if the ChromaDB collection was built for the
+    SAME ``project_root`` (DS-05 identity check) and carries the
+    build-complete sentinel, adopt it (``store._collection`` and
+    ``store._state = DOC_STATE_READY``) and return ``True`` WITHOUT
     re-embedding.  Returns ``False`` on any failure to adopt (not found,
     interrupted build, cross-project mismatch, or an unexpected exception) —
     mirroring the original ``init_doc_store``'s fall-through-to-rebuild
     behaviour exactly.
+
+    DS-24: the adopt gate deliberately does NOT require ``count() > 0``.
+    ``build_complete`` is written ONLY at successful ``rebuild()`` completion
+    (both the empty-corpus path and the populated path — see
+    ``_rebuild_locked``), so the sentinel alone (plus the project fingerprint)
+    is the reliable "complete + same project" marker; an interrupted build
+    (rows written, process killed before the sentinel) still correctly lacks
+    the sentinel and falls through to rebuild below regardless of row count.
+    Requiring ``count() > 0`` would make an intentionally-empty completed
+    corpus (0 markdown files matched the glob) impossible to ever adopt — it
+    would rebuild on every single startup even though nothing changed.
 
     Args:
         store: The just-constructed :class:`DocStore` to adopt onto.
@@ -470,11 +485,8 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
         existing = store._client.get_collection(settings.doc_collection, **get_kwargs)
         meta = existing.metadata or {}
         existing_project_root = meta.get("project_root")
-        if (
-            existing.count() > 0
-            and meta.get("build_complete")
-            and existing_project_root == current_fingerprint
-        ):
+        build_complete = bool(meta.get("build_complete"))
+        if build_complete and existing_project_root == current_fingerprint:
             _log.info(
                 "doc_store: adopting existing collection (%d chunks) — skipping rebuild",
                 existing.count(),
@@ -491,7 +503,7 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
                 store._collection = existing
                 store._state = DOC_STATE_READY
             return True
-        if existing.count() > 0 and meta.get("build_complete"):
+        if build_complete:
             # Sentinel present but built for a different project_root (or a
             # pre-DS-05 collection with no project_root at all, which compares
             # unequal to current_fingerprint and is safely treated the same
@@ -509,7 +521,9 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
                 " (interrupted build) — will rebuild",
                 existing.count(),
             )
-        # count() == 0 with no sentinel also falls through to rebuild.
+        # count() == 0 with no sentinel (never built, or an interrupted build
+        # that was killed before writing any rows) also falls through to
+        # rebuild.
         return False
     except NotFoundError:
         # No existing collection — will rebuild below.
@@ -557,12 +571,14 @@ def init_doc_store(settings: Settings, embedding_function: Any | None = None) ->
     startup any more; see ``init_doc_store_background`` for the non-blocking
     entry point.
 
-    "Build once" persistence: if the ChromaDB collection already exists with
-    >0 items, was built for the SAME ``project_root`` (DS-05 identity check),
-    and carries the build-complete sentinel, adopt it and mark ready WITHOUT
-    re-embedding.  Otherwise rebuild from scratch.  This avoids re-embedding on
-    every server restart when the bind-mount data is already populated, while
-    refusing to silently serve a previous project's docs when
+    "Build once" persistence: if the ChromaDB collection already exists, was
+    built for the SAME ``project_root`` (DS-05 identity check), and carries
+    the build-complete sentinel, adopt it and mark ready WITHOUT re-embedding
+    — this includes an intentionally-empty completed corpus (DS-24: the
+    sentinel, not row count, is what marks a build "complete"; see
+    ``_try_adopt``).  Otherwise rebuild from scratch.  This avoids
+    re-embedding on every server restart when the bind-mount data is already
+    populated, while refusing to silently serve a previous project's docs when
     ``RLM_PROJECT_ROOT`` is repointed at a different project but the same
     ``chroma_path``/``doc_collection`` (the documented shared-volume,
     repo-agnostic flow).

@@ -436,6 +436,18 @@ class AnalyzerManager:
         Returns the flat list of symbols (element [0] of the tuple returned by
         multilspy); the tree representation (element [1]) is discarded.
 
+        DS-20: multilspy 0.0.15 asserts ``isinstance(response, list)`` inside
+        ``request_document_symbols`` and RAISES ``AssertionError`` on a
+        JSON-RPC ``null`` response (e.g. an empty/unrecognised file) instead of
+        returning ``None`` — so, unlike the docstring below's ``if result is
+        None`` branch, that branch is never actually reached for the null
+        case; it is retained only as a harmless defensive fallback.  We mirror
+        ``request_definition``/``request_references``: catch the
+        ``AssertionError`` and use ``_is_null_response_assertion`` to tell a
+        legitimate null response (→ ``[]``, a file with no symbols is a valid
+        answer) from a malformed non-null payload (→ re-raise, a genuine
+        protocol failure that must surface as ``error``).
+
         Raises:
             RuntimeError: If the manager is not in the ready state.
         """
@@ -444,7 +456,12 @@ class AnalyzerManager:
                 "request_document_symbols called before analyzer is ready — "
                 "call require_ready() first"
             )
-        result = await self._lsp.request_document_symbols(relative_file_path)
+        try:
+            result = await self._lsp.request_document_symbols(relative_file_path)
+        except AssertionError as exc:
+            if _is_null_response_assertion(exc):
+                return []
+            raise
         if result is None:
             return []
         return result[0]

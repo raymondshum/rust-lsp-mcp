@@ -119,9 +119,9 @@ async def _call_hover(
         return await hover(file, line, character)
 
 
-def _call_status(manager: AnalyzerManager) -> dict[str, Any]:
+async def _call_status(manager: AnalyzerManager) -> dict[str, Any]:
     with patch.object(core, "_manager", manager):
-        return status()
+        return await status()
 
 
 async def _call_refresh(manager: AnalyzerManager) -> dict[str, Any]:
@@ -336,7 +336,7 @@ async def _run_phase34_all(settings) -> dict[str, Any]:
         # ------------------------------------------------------------------
         # 6. status: while ready → ok, state=="ready", real hashes, stale==False
         # ------------------------------------------------------------------
-        status_result = _call_status(manager)
+        status_result = await _call_status(manager)
         assert status_result["status"] == STATUS_OK
         assert status_result["state"] == STATE_READY
 
@@ -367,7 +367,7 @@ async def _run_phase34_all(settings) -> dict[str, Any]:
         )
 
         # While re-indexing: indexed_commit should be None (honest unknown)
-        status_mid = _call_status(manager)
+        status_mid = await _call_status(manager)
         results["status_mid_refresh_state"] = status_mid["state"]
         results["status_mid_refresh_indexed_commit"] = status_mid["indexed_commit"]
         # state could still be indexing or could have advanced — just confirm ok
@@ -385,7 +385,7 @@ async def _run_phase34_all(settings) -> dict[str, Any]:
         )
 
         # indexed_commit is repopulated after recovery
-        status_post = _call_status(manager)
+        status_post = await _call_status(manager)
         assert status_post["status"] == STATUS_OK
         assert status_post["state"] == STATE_READY
         assert status_post["indexed_commit"] is not None, (

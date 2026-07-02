@@ -6,6 +6,7 @@ This tool is UNGATED (it is the readiness check itself) and never returns
 ``not_ready``.
 """
 
+import asyncio
 import subprocess
 from typing import Any
 
@@ -16,7 +17,7 @@ from rust_lsp_mcp.settings import get_settings
 
 
 @mcp.tool()
-def status() -> dict[str, Any]:
+async def status() -> dict[str, Any]:
     """Return the full status of the rust-analyzer backend and the doc index.
 
     Returns an ``ok`` envelope — this tool is always ``ok`` (never
@@ -62,20 +63,28 @@ def status() -> dict[str, Any]:
     """
     mgr = get_manager()
 
+    # Read all in-process state up front, BEFORE the only suspension point
+    # below, so the analyzer/doc-store fields form one point-in-time snapshot
+    # that a concurrent restart()/refresh() cannot tear across the await.
     state: str = mgr.state if mgr is not None else "indexing"
     analyzer_error: str | None = mgr.error_message if mgr is not None else None
     indexed_commit: str | None = mgr.indexed_commit if mgr is not None else None
     repo_root: str = mgr.repository_root if mgr is not None else get_settings().project_root
+    doc_state, doc_err = doc_store_state()
 
-    current_commit: str | None = _git_head(repo_root)
+    # DS-19: the pinned MCP SDK runs non-async tools INLINE on the event loop
+    # (no thread offload), so a synchronous subprocess.run here would block
+    # every other in-flight request for a git fork+exec on the hottest
+    # polling path. Offload to a worker thread; _git_head itself stays
+    # synchronous (it's the worker-thread body — mirrors
+    # AnalyzerManager._capture_head_commit's identical pattern).
+    current_commit: str | None = await asyncio.to_thread(_git_head, repo_root)
 
     stale: bool | None
     if indexed_commit is None or current_commit is None:
         stale = None
     else:
         stale = indexed_commit != current_commit
-
-    doc_state, doc_err = doc_store_state()
 
     return ok(
         state=state,

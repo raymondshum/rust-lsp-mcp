@@ -78,7 +78,11 @@ PROJECT="$(cd "$PROJECT" && pwd)"
 # container can read/write it — this applies to BOTH podman and docker on
 # RHEL/Fedora, so gate on SELinux, not on the engine. Use the SHARED label ':z':
 # the private ':Z' would relabel your source tree with a per-container category
-# and break other tools/containers that also mount that directory.
+# and break other tools/containers that also mount that directory. Apply the
+# same relabel to BOTH mounts: /project is read-write here (see the :ro note
+# above) AND /data is written to by `cargo fetch` — an SELinux-enforcing host
+# would otherwise deny writes to /data with EACCES even though /project was
+# correctly relabeled.
 MOUNT_OPTS=""
 if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then
   MOUNT_OPTS=":z"
@@ -87,7 +91,7 @@ fi
 echo "prime-cache: [$ENGINE] fetching dependency sources for $PROJECT into '$DATA' ..."
 "$ENGINE" run --rm \
   -v "${PROJECT}:/project${MOUNT_OPTS}" \
-  -v "${DATA}:/data" \
+  -v "${DATA}:/data${MOUNT_OPTS}" \
   --entrypoint cargo \
   "$IMAGE" fetch --manifest-path /project/Cargo.toml
 
