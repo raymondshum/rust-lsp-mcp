@@ -27,7 +27,9 @@ docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve
   - Unit 5 — DS-09 (#53): closed via PR #73 → `main` (cherry-pick `b7c5c52`); record PR #74.
   - Unit 6 — DS-10 (#54) + DS-11 (#55) + DS-23 (roll-up #63): closed via PR #75 → `main`
     (cherry-pick `b82492a`); record PR #76.
-  - **7 issues remain open** (#56–#63; #63 stays open until the other roll-up lows land).
+  - Unit 7 — DS-12 (#56) + DS-22 (roll-up #63): closed via PR #77 → `main`
+    (cherry-pick `7e50883`); record PR #78.
+  - **6 issues remain open** (#57–#63; #63 stays open until the other roll-up lows land).
 - Nothing is deferred by decision yet — sequencing below is a recommendation, not a commitment.
 
 ## What's left (grounded)
@@ -48,14 +50,14 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 | DS-09 | #53 | Med | `core.py:252` | ✅ Done — PR #73 → `main`, cherry-picked to `bob_prototype` (`b7c5c52`). Prefers `selectionRange.start` (name position), falls back to `range.start`. |
 | DS-10 | #54 | Med | `doc_chunking.py:347` | ✅ Done — PR #75 → `main`, cherry-picked to `bob_prototype` (`b82492a`). Fence lines no longer setext-eligible. |
 | DS-11 | #55 | Med | `doc_chunking.py:293` | ✅ Done — PR #75 (same commit). Pre-scan requires a compact contiguous frontmatter block; else normal splitting. |
-| DS-12 | #56 | Med | `doc_store.py:81` / `search_docs.py:68` | Open. `refresh`/`search` race; no lock. (Low #63 DS-22 is the tool-side view.) |
+| DS-12 | #56 | Med | `doc_store.py:81` | ✅ Done — PR #77 → `main`, cherry-picked to `bob_prototype` (`7e50883`). `_read_lock` makes search atomic vs rebuild; empty-query (DS-22) rejected; concurrent refresh serialized. |
 | DS-13 | #57 | Med | `settings.py:63` (+configuration.md, env.sample, Dockerfile) | Open. Dead `RLM_CARGO_*` knobs — wire through or remove + doc. `Dockerfile` part is `bob_prototype`-only. |
 | DS-14 | #58 | Med | `tools/status.py` | ✅ Done — PR #71 (same commit). `status.doc_index_state`; search_docs errors on permanent failure; refresh re-inits an absent/errored store. |
 | DS-15 | #59 | Med | `scripts/setup.sh:34` | Open. Disables host-global git signing; guard on a container marker. |
 | DS-16 | #60 | Med | `Dockerfile:80` | Open. `status` staleness null on rootful Linux (no `safe.directory`). `bob_prototype`-only if Dockerfile diverges. |
 | DS-17 | #61 | Med | `tests/test_phase34_adversarial.py:228` | Open. Malformed-response branch never runs in CI. Fix = drop `integration` marker on the two `_MalformedLSP` tests (they need no live analyzer). |
 | DS-18 | #62 | Med | `core.py:55` | Open. `_lifespan`/`analyzer_lifespan` untested (swallow contract + teardown). |
-| DS-19…DS-28 | #63 | Low | (roll-up) | Open. **DS-21 ✅ done** (PR #67, with DS-03/04). **DS-23 ✅** (PR #75). Remaining: `status` sync subprocess (DS-19), dead null-check (DS-20), empty-query (DS-22), dead sentinel (DS-24), model-persistence doc (DS-25), `RA_TARGET_DIR` comment (DS-26), SELinux relabel (DS-27), no tool-registration test (DS-28). Issue closes when all land. |
+| DS-19…DS-28 | #63 | Low | (roll-up) | Open. **DS-21 ✅ done** (PR #67, with DS-03/04). **DS-22 ✅, DS-23 ✅** (PR #77, #75). Remaining: `status` sync subprocess (DS-19), dead null-check (DS-20), dead sentinel (DS-24), model-persistence doc (DS-25), `RA_TARGET_DIR` comment (DS-26), SELinux relabel (DS-27), no tool-registration test (DS-28). Issue closes when all land. |
 
 **Recommended sequencing (human's call):** DS-01/02 → DS-03/04/21 → DS-05/06 → Mediums by area (RAG
 DS-10/11/23; docs/config DS-13/25/26; test-gaps DS-17/18/28) → Lows opportunistically.
