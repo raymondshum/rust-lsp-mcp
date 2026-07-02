@@ -42,8 +42,8 @@ and the **GitHub issue** tracking it.
 | DS-12 | Med | rag | `refresh` rebuild races in-flight `search_docs` (no lock) | #56 ✅ |
 | DS-13 | Med | infra | `RLM_CARGO_*` / `RLM_RUST_ANALYZER_TARGET_DIR` are dead knobs | #57 ✅ |
 | DS-14 | Med | docs | `status` can't report doc-index readiness; recovery path loops | #58 ✅ |
-| DS-15 | Med | infra | `setup.sh` disables host-global git commit signing | #59 |
-| DS-16 | Med | infra | `status` git-staleness always null on rootful Linux Docker | #60 |
+| DS-15 | Med | infra | `setup.sh` disables host-global git commit signing | #59 ✅ |
+| DS-16 | Med | infra | `status` git-staleness always null on rootful Linux Docker | #60 ✅ |
 | DS-17 | Med | tests | Malformed-LSP-response branch has zero CI coverage | #61 |
 | DS-18 | Med | tests | `_lifespan` / `analyzer_lifespan` have zero coverage | #62 |
 | DS-19 | Low | core | `status` runs `subprocess.run` synchronously on the event loop | #63 |
@@ -327,6 +327,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   own instruction to re-run setup gets host-wide commit signing silently turned
   off — every subsequent commit in every repo unsigned, defeating a
   deliberately configured control.
+- **Resolved:** 2026-07-02 (PR #81). The signing-disable is now gated behind an
+  `_in_container` guard (detects `/.dockerenv`, `/run/.containerenv`, devcontainer/CI
+  env markers); on the host it is skipped with a note.
 
 ### DS-16 — `status` git-staleness always null on rootful Linux Docker
 - **Where:** `Dockerfile:80` (no `USER`, no `safe.directory`); `analyzer.py`
@@ -339,6 +342,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   Linux), `indexed_commit`/`current_commit`/`stale` are permanently null, so
   `stale` never flips and an agent relying on it never re-indexes. One-line fix
   (`git config --system safe.directory`).
+- **Resolved:** 2026-07-02 (PR #81). The Dockerfile runs
+  `git config --system --add safe.directory /project` so rootful git on the host-uid
+  bind mount succeeds and staleness reporting works.
 
 ### DS-17 — Malformed-LSP-response branch has zero CI coverage
 - **Where:** `tests/test_phase34_adversarial.py:228`; `src/rust_lsp_mcp/analyzer.py:83`.
