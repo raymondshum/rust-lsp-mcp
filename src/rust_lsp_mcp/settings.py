@@ -59,15 +59,6 @@ class Settings(BaseSettings):
     # Rust / cargo caches (§0.2)
     # -----------------------------------------------------------------------
 
-    # Cargo build output directory for target compilation (CARGO_TARGET_DIR).
-    cargo_target_dir: str = "/workspaces/cargo-target"
-
-    # CARGO_HOME bind mount (registry + git caches).
-    cargo_home: str = "/workspaces/cargo-home"
-
-    # rust-analyzer targetDir (relocates RA's own cargo-check output).
-    rust_analyzer_target_dir: str = "/workspaces/cargo-target/rust-analyzer"
-
     # Path to the rust-analyzer binary inside the container.
     # Default matches the devcontainer rust:1 feature install location.
     # Confirmed at runtime via: rustup which rust-analyzer  (Beat B task).
