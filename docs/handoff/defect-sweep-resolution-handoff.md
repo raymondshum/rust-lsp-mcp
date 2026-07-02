@@ -24,7 +24,8 @@ docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve
     record PR #70.
   - Unit 4 — DS-07 (#51) + DS-08 (#52) + DS-14 (#58): closed via PR #71 → `main`
     (cherry-pick `8adac0e`); record PR #72. Recorded [[KI-9]]-adjacent hardening.
-  - **10 issues remain open** (#53–#63; #63 stays open until the other roll-up lows land).
+  - Unit 5 — DS-09 (#53): closed via PR #73 → `main` (cherry-pick `b7c5c52`); record PR #74.
+  - **9 issues remain open** (#54–#63; #63 stays open until the other roll-up lows land).
 - Nothing is deferred by decision yet — sequencing below is a recommendation, not a commitment.
 
 ## What's left (grounded)
@@ -42,7 +43,7 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 | DS-06 | #50 | High | `tests/test_doc_store.py:317` | ✅ Done — PR #69 (same commit). Real `init_doc_store()` now tested offline via injected EF; dead `__wrapped__` reimplementation removed. |
 | DS-07 | #51 | Med | `analyzer.py:262` | ✅ Done — PR #71 → `main`, cherry-picked to `bob_prototype` (`8adac0e`). `STATE_ERROR` + `require_ready` error envelope; refresh recovers. |
 | DS-08 | #52 | Med | `core.py:56` | ✅ Done — PR #71 (same commit). Doc build offloaded to a background thread; loop serves immediately. |
-| DS-09 | #53 | Med | `core.py:252` | Open. `document_symbols` uses `range.start`, not `selectionRange`. |
+| DS-09 | #53 | Med | `core.py:252` | ✅ Done — PR #73 → `main`, cherry-picked to `bob_prototype` (`b7c5c52`). Prefers `selectionRange.start` (name position), falls back to `range.start`. |
 | DS-10 | #54 | Med | `doc_chunking.py:347` | Open. `---` after a code fence → setext misparse (reproduced). |
 | DS-11 | #55 | Med | `doc_chunking.py:293` | Open. Leading `---` swallowed as frontmatter (reproduced). |
 | DS-12 | #56 | Med | `doc_store.py:81` / `search_docs.py:68` | Open. `refresh`/`search` race; no lock. (Low #63 DS-22 is the tool-side view.) |
