@@ -86,7 +86,8 @@ DS-10/11/23; docs/config DS-13/25/26; test-gaps DS-17/18/28) → Lows opportunis
   ([research-policy.md](../conventions/research-policy.md)). Bounce-backs get a regression test before the
   re-fix. Don't reopen settled decisions.
 - Alternative if driving under Bob instead: the `build`/`review`/`qa`/`adversarial` modes
-  ([roles.md](roles.md), [continue-build](../../.bob/skills/continue-build/SKILL.md)).
+  ([roles.md](roles.md) and the `continue-build` playbook —
+  `.bob/skills/continue-build/SKILL.md`, `bob_prototype` only).
 
 ## Stack commands
 
