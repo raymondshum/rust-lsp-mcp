@@ -78,14 +78,25 @@ To avoid this trap, the server tracks an explicit readiness state:
   and the live connection is confirmed. In [`analyzer.py`](../../src/rust_lsp_mcp/analyzer.py),
   the `is_ready` property requires both conditions: `state == "ready"` *and*
   a live internal connection object.
+- If the background indexing run itself fails (for example, the configured
+  rust-analyzer binary does not exist or crashes during startup), the state
+  becomes `"error"` instead — a third, permanent-until-recovered state,
+  distinct from the transient `"indexing"` window. The diagnostic message is
+  captured and exposed as `analyzer_error` on the `status` tool.
 - Every tool that needs the index calls `require_ready()` (defined in
   [`core.py`](../../src/rust_lsp_mcp/core.py)) before doing any work. If the
-  analyzer is not ready, `require_ready()` returns a `not_ready` envelope
-  immediately and the tool returns that without touching the analyzer.
+  analyzer is still indexing, `require_ready()` returns a `not_ready`
+  envelope immediately and the tool returns that without touching the
+  analyzer. If the analyzer is in the `"error"` state, `require_ready()`
+  instead returns an `error` envelope (never `not_ready` — a permanent
+  failure is not "try again in a moment") naming the failure and pointing at
+  the `refresh` tool as the recovery path.
 
-The documentation search has its own separate readiness flag (`is_ready` on
-`DocStore` in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py)) for the
-same reason: it never returns partial results while a rebuild is in progress.
+The documentation search has its own separate readiness tri-state (`state` on
+`DocStore` in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py):
+`"building"` / `"ready"` / `"error"`) for the same reason: `search_docs` never
+returns partial results while a rebuild is in progress, and surfaces a
+permanent build failure as `error` rather than a misleading `not_ready`.
 
 ---
 
@@ -99,7 +110,7 @@ four possible values, defined in [`envelope.py`](../../src/rust_lsp_mcp/envelope
 | `ok` | The query ran successfully. The result may be empty, and that empty result is meaningful. |
 | `not_ready` | The index is still being built. Try again in a moment. |
 | `not_found` | The thing asked about does not exist. |
-| `error` | Bad input or an internal failure. A human-readable message is included. |
+| `error` | Bad input, an internal failure, *or* a permanently failed analyzer/doc index (see §3) — the `refresh` tool is the recovery path in that last case. A human-readable message is included. |
 
 **The distinction between `ok` with an empty list and `not_found` is
 deliberate and important.**
@@ -180,7 +191,12 @@ The `refresh` tool rebuilds everything from scratch:
    status, and callers should poll the `status` tool until it shows `"ready"`.
 2. It rebuilds the documentation search index. This runs synchronously and
    finishes before the tool returns, so the documentation search is not in a
-   partial state after the refresh tool completes.
+   partial state after the refresh tool completes. If the doc index was never
+   initialised, or is currently in the `"error"` state, `refresh` re-runs the
+   full startup sequence for it (construct + adopt-or-build) rather than
+   calling rebuild on a store that may not exist or is known-broken —
+   `refresh` is therefore also the recovery path for a permanently-failed doc
+   index, the same way it is for the analyzer's `"error"` state (§3).
 
 One deliberate omission: the refresh does **not** delete rust-analyzer's
 saved on-disk work (its incremental analysis cache). This means re-indexing
@@ -190,14 +206,26 @@ is much faster than a cold start — rust-analyzer can reuse prior work.
 
 ## 8. Startup and shutdown (lifespan)
 
-When the server starts:
+When the server starts, it is available immediately — startup never blocks on
+either index finishing:
 
 - The analyzer is launched in the background. The server becomes available to
-  clients immediately, answering `not_ready` until indexing completes.
-- The documentation index is built (or reused if a previously built index is
-  already on disk). If building the documentation index fails for any reason,
-  the failure is logged and swallowed — the code-navigation tools continue
-  working normally.
+  clients immediately, answering `not_ready` until indexing completes (or
+  `error` if the background run itself fails — see §3).
+- The documentation index follows the same non-blocking shape, split into a
+  cheap synchronous part and a potentially-slow background part:
+    - If an already-completed, same-project collection exists on disk (a warm
+      restart), it is **adopted synchronously** — a metadata check only, no
+      re-embedding — and the index is `"ready"` before the lifespan even
+      yields.
+    - Otherwise the index is built from scratch in a **background thread**:
+      the lifespan yields immediately (`status`/navigation tools are usable
+      right away) while `doc_index_state` reports `"building"`; it flips to
+      `"ready"` when the background build finishes.
+    - A failure in either the cheap or the background half is recorded (not
+      swallowed silently) and surfaced via `status` as `doc_index_state ==
+      "error"` with a diagnostic message — the code-navigation tools are
+      unaffected either way, and `refresh` is the recovery path (§7).
 
 When the server stops, both the code analyzer and the documentation store are
 shut down cleanly. The lifespan wiring lives in

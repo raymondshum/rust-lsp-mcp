@@ -6,9 +6,15 @@ Every tool returns a uniform dict envelope of the form::
 
 Status vocabulary (all phases):
     ok        — query ran; payload may be populated or meaningfully empty.
-    not_ready — still indexing; caller should retry later.
+    not_ready — still indexing (transient); caller should retry later.
     not_found — the named/located thing does not exist.
     error     — malformed input / internal / LSP failure; includes a message.
+                Also returned by ``require_ready()`` — NOT ``not_ready`` —
+                when the analyzer's background indexing run has permanently
+                failed (``state == "error"``); this is only recoverable via
+                the ``refresh`` tool.  The analogous doc-store failure
+                (``doc_index_state == "error"``) is surfaced the same way by
+                ``search_docs``.
 
 Design intent:
     - Pure Python with no I/O — trivially unit-testable.

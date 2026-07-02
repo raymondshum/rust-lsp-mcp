@@ -542,13 +542,14 @@ class TestDrainCancelTeardown:
 
                 # The task finishes (with an exception) on its own; no
                 # timeout is needed to observe DS-04's force-stop here.
-                # _drain_task's wait_for propagates a *non-timeout* task
-                # exception to its caller (pre-existing behaviour, unrelated
-                # to DS-03/04/21) — the important thing for this test is
-                # that _run's finally still ran (and force-stopped the
-                # subprocess) before that exception reached us.
-                with pytest.raises(RuntimeError, match="boom"):
-                    await mgr.shutdown()
+                # _drain_task SWALLOWS a non-timeout outgoing-run failure
+                # (log-and-continue) rather than propagating it — the whole
+                # point of a drain is to tear the old run down, so its failure
+                # must not abort the caller (see the _drain_task docstring and
+                # the DS-07 recovery-path fix).  shutdown() therefore returns
+                # cleanly; the important thing for this test is that _run's
+                # finally still ran (and force-stopped the subprocess).
+                await mgr.shutdown()
 
                 assert first.server.stop_calls >= 1
                 try:

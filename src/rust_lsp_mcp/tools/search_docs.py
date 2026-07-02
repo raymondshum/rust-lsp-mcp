@@ -9,7 +9,7 @@ from typing import Any
 from anyio.to_thread import run_sync
 
 from rust_lsp_mcp.core import mcp
-from rust_lsp_mcp.doc_store import get_doc_store
+from rust_lsp_mcp.doc_store import DOC_STATE_ERROR, doc_store_state, get_doc_store
 from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
 
 _log = logging.getLogger(__name__)
@@ -42,10 +42,17 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
 
       Results are ordered best-first (ascending distance).
 
-    - ``not_ready`` — the doc index is absent or is currently being rebuilt.
-      The caller **must not** interpret this as "no matching docs"; the store
-      may be mid-rebuild.  Retry after ``status`` reports ``"ready"``, or after
-      ``refresh`` returns.
+    - ``not_ready`` — the doc index is absent or is currently being built
+      (``doc_index_state == "building"``, see ``status``).  This is a
+      *transient* state.  The caller **must not** interpret this as "no
+      matching docs"; the store may be mid-build.  Retry after ``status``
+      reports ``doc_index_state == "ready"``, or after ``refresh`` returns.
+
+    - ``error`` — either (a) the doc index failed to build
+      (``doc_index_state == "error"``) — this is a *permanent* condition until
+      ``refresh`` rebuilds it, unlike the transient ``not_ready`` case above —
+      or (b) an unexpected exception from the search layer itself.  Either way
+      the message includes the underlying reason.
 
     - ``not_found`` — the store is ready and the search returned zero results.
       This only happens when the collection is empty (semantic search over a
@@ -53,19 +60,40 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
       semantically distinct from ``not_ready``: here the store *is* ready and
       genuinely found nothing.
 
-    - ``error`` — unexpected exception from the search layer; includes a
-      diagnostic message.
-
     Invariant (load-bearing):
-        ``not_ready`` is returned whenever ``is_ready`` is ``False``, so callers
-        **never** receive a misleading empty-or-partial answer while a rebuild is
-        in flight.  An empty ``ok`` result is impossible: zero matches map to
-        ``not_found``, not ``ok``.
+        ``not_ready``/``error`` is returned whenever ``is_ready`` is ``False``,
+        so callers **never** receive a misleading empty-or-partial answer
+        while a build is in flight or has permanently failed.  An empty ``ok``
+        result is impossible: zero matches map to ``not_found``, not ``ok``.
     """
     limit = max(1, limit)
 
     store = get_doc_store()
-    if store is None or not store.is_ready:
+
+    # Surface a permanently-failed build distinctly from "still building".
+    # `state` is read via getattr for robustness against test doubles: a plain
+    # MagicMock auto-creates `.state` on access (so the getattr default is not
+    # what saves us) — but that auto-created attribute is a Mock, which is
+    # ``!= DOC_STATE_ERROR``, so such fakes correctly fall through to the
+    # is_ready check below rather than being misread as errored.
+    if store is not None and getattr(store, "state", None) == DOC_STATE_ERROR:
+        return error(
+            "The documentation index failed to build and is unavailable: "
+            f"{store.error_message or 'unknown error'}. Run the refresh tool to rebuild it."
+        )
+    if store is None:
+        doc_state, doc_err = doc_store_state()
+        if doc_state == DOC_STATE_ERROR:
+            return error(
+                "The documentation index failed to initialise and is unavailable: "
+                f"{doc_err or 'unknown error'}. Run the refresh tool to rebuild it."
+            )
+        return not_ready(
+            "The documentation index is still building. "
+            "Retry after checking doc_index_state via status, or after refresh returns."
+        )
+
+    if not store.is_ready:
         return not_ready(
             "The documentation index is not available or is currently rebuilding. "
             "Retry after the store is ready."
