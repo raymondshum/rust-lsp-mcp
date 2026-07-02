@@ -1112,6 +1112,108 @@ class TestDS23IndentedFencesAndHeaders:
 
 
 # ---------------------------------------------------------------------------
+# #89 (DS-23 follow-on): indented (1-3 space) setext underlines and thematic
+# breaks were missed by DS-23, which scoped the 0-3 space allowance to ATX
+# headers (_HEADER_RE) and fence delimiters (_FENCE_RE) only.  Per CommonMark
+# 0.31.2 §4.1 (thematic breaks) and §4.3 (setext headings), 0-3 leading spaces
+# are permitted before both constructs; 4+ leading spaces is an indented code
+# block (§4.4), which is NOT a heading or a break.
+# ---------------------------------------------------------------------------
+
+
+class TestDS89IndentedSetextAndThematicBreak:
+    """Regression for #89: indented setext underlines/thematic breaks were missed."""
+
+    def test_indented_setext_h2_one_space_recognized(self) -> None:
+        """A ``---`` underline with 1 leading space is still a setext h2 (CommonMark §4.3)."""
+        md = "Title\n ---\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert any("Title" in c.breadcrumb for c in chunks), (
+            f"Expected breadcrumb containing 'Title', got: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_indented_setext_h2_two_spaces_recognized(self) -> None:
+        """A ``---`` underline with 2 leading spaces is still a setext h2 (CommonMark §4.3)."""
+        md = "Title\n  ---\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert any("Title" in c.breadcrumb for c in chunks), (
+            f"Expected breadcrumb containing 'Title', got: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_indented_setext_h2_three_spaces_recognized(self) -> None:
+        """A ``---`` underline with 3 leading spaces is still a setext h2 (CommonMark §4.3)."""
+        md = "Title\n   ---\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert any("Title" in c.breadcrumb for c in chunks), (
+            f"Expected breadcrumb containing 'Title', got: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_indented_setext_h1_recognized(self) -> None:
+        """A ``===`` underline with 2 leading spaces is still a setext h1 (CommonMark §4.3)."""
+        md = "Title\n  ===\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert any("Title" in c.breadcrumb for c in chunks), (
+            f"Expected breadcrumb containing 'Title', got: {[c.breadcrumb for c in chunks]}"
+        )
+
+    def test_indented_setext_underline_not_in_chunk_body(self) -> None:
+        """The indented underline must be consumed, not left in the chunk body."""
+        md = "Title\n   ---\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        all_text = " ".join(c.text for c in chunks)
+        assert "---" not in all_text, (
+            "Indented setext underline '   ---' was included in chunk body (should be consumed)."
+        )
+
+    def test_indented_setext_h1_then_h2_breadcrumb_hierarchy(self) -> None:
+        """Indented setext h1 followed by indented setext h2 builds a nested breadcrumb."""
+        md = "BigTitle\n========\n\nSubtitle\n  --------\n\ncontent\n"
+        chunks = chunk_markdown(md, "d.md")
+        content_bc = [c.breadcrumb for c in chunks if "content" in c.text]
+        assert content_bc, "No chunk with 'content' found"
+        assert "BigTitle" in content_bc[0], f"Missing BigTitle in {content_bc}"
+        assert "Subtitle" in content_bc[0], f"Missing Subtitle in {content_bc}"
+
+    def test_four_space_indented_underline_not_setext(self) -> None:
+        """4+ leading spaces is an indented code block (CommonMark §4.4), not a
+        setext underline — must stay as ordinary content.
+        """
+        md = "Title\n    ---\n\nbody\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert all(c.breadcrumb == "d.md" for c in chunks), (
+            f"4-space indented '---' was incorrectly recognized as setext: "
+            f"{[c.breadcrumb for c in chunks]}"
+        )
+        assert any("    ---" in c.text for c in chunks), (
+            "4-space indented '---' should remain in the chunk body as content."
+        )
+
+    def test_indented_thematic_break_after_blank_line_is_not_setext(self) -> None:
+        """A ``---`` line with 1-3 leading spaces after a blank line is a thematic
+        break (CommonMark §4.1), not a setext header — mirrors
+        ``test_thematic_break_after_blank_line_is_not_setext`` with indentation.
+        """
+        md = "Paragraph one.\n\n   ---\n\nParagraph two.\n"
+        chunks = chunk_markdown(md, "d.md")
+        for chunk in chunks:
+            assert chunk.breadcrumb == "d.md", (
+                f"Indented thematic break created a spurious header: {chunk.breadcrumb!r}"
+            )
+        all_text = " ".join(c.text for c in chunks)
+        assert "Paragraph one." in all_text
+        assert "Paragraph two." in all_text
+
+    def test_indented_table_separator_not_setext(self) -> None:
+        """An indented ``|---|---|`` table separator row must NOT become a setext
+        header — mirrors ``test_table_separator_not_setext`` with indentation.
+        """
+        md = "# T\n\n| a | b |\n   |---|---|\n| x | y |\n"
+        chunks = chunk_markdown(md, "d.md")
+        assert len(chunks) == 1, f"Expected 1 chunk, got {len(chunks)}"
+        assert "|---|---|" in chunks[0].text, "Indented table separator was incorrectly consumed"
+
+
+# ---------------------------------------------------------------------------
 # Round-2 Hole 1 regression: mid-loop flush of a single oversized line
 # in _split_lines_into_chunks must delegate to _hard_split_text
 # ---------------------------------------------------------------------------
