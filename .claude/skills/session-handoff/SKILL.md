@@ -80,9 +80,9 @@ session at already-done work is worse than no handoff.
 4. **Produce the paste-ready kickoff prompt** — a chat message (in a fenced ```text block) the user can paste
    to seed the next session. It states the goal, says **read the durable handoff doc first** (by path) as
    authoritative, names what's left + the recommended start, restates the model/orchestration prefs compactly,
-   and lists the top gotchas / don't-retry. If a companion goal command exists (e.g. the
-   `resolve-defect-sweep` skill, `bob_prototype` only), name it as the kickoff. Keep it self-contained
-   but lean — the detail lives in the committed doc.
+   and lists the top gotchas / don't-retry. If a companion goal skill exists (e.g.
+   `.claude/skills/resolve-defect-sweep/` on `main`; its Bob adaptation lives on `bob_prototype`), name it as
+   the kickoff. Keep it self-contained but lean — the detail lives in the committed doc.
 
 5. **Surface both.** Print the handoff-doc path and the kickoff prompt for review. Reconcile any stale status
    bookkeeping the handoff implies (flip an audit/known-issues row to reflect what shipped) if the user wants
@@ -118,18 +118,24 @@ Full suite: `uv run --frozen pytest`.
 `main → bob_prototype` via cherry-pick (see the [branch-flow rule](../../../docs/impl/known-issues.md) and
 project memory). Apply it to where the handoff artifacts land:
 
-- **Governing principle (owner's directive, 2026-07-02): no Bob-driven effort may affect both branches.** If an
-  effort touches general code / reference docs (anything on `main`), it is a **Claude Code / Fable-orchestrated
-  effort**, and **all** its artifacts — the audit/plan, the next-session seed, AND the driving skill (e.g.
-  `resolve-defect-sweep`, `session-handoff`) — are **`main`-first**: branch off `origin/main`, PR to `main`,
-  cherry-pick onto `bob_prototype`. This is why those two skills live on `main` under `.bob/skills/` even though
-  most of `.bob/` does not. A skill/seed that documents or drives cross-branch work is a general artifact, not
-  Bob-harness scaffolding.
+- **Branch consumption rule (owner's directive, 2026-07-02): `main` is for Claude consumption only;
+  `bob_prototype` is for Bob IDE consumption only.** The `.bob/` folder must **never** exist on `main`, and
+  Claude-side scaffolding (`.claude/`, `CLAUDE.md`) is not ported to `bob_prototype`. A skill that drives or
+  documents cross-branch work therefore exists in **both harness forms**: the Claude version under
+  `.claude/skills/<name>/SKILL.md` on `main` (this file), and a Bob adaptation under
+  `.bob/skills/<name>/SKILL.md` on `bob_prototype`. Content changes to such a skill are made to the `main`
+  Claude version first, then **hand-adapted** (not cherry-picked verbatim) into the Bob copy.
+- **No Bob-driven effort may affect both branches.** If an effort touches general code / reference docs
+  (anything on `main`), it is a **Claude Code / Fable-orchestrated effort**, and its audit/plan and
+  next-session seed are **`main`-first**: branch off `origin/main`, PR to `main`, cherry-pick onto
+  `bob_prototype`.
 - **Genuinely Bob-only** — the Bob custom-modes harness that drives *`bob_prototype`-only experimentation*:
-  `.bob/custom_modes.yaml`, the `continue-build` dispatcher, `AGENTS.md`, and the diverged Bob `grill-me` copy.
-  These stay **`bob_prototype`-only**; do **not** cherry-pick them to `main`. When a `main`-first handoff links
-  one of them, render the pointer as **plain text noting the branch**, not a relative link, so the `main` copy
-  has no dangling links.
+  `.bob/custom_modes.yaml`, the `continue-build` dispatcher, `AGENTS.md`, the diverged Bob `grill-me` copy,
+  and the `.bob/skills/*` adaptations. These stay **`bob_prototype`-only**; do **not** cherry-pick them to
+  `main`. When a `main`-first handoff links one of them, render the pointer as **plain text noting the
+  branch**, not a relative link, so the `main` copy has no dangling links. Handoff docs on `main` reference
+  `.claude/skills/` paths; their `bob_prototype` cherry-picks may adapt those references to `.bob/skills/`
+  (accepted lockstep divergence, like `known-issues.md`).
 - **General code / reference docs** (`src/`, `tests/`, `docs/security/` audits, `docs/guide/`, `Dockerfile`,
   `scripts/`) go **`main`-first**: branch off `origin/main`, commit, open a PR against `main`, then
   cherry-pick onto `bob_prototype`. Never merge `bob_prototype → main`.
