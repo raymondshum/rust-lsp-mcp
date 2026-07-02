@@ -39,7 +39,7 @@ and the **GitHub issue** tracking it.
 | DS-09 | Med | tools | `document_symbols` returns `range.start`, not `selectionRange` | #53 ✅ |
 | DS-10 | Med | rag | `---` after a closing code fence misparsed as a setext header | #54 ✅ |
 | DS-11 | Med | rag | Doc starting with `---` swallowed whole as frontmatter | #55 ✅ |
-| DS-12 | Med | rag | `refresh` rebuild races in-flight `search_docs` (no lock) | #56 |
+| DS-12 | Med | rag | `refresh` rebuild races in-flight `search_docs` (no lock) | #56 ✅ |
 | DS-13 | Med | infra | `RLM_CARGO_*` / `RLM_RUST_ANALYZER_TARGET_DIR` are dead knobs | #57 |
 | DS-14 | Med | docs | `status` can't report doc-index readiness; recovery path loops | #58 ✅ |
 | DS-15 | Med | infra | `setup.sh` disables host-global git commit signing | #59 |
@@ -49,7 +49,7 @@ and the **GitHub issue** tracking it.
 | DS-19 | Low | core | `status` runs `subprocess.run` synchronously on the event loop | #63 |
 | DS-20 | Low | tools | Null `documentSymbol` → `error` envelope; `None`-check is dead code | #63 |
 | DS-21 | Low | core | Concurrent `refresh` not serialized → duplicate analyzer processes | #63 ✅ |
-| DS-22 | Low | tools | `search_docs` accepts empty/whitespace query, returns arbitrary top-k | #63 |
+| DS-22 | Low | tools | `search_docs` accepts empty/whitespace query, returns arbitrary top-k | #63 ✅ |
 | DS-23 | Low | rag | Indented (1–3 space) fences/headers missed, swallowing later headers | #63 ✅ |
 | DS-24 | Low | rag | Empty-corpus `build_complete` sentinel is dead code | #63 |
 | DS-25 | Low | docs | Model-persistence advice contradicts the baked-model design | #63 |
@@ -278,6 +278,11 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** Violates the documented "never a misleading empty/partial
   answer mid-rebuild" invariant. (The `search_docs.py:75` low-severity finding
   is the same race from the tool side.)
+- **Resolved:** 2026-07-02 (PR #77). A `_read_lock` makes `search()`'s readiness
+  check + collection snapshot + query atomic w.r.t. `rebuild()`'s brief
+  state/collection transitions (delete under the lock; long build lockless with
+  `_collection` kept None); a search mid-rebuild raises `DocStoreNotReady` →
+  `not_ready`. Concurrent refresh doc-store re-init serialized.
 
 ### DS-13 — `RLM_CARGO_TARGET_DIR` / `RLM_CARGO_HOME` / `RLM_RUST_ANALYZER_TARGET_DIR` are dead knobs
 - **Where:** `src/rust_lsp_mcp/settings.py:63`; `docs/guide/configuration.md:39`;
@@ -400,6 +405,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** A client templating bug yields a confident `ok` full of
   unrelated docs instead of an `error` — unlike position tools, which reject
   degenerate input.
+- **Resolved:** 2026-07-02 (PR #77, with DS-12). `search_docs` rejects an
+  empty/whitespace query with an `error` envelope before any index round-trip.
+  (Issue #63 stays open for the other lows.)
 
 ### DS-23 — Indented (1–3 space) fences/headers missed, swallowing later headers
 - **Where:** `src/rust_lsp_mcp/doc_chunking.py:191`.
