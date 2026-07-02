@@ -36,9 +36,6 @@ library.
 |---|---|---|
 | `RLM_PROJECT_ROOT` | `/workspaces/ripgrep` | Folder of the Rust project to navigate and whose Markdown files are searched. Repo-agnostic — point it at any Rust project. The default is the bundled ripgrep sample inside the container. *(The old name `RLM_RIPGREP_SRC` still works as a deprecated alias and emits a warning.)* |
 | `RLM_DOC_COLLECTION` | `project_docs` | Name of the ChromaDB collection that holds the documentation index. Change it only if you keep multiple projects' indexes under one `RLM_CHROMA_PATH`. |
-| `RLM_CARGO_TARGET_DIR` | `/workspaces/cargo-target` | Where Rust build output is stored. Kept on a persistent mount so it is reused across container rebuilds rather than rebuilt every time. |
-| `RLM_CARGO_HOME` | `/workspaces/cargo-home` | Where Rust's package downloads are cached (Cargo's registry and git checkouts). |
-| `RLM_RUST_ANALYZER_TARGET_DIR` | `/workspaces/cargo-target/rust-analyzer` | Where rust-analyzer keeps its own build output, separate from the main Cargo target directory. |
 | `RLM_RUST_ANALYZER_BIN` | `/usr/local/cargo/bin/rust-analyzer` | Path to the rust-analyzer program inside the container. You can confirm the correct path with `rustup which rust-analyzer`. |
 | `RLM_CHROMA_PATH` | `/workspaces/chroma` | Folder where the documentation search database is stored. Kept on a persistent mount so the index survives container rebuilds. |
 | `RLM_DOC_GLOB_PATTERNS` | `**/*.md` | Which Markdown files to include in documentation search, written as comma-separated path patterns relative to the project folder. The default includes every Markdown file anywhere in the project. |
@@ -52,15 +49,22 @@ Several of the folders listed above live on **persistent mounts** — storage th
 attached to the container but lives outside it, so it survives a full container
 rebuild. This matters for two expensive one-time operations:
 
-- **The documentation-search embedding model** (about 80 MB) is downloaded the first
-  time the documentation index is built and then read from the local cache on every
-  subsequent start. The documentation-search library always stores it under the
+- **The documentation-search embedding model** (about 80 MB) is stored under the
   container user's home cache folder (`~/.cache/chroma`) — this path is fixed and
-  not configurable. Persist that folder (a bind mount in the dev container, or the
-  production image's `/data` volume) so the model is not re-downloaded after a
-  rebuild.
+  not configurable. What happens there differs by deployment:
+  - **Dev container** — the model is downloaded the first time the documentation
+    index is built and then read from the local cache on every subsequent start.
+    Persist `~/.cache/chroma` via a bind mount so it is not re-downloaded after a
+    rebuild.
+  - **Production image** — the model is baked into the image at build time (under
+    the image's own `HOME`, a non-volume path), so there is no runtime download
+    and nothing to persist on the `/data` volume. Persisting `~/.cache/chroma` on
+    `/data` would be a no-op: the baked copy is what the server actually reads.
 - **Rust build output** (potentially hundreds of megabytes) is compiled once and
-  reused. It lives under `RLM_CARGO_TARGET_DIR` and `RLM_CARGO_HOME`.
+  reused. It is relocated to a persistent mount via the container-level
+  `CARGO_TARGET_DIR` and `CARGO_HOME` environment variables — set by the dev
+  container's `containerEnv` and by the production image's `Dockerfile` — not by
+  any `RLM_`-prefixed setting.
 
 Neither is re-fetched or recompiled unless you delete the mount. For details on how
 the mounts are configured, see the [Development setup](development.md) page.

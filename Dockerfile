@@ -80,9 +80,6 @@ RUN mkdir -p /opt/rlm \
 ENV HOME=/opt/rlm \
     RLM_PROJECT_ROOT=/project \
     RLM_CHROMA_PATH=/data/chroma \
-    RLM_CARGO_HOME=/data/cargo-home \
-    RLM_CARGO_TARGET_DIR=/data/cargo-target \
-    RLM_RUST_ANALYZER_TARGET_DIR=/data/cargo-target/rust-analyzer \
     RLM_RUST_ANALYZER_BIN=/usr/local/cargo/bin/rust-analyzer \
     RLM_DOC_COLLECTION=project_docs
 # Backstop for ChromaDB's anonymized product telemetry. The app already passes
@@ -96,11 +93,17 @@ ENV ANONYMIZED_TELEMETRY=FALSE
 # default. They do NOT affect server-side Scarf Gateway download pixels.
 ENV SCARF_NO_ANALYTICS=true \
     DO_NOT_TRACK=1
-# rust-analyzer / cargo read these from the environment (the dev container sets
-# the same three as containerEnv); redirect the cargo cache + RA target to /data.
+# cargo reads CARGO_HOME/CARGO_TARGET_DIR from the environment (the dev
+# container sets the same two as containerEnv); redirect the cargo cache and
+# build output to /data. The `cargo check` that rust-analyzer runs inherits
+# these too, so RA's own output also lands under CARGO_TARGET_DIR. Note:
+# RA_TARGET_DIR is NOT a rust-analyzer environment variable — rust-analyzer has
+# no such variable. It is only meaningful in the dev container, where VS Code
+# interpolates it into the `rust-analyzer.cargo.targetDir` *setting* (see
+# .devcontainer/devcontainer.json). Here rust-analyzer is launched by multilspy,
+# not VS Code, so an RA_TARGET_DIR env var would be inert — deliberately omitted.
 ENV CARGO_HOME=/data/cargo-home \
-    CARGO_TARGET_DIR=/data/cargo-target \
-    RA_TARGET_DIR=/data/cargo-target/rust-analyzer
+    CARGO_TARGET_DIR=/data/cargo-target
 
 RUN mkdir -p /project /data
 VOLUME ["/data"]
