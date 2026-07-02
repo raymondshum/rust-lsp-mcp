@@ -20,7 +20,9 @@ docs below. Kickoff command: [`/resolve-defect-sweep`](../../.bob/skills/resolve
   - Unit 1 — DS-01 (#45) + DS-02 (#46): closed via PR #65 → `main` (cherry-pick `0fb8627`); record PR #66.
   - Unit 2 — DS-03 (#47) + DS-04 (#48) + DS-21 (roll-up #63): closed via PR #67 → `main`
     (cherry-pick `6edd96e`); record PR #68. Surfaced [[KI-9]] (out-of-scope, recorded).
-  - **15 issues remain open** (#49–#63; #63 stays open until the other roll-up lows land).
+  - Unit 3 — DS-05 (#49) + DS-06 (#50): closed via PR #69 → `main` (cherry-pick `0746f11`);
+    record PR #70.
+  - **13 issues remain open** (#51–#63; #63 stays open until the other roll-up lows land).
 - Nothing is deferred by decision yet — sequencing below is a recommendation, not a commitment.
 
 ## What's left (grounded)
@@ -34,8 +36,8 @@ All rows verified open as of this handoff; code anchors were confirmed against t
 | DS-02 | #46 | High | `core.py:181` | ✅ Done — PR #65 (same commit). `location_to_external` containment-checks `relativePath`; out-of-workspace locations fall back to URI or are skipped. |
 | DS-03 | #47 | High | `analyzer.py:489` | ✅ Done — PR #67 → `main`, cherry-picked to `bob_prototype` (`6edd96e`). Generation counter; superseded `_run` can't stamp stale `ready`. |
 | DS-04 | #48 | High | `analyzer.py:440` | ✅ Done — PR #67 (same commit). `_run` finally force-stops the subprocess on every reachable cancel window. |
-| DS-05 | #49 | High | `doc_store.py:274` | Open. Adopt-without-freshness. **Only** cross-project + stale-after-edit is in scope; build-once persistence is intended. |
-| DS-06 | #50 | High | `tests/test_doc_store.py:317` | Open. Real `init_doc_store()` untested (dead `__wrapped__` branch). |
+| DS-05 | #49 | High | `doc_store.py:274` | ✅ Done — PR #69 → `main`, cherry-picked to `bob_prototype` (`0746f11`). `project_root` fingerprint in collection metadata; cross-project adoption refused. Build-once kept; stale-after-edit out of scope. |
+| DS-06 | #50 | High | `tests/test_doc_store.py:317` | ✅ Done — PR #69 (same commit). Real `init_doc_store()` now tested offline via injected EF; dead `__wrapped__` reimplementation removed. |
 | DS-07 | #51 | Med | `analyzer.py:262` | Open. Failed startup swallowed → `indexing` forever; needs an error surface. |
 | DS-08 | #52 | Med | `core.py:56` (+architecture.md:195, tools.md) | Open. Blocking rebuild on the loop at startup; also a doc-mismatch. |
 | DS-09 | #53 | Med | `core.py:252` | Open. `document_symbols` uses `range.start`, not `selectionRange`. |
