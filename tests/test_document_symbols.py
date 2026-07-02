@@ -371,3 +371,63 @@ class TestDocumentSymbolsSkipping:
 
         assert result["status"] == STATUS_OK
         assert result["symbols"] == []
+
+
+# ---------------------------------------------------------------------------
+# DS-09: position comes from selectionRange (the name), not range
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentSymbolsSelectionRange:
+    """document_symbols must report the symbol NAME position (selectionRange),
+    not the start of the full declaration (range) — see DS-09 (#53).
+    """
+
+    def test_position_comes_from_selection_range_not_range(self) -> None:
+        """range = doc-comment/attribute line (10, 1); selectionRange = name (12, 8).
+
+        Simulates `/// docs\n#[attr]\npub fn foo` — range starts on the doc
+        comment, selectionRange starts on `foo`.  The emitted line/character
+        must reflect selectionRange (1-indexed: 13/9), not range (11/2).
+        """
+        from multilspy.multilspy_types import SymbolKind
+
+        sym: dict[str, Any] = {
+            "name": "foo",
+            "kind": SymbolKind.Function,
+            "range": {
+                "start": {"line": 10, "character": 1},
+                "end": {"line": 14, "character": 1},
+            },
+            "selectionRange": {
+                "start": {"line": 12, "character": 8},
+                "end": {"line": 12, "character": 11},
+            },
+        }
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", [sym])
+
+        assert result["status"] == STATUS_OK
+        s = result["symbols"][0]
+        assert s["line"] == 13, "expected selectionRange.start.line (12) + 1"
+        assert s["character"] == 9, "expected selectionRange.start.character (8) + 1"
+
+    def test_missing_selection_range_falls_back_to_range(self) -> None:
+        """No selectionRange at all -> falls back to range (defensive, unchanged)."""
+        from multilspy.multilspy_types import SymbolKind
+
+        sym: dict[str, Any] = {
+            "name": "foo",
+            "kind": SymbolKind.Function,
+            "range": {
+                "start": {"line": 10, "character": 1},
+                "end": {"line": 14, "character": 1},
+            },
+        }
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", [sym])
+
+        assert result["status"] == STATUS_OK
+        s = result["symbols"][0]
+        assert s["line"] == 11
+        assert s["character"] == 2
