@@ -125,9 +125,10 @@ What the pieces do:
     Podman, add a relabel suffix so the container can read the mount:
     `-v /absolute/path/to/your/rust/project:/project:ro,Z`. Plain `:ro` is
     correct for a standard Docker daemon.
-- `-v rust-lsp-mcp-data:/data` — a **named volume** for the documentation index,
-  Rust build cache, and the embedding model, so they are downloaded/built once
-  and reused across sessions ("download once").
+- `-v rust-lsp-mcp-data:/data` — a **named volume** for the documentation index
+  and the Rust build/dependency cache, so they are built once and reused across
+  sessions ("download once"). The embedding model is **baked into the image** at
+  build time, so it needs no download at runtime.
 
 The exact location of the config file depends on the client you are using; this
 shape is typical for clients such as Claude Desktop.
@@ -138,6 +139,86 @@ re-indexes the project (seconds to a couple of minutes — the build cache on th
 index is rebuilt each time). If you want rust-analyzer to stay hot between
 sessions, keep one container running and use `docker exec` instead — see
 [`docker-compose.yml`](docker-compose.yml).
+
+### Network isolation (recommended for untrusted code)
+
+Indexing a Rust project runs **untrusted code from that project on your host**:
+rust-analyzer compiles and executes the project's `build.rs` build scripts and
+proc-macros (this is how rust-analyzer works, not a flaw here). Combined with an
+un-isolated container, that code has read access to everything under `/project`
+and unrestricted outbound network — so a malicious project (or a malicious
+transitive crate) could exfiltrate your source. See
+[`docs/security/privacy-egress-audit.md`](docs/security/privacy-egress-audit.md)
+for the full analysis; no dependency of this server transmits your code on its
+own, but this build-script vector is real.
+
+The fix is to run the server with **no network**. Because the embedding model is
+baked into the image, the only remaining runtime network use is cargo fetching
+the scanned project's crates.io dependencies — which you warm **once** up front:
+
+**Default: warm the cache once, then run isolated (zero degradation).**
+
+1. **Prime** the dependency cache. `cargo fetch` downloads dependency *sources*
+   only — it runs no build scripts and expands no proc-macros, so unlike the
+   isolated run it executes no *compiled* project code:
+
+   ```
+   scripts/prime-cache.sh /absolute/path/to/your/rust/project
+   ```
+
+   (equivalently: `docker run --rm -v /abs/project:/project -v rust-lsp-mcp-data:/data
+   --entrypoint cargo rust-lsp-mcp fetch --manifest-path /project/Cargo.toml`.
+   The project is mounted **read-write** here so `cargo` can write `Cargo.lock`
+   if the project doesn't commit one. `scripts/prime-cache.sh` auto-detects
+   `docker` or `podman`; override with `CONTAINER_ENGINE=…`.)
+
+   > **Caveat — priming still makes network calls the project controls.** This
+   > step is network-*on*, and `cargo fetch` resolves and downloads every
+   > registry **and git** dependency the project declares — so a malicious
+   > `Cargo.toml` can cause outbound connections to attacker-chosen hosts (e.g. a
+   > `git = "https://attacker/…"` dependency) and check out untrusted repos into
+   > the cache. It does not *execute build scripts*, but it is not a hermetic
+   > step. Only prime projects whose dependency set you would already let cargo
+   > resolve; for fully untrusted code, prime behind the allowlist proxy below or
+   > skip priming and accept the degraded first-index (see alternatives).
+
+2. **Point your MCP client at the isolated config** — `--network none` plus
+   `CARGO_NET_OFFLINE=true`, with the project back to `:ro`:
+
+   ```json
+   {
+     "mcpServers": {
+       "rust-lsp-mcp": {
+         "command": "docker",
+         "args": [
+           "run", "-i", "--rm", "--network", "none",
+           "-e", "CARGO_NET_OFFLINE=true",
+           "-v", "/absolute/path/to/your/rust/project:/project:ro",
+           "-v", "rust-lsp-mcp-data:/data",
+           "rust-lsp-mcp"
+         ]
+       }
+     }
+   }
+   ```
+
+   With the cache warmed, rust-analyzer compiles proc-macros and runs build
+   scripts **from the cached sources, offline** — full analysis, and the executed
+   code has no network to exfiltrate through.
+
+**Alternatives:**
+
+- **Maximum caution (skip priming):** run the isolated config from the very first
+  index. rust-analyzer still resolves the standard library and all first-party
+  code, but resolution *into un-cached external crates* is degraded (missing
+  hover/goto for dependency types, and proc-macro-generated items won't appear)
+  until the cache is warmed. `search_docs` and `document_symbols` are unaffected.
+- **Convenience over isolation:** use the plain config above (no `--network none`)
+  — full analysis with no priming step, but no egress protection. Only appropriate
+  for projects you trust.
+- **Allowlist proxy:** if you must let cargo reach the network during analysis,
+  route egress through a proxy that permits only `static.crates.io` (and denies
+  arbitrary hosts) rather than opening the network wholesale.
 
 **Help your agent know when to use the server.** Wiring in the tools is not
 enough — an agent will often grep a Rust repo and never think to reach for the
