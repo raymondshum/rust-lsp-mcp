@@ -62,6 +62,9 @@ def _make_ready_manager() -> AnalyzerManager:
     mgr._shutdown_event = asyncio.Event()
     mgr._indexed_commit = None
     mgr._lsp = None
+    mgr._generation = 0
+    mgr._lifecycle_lock = asyncio.Lock()
+    mgr._closed = False
     return mgr
 
 

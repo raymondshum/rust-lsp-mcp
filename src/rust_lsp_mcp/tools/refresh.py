@@ -34,7 +34,12 @@ async def refresh() -> dict[str, Any]:
           cache; only the in-process LSP context is torn down and respawned.
         - ``restart()`` sets ``state = "indexing"`` as its very first action
           (before teardown begins), so callers never observe a stale ``"ready"``
-          during the re-index window.
+          during the re-index window.  Concurrent ``refresh`` calls serialize
+          behind ``restart()``'s internal lifecycle lock — a warm-up run that
+          gets superseded by a later refresh can never flip ``state`` back to
+          ``"ready"`` out from under the newer one.  If the analyzer has
+          already been shut down, ``restart()`` is a no-op (state stays
+          whatever it was at shutdown) — ``refresh`` still returns ``ok``.
         - If the doc store was never initialised (``get_doc_store()`` is
           ``None``), the rebuild is skipped gracefully; the analyzer restart
           still proceeds and ``ok`` is still returned.
