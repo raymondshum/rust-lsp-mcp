@@ -622,6 +622,59 @@ class TestSingletonLifecycle:
 
         clear_doc_store()
 
+    def test_init_doc_store_adopts_intentionally_empty_corpus(self, tmp_path: pathlib.Path) -> None:
+        """DS-24: an intentionally-empty completed corpus (0 markdown files) is
+        ADOPTED on the second init, not rebuilt every startup.
+
+        Before the fix, the adopt gate required ``count() > 0`` — a count-0
+        collection can never satisfy that, so ``rebuild()`` (writing nothing,
+        just the sentinel) ran on EVERY startup even though the empty corpus
+        never changes. The gate now relies solely on the ``build_complete``
+        sentinel + project_root fingerprint, matching what the empty-corpus
+        path in ``_rebuild_locked`` actually writes.
+        """
+        corpus = tmp_path / "empty_corpus"
+        corpus.mkdir()
+        settings = _make_settings(tmp_path, corpus)
+
+        clear_doc_store()
+        # First init: rebuild() runs, finds 0 markdown files, writes the
+        # build_complete sentinel + project_root fingerprint anyway.
+        store1 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert store1.is_ready is True
+        assert store1._collection.count() == 0
+        meta = store1._collection.metadata or {}
+        assert meta.get("build_complete") is True, (
+            "empty-corpus rebuild() must write the build_complete sentinel"
+        )
+        # search on an empty, ready store returns [] (-> the tool maps this to
+        # not_found, per doc_store.search's documented contract).
+        assert store1.search("anything", n_results=5) == []
+
+        clear_doc_store()
+
+        # Second init with the SAME settings: must ADOPT, not rebuild — spy on
+        # rebuild() (mirrors test_same_project_root_adopts_without_rebuild).
+        rebuild_calls: list[None] = []
+        orig_rebuild = DocStore.rebuild
+
+        def _spy_rebuild(self: DocStore) -> int:
+            rebuild_calls.append(None)
+            return orig_rebuild(self)
+
+        with patch.object(DocStore, "rebuild", _spy_rebuild):
+            store2 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+
+        assert store2.is_ready is True
+        assert store2._collection.count() == 0
+        assert rebuild_calls == [], (
+            "An intentionally-empty completed corpus must be ADOPTED on the "
+            "second init (DS-24) — rebuild() must not run again."
+        )
+        assert store2.search("anything", n_results=5) == []
+
+        clear_doc_store()
+
     def test_interrupted_build_triggers_rebuild(self, tmp_path: pathlib.Path) -> None:
         """Regression: collection with rows but NO build_complete sentinel is NOT adopted.
 
@@ -684,6 +737,50 @@ class TestSingletonLifecycle:
         assert meta.get("build_complete") is True, (
             "Sentinel must be present after rebuild triggered by interrupted-build detection"
         )
+
+        clear_doc_store()
+
+    def test_zero_row_collection_without_sentinel_triggers_rebuild(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """DS-24 edge case: a 0-row collection with NO sentinel is NOT adopted.
+
+        Distinct from ``test_init_doc_store_adopts_intentionally_empty_corpus``
+        (0 rows WITH the sentinel, from a completed empty-corpus rebuild): this
+        simulates a build interrupted before it wrote *any* rows (or before it
+        reached the empty-corpus sentinel write) — the count-0 collection must
+        still fall through to rebuild, exactly like the rows-but-no-sentinel
+        case above. Confirms dropping the ``count() > 0`` conjunct did not
+        accidentally make an unstamped, never-completed collection adoptable.
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)  # non-empty corpus — rebuild must actually index it.
+        settings = _make_settings(tmp_path, corpus)
+
+        fake_ef = FakeEmbeddingFunction()
+        client = chromadb.PersistentClient(
+            path=str(tmp_path / "chroma"),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        # Create the collection but add no rows and no sentinel at all.
+        empty_col = client.create_collection(
+            settings.doc_collection,
+            embedding_function=fake_ef,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+        empty_meta = empty_col.metadata or {}
+        assert empty_col.count() == 0
+        assert empty_meta.get("build_complete") is None
+
+        clear_doc_store()
+        store = init_doc_store(settings, embedding_function=fake_ef)
+
+        assert store.is_ready is True
+        # Real corpus content must have been indexed — proves rebuild() ran
+        # rather than silently adopting the empty, unstamped collection.
+        assert store._collection.count() > 0
+        meta = store._collection.metadata or {}
+        assert meta.get("build_complete") is True
 
         clear_doc_store()
 

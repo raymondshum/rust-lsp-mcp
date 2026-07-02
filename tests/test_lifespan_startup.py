@@ -173,7 +173,7 @@ class TestLifespanYieldsWhileBuildInFlight:
                     # implementation would never have reached this point
                     # inside the outer asyncio.wait_for, so it would deadlock
                     # rather than let us observe "building" here.
-                    result = status_mod.status()
+                    result = await status_mod.status()
                     assert result["doc_index_state"] == DOC_STATE_BUILDING
 
                     assert doc_store_mod._build_task is not None

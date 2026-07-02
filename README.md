@@ -123,8 +123,18 @@ What the pieces do:
   server is repo-agnostic — point it at any Rust project.
   - **SELinux (rootless Podman):** if your host enforces SELinux with rootless
     Podman, add a relabel suffix so the container can read the mount:
-    `-v /absolute/path/to/your/rust/project:/project:ro,Z`. Plain `:ro` is
+    `-v /absolute/path/to/your/rust/project:/project:ro,z`. Plain `:ro` is
     correct for a standard Docker daemon.
+    - **Shared (`z`) vs. private (`Z`):** use the lowercase, SHARED label `z`,
+      not the uppercase, private `Z` — this matches `scripts/prime-cache.sh`,
+      which mounts the same project tree with `:z`. The private `Z` relabels
+      the source tree with a category scoped to one container, which then
+      denies access to any OTHER container or tool (including a later
+      `prime-cache.sh` run, or `docker`/`podman` used interchangeably) that
+      mounts the same directory — the exact cross-container relabel conflict
+      `prime-cache.sh` warns about. The shared `z` label is compatible across
+      every container that mounts the same source tree, which is the case
+      here.
 - `-v rust-lsp-mcp-data:/data` — a **named volume** for the documentation index
   and the Rust build/dependency cache, so they are built once and reused across
   sessions ("download once"). The embedding model is **baked into the image** at

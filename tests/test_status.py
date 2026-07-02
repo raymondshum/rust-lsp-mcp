@@ -13,6 +13,7 @@ Test coverage:
     - All cases return status="ok" (tool is always ungated).
 """
 
+import asyncio
 import contextlib
 import subprocess
 from typing import Any
@@ -77,6 +78,11 @@ def _call_status(
     which is fine for tests that don't care about the doc-index fields but
     would be nondeterministic (and coupled to other test files' state) for
     tests that do.
+
+    DS-19: ``status`` is now an ``async def`` tool (it offloads the blocking
+    git subprocess call to a worker thread via ``asyncio.to_thread``) — drive
+    it with ``asyncio.run`` here so every existing synchronous caller/assertion
+    in this module keeps working unchanged.
     """
     import rust_lsp_mcp.core as core_mod
     import rust_lsp_mcp.tools.status as status_mod
@@ -97,7 +103,7 @@ def _call_status(
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
-        return status_mod.status()
+        return asyncio.run(status_mod.status())
 
 
 # ---------------------------------------------------------------------------
