@@ -26,22 +26,29 @@ producing session surfaced).
 
 ## What's left (grounded)
 
+**Effort status (2026-07-02 close-out):** all five actionable follow-ups (#87–#91) plus the two new
+follow-ups surfaced during resolution (#97 filed as a decision, #98 fixed) are **resolved and merged**
+(PRs #96, #101–#105 to `main`, each cherry-picked to `bob_prototype`). Only the decision items remain
+open: **#92**, **#97**, and **KI-8** — surfaced with recommendations, awaiting the owner's call.
+
 Each row was verified against the current tree (not recalled): grep/inspection results noted.
 
 | # | Sev | Where | Status / grounding |
 |---|-----|-------|--------------------|
-| #87 (FU-1, KI-9) | High | `analyzer.py` `request_*` delegates + multilspy 0.0.15 `server.py` | Open. Verified: no `wait_for`/timeout wraps any delegate await. A nav call awaiting `self._lsp.request_*` hangs forever if `refresh` drains a wedged analyzer (multilspy never fails pending requests on `stop()`). Analyzer-side analog of DS-12. **Highest-value.** |
-| #88 (FU-2) | Med | CI (`.github/workflows/`), `Dockerfile`, `tests/test_infra_scripts.py` | Open. Verified: CI builds **no** image; **no** test builds the image. DS-16/25/26 (production-image fixes) are guarded only by static text assertions. Add an image-build smoke test (git-as-root on bind mount; `--network none` startup; `status` non-null commit). |
-| #89 (FU-3) | Low | `doc_chunking.py` `_SETEXT_H1_RE`/`_SETEXT_H2_RE` + thematic/table detection | Open. Verified: setext/thematic regexes still anchor at column 0 (`^=+`, `^-+`). DS-23 fixed only `_HEADER_RE`/`_FENCE_RE`. Also the DS-11 blank-line-in-frontmatter trade-off. Low impact; watch the two non-misfire tests. |
-| #90 (FU-4) | Low | `tests/test_lifecycle_races.py`, `tests/test_doc_store.py` | Open. Verified: 0 `@pytest.mark.integration` in `test_lifecycle_races.py`. The DS-03/04/21 and DS-12 races are covered only by fast-tier fakes; add a couple of `-m integration` tests against the live analyzer / real ChromaDB to catch fake-vs-real drift. |
-| #91 (FU-5) | Low | `tools/refresh.py:40` | Open. Verified: `_doc_store_refresh_lock = asyncio.Lock()` is module-level. Binds to the first-contending loop (safe in prod; test footgun). Lazy per-loop accessor removes the caveat. |
+| #87 (FU-1, KI-9) | High | `analyzer.py` `request_*` delegates + multilspy 0.0.15 `server.py` | ✅ **Done** — PR #96. `_race_teardown` fails in-flight delegates on drain → `not_ready`; adversarial pass fixed a swallowed-cancel finding; KI-9 → Resolved. |
+| #88 (FU-2) | Med | CI (`.github/workflows/`), `Dockerfile`, `tests/test_infra_scripts.py` | ✅ **Done** — PR #101. Opt-in `RLM_IMAGE_SMOKE=1 pytest -m image` gate builds the image and proves DS-16/25 + end-to-end `status` with mutation controls; deliberately not in CI. |
+| #89 (FU-3) | Low | `doc_chunking.py` `_SETEXT_H1_RE`/`_SETEXT_H2_RE` + thematic/table detection | ✅ **Done** — PR #102. 0–3 space CommonMark allowance on the three regexes; guard tests untouched; DS-11 frontmatter trade-off stands. |
+| #90 (FU-4) | Low | `tests/test_lifecycle_races.py`, `tests/test_doc_store.py` | ✅ **Done** — PR #103. `tests/test_races_integration.py`: live refresh-mid-index (orphan-count, mutation-verified) + search-during-real-rebuild; deterministic-or-skip; ~23s gate delta. |
+| #91 (FU-5) | Low | `tools/refresh.py:40` | ✅ **Done** — PR #104. Per-loop lock accessor (WeakKeyDictionary); finding-3 tests no longer patch locks. |
 | #92 (FU-6) | Low / decision | `core.py` `_is_contained_relpath` | Open. DS-01 containment is purely lexical (documented in `tools.md`); an in-workspace symlink pointing outside isn't resolved. Accepted under the current threat model. **Decide** whether hostile-workspace isolation is a requirement before fixing. |
 | KI-8 | — / decision | `.devcontainer/devcontainer.json` | Open (register only, no issue). The dev container still provisions the Claude Code IDE extension rather than Bob's. A carried decision from the Bob port, not code-broken. |
+| #97 (FU-7) | Low / decision | `analyzer.py` `_race_teardown` | Open (filed during #87). Optional `REQUEST_TIMEOUT_SECONDS` wall-clock seam for the no-refresh-in-flight wedge. Recommendation: keep unbuilt unless the residual wait hurts in practice. |
+| #98 (FU-8) | Low | `tools/find_references.py` + all delegate guard sites | ✅ **Done** — PR #105 (filed and fixed during the effort). Typed `AnalyzerNotReadyError` + `require_ready()` re-consult at all 6 sites; truth-preserving for `state == "error"`. |
 
-**Recommended sequencing (human's call):** **#87 (KI-9)** first — it's a real hang on the documented recovery
-path, a self-contained analyzer fix, and the natural close-out of the DS-12/lifecycle work. Then **#88** (the
-production-image smoke test — the only guard for three shipped infra fixes). Then the three Lows (#89/#90/#91)
-opportunistically. #92 and KI-8 are decisions — surface, don't build, until the human calls them.
+**Recommended sequencing (human's call):** — **completed 2026-07-02** in the recommended order
+(#87 → #88 → #89/#90/#91 → #98). The remaining items are decisions: **#92** (lexical containment — keep
+documented limitation unless hostile-workspace isolation becomes a requirement), **#97** (timeout seam —
+keep unbuilt), **KI-8** (dev-container extension — Bob-port scope call).
 
 ## Model & orchestration preferences (carry forward; confirm if restated)
 
