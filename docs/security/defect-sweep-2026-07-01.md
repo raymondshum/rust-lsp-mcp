@@ -28,8 +28,8 @@ and the **GitHub issue** tracking it.
 
 | ID | Sev | Area | One-line | Issue |
 |----|-----|------|----------|-------|
-| DS-01 | High | security | Unvalidated `file` param → arbitrary file read (path traversal) | #45 |
-| DS-02 | High | tools | Out-of-workspace definitions leak as `..`-prefixed "relative" paths | #46 |
+| DS-01 | High | security | Unvalidated `file` param → arbitrary file read (path traversal) | #45 ✅ |
+| DS-02 | High | tools | Out-of-workspace definitions leak as `..`-prefixed "relative" paths | #46 ✅ |
 | DS-03 | High | core | `refresh` during indexing sticks state at a stale `ready` | #47 |
 | DS-04 | High | core | Drain-timeout cancel orphans the rust-analyzer subprocess | #48 |
 | DS-05 | High | rag | Doc store adopts an existing collection with zero freshness check | #49 |
@@ -83,6 +83,12 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Fix direction:** normalize and reject any `file` resolving outside
   `project_root` before calling the delegate; add tests for absolute and
   `..`-escaping inputs.
+- **Resolved:** 2026-07-01 (PR #65, fixed with DS-02 as one containment change).
+  Shared purely-lexical guard `core.validate_workspace_file`/`_is_contained_relpath`
+  rejects absolute/`..`-escaping/empty/NUL `file` with an `error` before the
+  delegate, and forwards the normalized path (defuses symlink+`..` laundering).
+  Adversarial pass `no-breaks`; the in-workspace-symlink limitation is documented
+  honestly in `tools.md`.
 
 ### DS-02 — Out-of-workspace definitions leak as `..`-prefixed "workspace-relative" paths
 - **Where:** `src/rust_lsp_mcp/core.py:181` (`location_to_external`).
@@ -100,6 +106,10 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   with DS-01 — a caller feeding the returned path back into another tool hits
   the traversal. Also inconsistent with `find_symbol`, which silently *skips*
   out-of-workspace results.
+- **Resolved:** 2026-07-01 (PR #65). `location_to_external` now containment-checks
+  `relativePath`; an out-of-workspace value falls back to the URI (also checked) or
+  is skipped, matching `find_symbol`. `goto_definition` all-skipped → `not_found`,
+  `find_references` all-skipped → `ok`+empty (each per its documented envelope).
 
 ### DS-03 — `refresh`/`restart` during indexing leaves state stuck at a stale `ready`
 - **Where:** `src/rust_lsp_mcp/analyzer.py:489` (`restart`), `_run` at `:254`.
