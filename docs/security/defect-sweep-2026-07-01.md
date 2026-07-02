@@ -37,8 +37,8 @@ and the **GitHub issue** tracking it.
 | DS-07 | Med | core | Failed analyzer startup is swallowed — `indexing` forever | #51 ✅ |
 | DS-08 | Med | core | Blocking doc rebuild on the event loop during lifespan startup | #52 ✅ |
 | DS-09 | Med | tools | `document_symbols` returns `range.start`, not `selectionRange` | #53 ✅ |
-| DS-10 | Med | rag | `---` after a closing code fence misparsed as a setext header | #54 |
-| DS-11 | Med | rag | Doc starting with `---` swallowed whole as frontmatter | #55 |
+| DS-10 | Med | rag | `---` after a closing code fence misparsed as a setext header | #54 ✅ |
+| DS-11 | Med | rag | Doc starting with `---` swallowed whole as frontmatter | #55 ✅ |
 | DS-12 | Med | rag | `refresh` rebuild races in-flight `search_docs` (no lock) | #56 |
 | DS-13 | Med | infra | `RLM_CARGO_*` / `RLM_RUST_ANALYZER_TARGET_DIR` are dead knobs | #57 |
 | DS-14 | Med | docs | `status` can't report doc-index readiness; recovery path loops | #58 ✅ |
@@ -50,7 +50,7 @@ and the **GitHub issue** tracking it.
 | DS-20 | Low | tools | Null `documentSymbol` → `error` envelope; `None`-check is dead code | #63 |
 | DS-21 | Low | core | Concurrent `refresh` not serialized → duplicate analyzer processes | #63 ✅ |
 | DS-22 | Low | tools | `search_docs` accepts empty/whitespace query, returns arbitrary top-k | #63 |
-| DS-23 | Low | rag | Indented (1–3 space) fences/headers missed, swallowing later headers | #63 |
+| DS-23 | Low | rag | Indented (1–3 space) fences/headers missed, swallowing later headers | #63 ✅ |
 | DS-24 | Low | rag | Empty-corpus `build_complete` sentinel is dead code | #63 |
 | DS-25 | Low | docs | Model-persistence advice contradicts the baked-model design | #63 |
 | DS-26 | Low | infra | Dockerfile comment claims RA reads `RA_TARGET_DIR`; it doesn't | #63 |
@@ -247,6 +247,8 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   rule, no blank line) yields a code chunk with an unclosed fence and a phantom
   section whose breadcrumb is `` … > ``` ``, polluting embeddings and
   breadcrumbs for the rest of that subtree.
+- **Resolved:** 2026-07-02 (PR #75). Fence delimiter lines (open and close) are no
+  longer setext-eligible, so a `---`/`===` after a closing fence is ordinary body.
 
 ### DS-11 — Doc whose first non-empty line is `---` is swallowed whole as frontmatter
 - **Where:** `src/rust_lsp_mcp/doc_chunking.py:293`.
@@ -257,6 +259,9 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
 - **Why it matters:** Any doc starting with a horizontal rule (or unterminated
   frontmatter) loses all header structure and breadcrumbs, degrading retrieval
   for that file.
+- **Resolved:** 2026-07-02 (PR #75). A pre-scan treats a leading `---` as frontmatter
+  only when it is a compact contiguous block with a closing `---`/`...`; a thematic
+  break or unterminated block falls through to normal header splitting.
 
 ### DS-12 — `refresh` rebuild races in-flight `search_docs` (no lock)
 - **Where:** `src/rust_lsp_mcp/doc_store.py:81` (`rebuild`);
@@ -403,6 +408,8 @@ Issues #45–#63 track these findings (DS-19…DS-28 are consolidated in roll-up
   `in_fence` never closes, and every subsequent header is treated as fence body.
 - **Why it matters:** Valid markdown destroys section structure/breadcrumbs for
   all following content in that file.
+- **Resolved:** 2026-07-02 (PR #75, with DS-10/DS-11). `_HEADER_RE`/`_FENCE_RE` allow
+  0–3 leading spaces (4+ stays indented code). (Issue #63 stays open for the other lows.)
 
 ### DS-24 — Empty-corpus `build_complete` sentinel is dead code
 - **Where:** `src/rust_lsp_mcp/doc_store.py:165`.
