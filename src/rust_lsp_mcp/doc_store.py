@@ -36,6 +36,18 @@ _log = logging.getLogger(__name__)
 _ADD_BATCH_SIZE = 500
 
 
+def _project_fingerprint(settings: Settings) -> str:
+    """Return a stable identity string for ``settings.project_root``.
+
+    Resolved to an absolute, symlink-free path so different spellings of the
+    same directory (relative vs absolute, trailing slash, symlink hops) match,
+    while genuinely different projects fingerprint differently.  Stored in
+    collection metadata at build time (DS-05) so a collection built for one
+    project is never silently adopted by a server pointed at another.
+    """
+    return str(pathlib.Path(settings.project_root).resolve())
+
+
 class DocStore:
     """ChromaDB-backed documentation search store.
 
@@ -82,6 +94,10 @@ class DocStore:
         self._collection = None
 
         collection_name = self._settings.doc_collection
+        # Computed once up front; stamped into collection metadata below so a
+        # later init_doc_store() can refuse to adopt a collection built for a
+        # different project_root (DS-05).
+        project_fingerprint = _project_fingerprint(self._settings)
 
         # Drop existing collection if present.
         try:
@@ -162,7 +178,12 @@ class DocStore:
         if total == 0:
             # Write completion sentinel so the adopt branch recognises an
             # intentionally-empty corpus as a completed (not interrupted) build.
-            collection.modify(metadata={"build_complete": True})
+            # project_root is stamped alongside it (DS-05) — modify() REPLACES
+            # metadata wholesale (verified against chromadb 1.5.9), so both keys
+            # must be written together in one call.
+            collection.modify(
+                metadata={"build_complete": True, "project_root": project_fingerprint}
+            )
             self._ready = True
             return 0
 
@@ -177,8 +198,9 @@ class DocStore:
 
         # Write completion sentinel BEFORE flipping is_ready — a hard-killed build
         # will lack this sentinel, causing init_doc_store to rebuild rather than
-        # adopt a silently-partial collection.
-        collection.modify(metadata={"build_complete": True})
+        # adopt a silently-partial collection.  project_root is stamped alongside
+        # it (DS-05) so a later init_doc_store() can detect cross-project reuse.
+        collection.modify(metadata={"build_complete": True, "project_root": project_fingerprint})
 
         # Only mark ready after ALL adds AND the sentinel are written.
         self._ready = True
@@ -250,28 +272,60 @@ def get_doc_store() -> DocStore | None:
     return _doc_store
 
 
-def init_doc_store(settings: Settings) -> DocStore:
+def init_doc_store(settings: Settings, embedding_function: Any | None = None) -> DocStore:
     """Construct the :class:`DocStore`, build it, set the singleton, return it.
 
     Called once from the FastMCP lifespan on startup.
 
     "Build once" persistence: if the ChromaDB collection already exists with
-    >0 items, adopt it and mark ready WITHOUT re-embedding.  Otherwise rebuild
-    from scratch.  This avoids re-embedding on every server restart when the
-    bind-mount data is already populated.
+    >0 items, was built for the SAME ``project_root`` (DS-05 identity check),
+    and carries the build-complete sentinel, adopt it and mark ready WITHOUT
+    re-embedding.  Otherwise rebuild from scratch.  This avoids re-embedding on
+    every server restart when the bind-mount data is already populated, while
+    refusing to silently serve a previous project's docs when
+    ``RLM_PROJECT_ROOT`` is repointed at a different project but the same
+    ``chroma_path``/``doc_collection`` (the documented shared-volume,
+    repo-agnostic flow).
+
+    Args:
+        settings: Runtime settings.
+        embedding_function: Optional ChromaDB embedding function forwarded to
+            the underlying :class:`DocStore` AND to the adopt-path
+            ``get_collection`` call.  ``None`` (production default) means "use
+            ChromaDB's default EF" — tests inject a deterministic fake so the
+            real adopt gate, interrupted-build fallback, and singleton
+            assignment run fully offline (DS-06).
     """
     global _doc_store
-    store = DocStore(settings)
+    store = DocStore(settings, embedding_function=embedding_function)
+    current_fingerprint = _project_fingerprint(settings)
 
     # Check whether a populated, fully-built collection already exists.
-    # Adopt ONLY when count() > 0 AND the build-complete sentinel is present.
+    # Adopt ONLY when count() > 0 AND the build-complete sentinel is present
+    # AND it was built for the SAME project_root (DS-05).
     # A collection that has rows but no sentinel = hard-killed mid-build (partial)
     # → fall through to a full rebuild so callers never get misleading partial results.
     adopted = False
     try:
-        existing = store._client.get_collection(settings.doc_collection)
+        # get_collection's default embedding_function is chromadb's
+        # DefaultEmbeddingFunction() (NOT None) — verified against chromadb
+        # 1.5.9. Passing embedding_function=None explicitly is NOT equivalent
+        # to omitting the kwarg for a non-default EF: a custom (test) EF must
+        # be passed through unchanged so the adopted collection queries with
+        # the SAME EF it was built with, entirely offline. So only pass the
+        # kwarg when it is not None, mirroring rebuild()'s create_kwargs
+        # pattern.
+        get_kwargs: dict[str, Any] = {}
+        if embedding_function is not None:
+            get_kwargs["embedding_function"] = embedding_function
+        existing = store._client.get_collection(settings.doc_collection, **get_kwargs)
         meta = existing.metadata or {}
-        if existing.count() > 0 and meta.get("build_complete"):
+        existing_project_root = meta.get("project_root")
+        if (
+            existing.count() > 0
+            and meta.get("build_complete")
+            and existing_project_root == current_fingerprint
+        ):
             _log.info(
                 "doc_store: adopting existing collection (%d chunks) — skipping rebuild",
                 existing.count(),
@@ -279,6 +333,18 @@ def init_doc_store(settings: Settings) -> DocStore:
             store._collection = existing
             store._ready = True
             adopted = True
+        elif existing.count() > 0 and meta.get("build_complete"):
+            # Sentinel present but built for a different project_root (or a
+            # pre-DS-05 collection with no project_root at all, which compares
+            # unequal to current_fingerprint and is safely treated the same
+            # way — backward compatible: it just triggers a rebuild instead of
+            # silently adopting an unidentified collection).
+            _log.info(
+                "doc_store: collection was built for project_root=%r but current is %r"
+                " — rebuilding",
+                existing_project_root,
+                current_fingerprint,
+            )
         elif existing.count() > 0:
             _log.info(
                 "doc_store: existing collection has %d chunks but missing build_complete sentinel"

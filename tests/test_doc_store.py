@@ -313,11 +313,7 @@ class TestSingletonLifecycle:
         settings = _make_settings(tmp_path, corpus)
 
         clear_doc_store()
-        store = (
-            init_doc_store.__wrapped__(settings)
-            if hasattr(init_doc_store, "__wrapped__")
-            else _init_with_fake_ef(settings, tmp_path)
-        )
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
         assert get_doc_store() is store
         clear_doc_store()
 
@@ -327,7 +323,7 @@ class TestSingletonLifecycle:
         settings = _make_settings(tmp_path, corpus)
 
         clear_doc_store()
-        _init_with_fake_ef(settings, tmp_path)
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
         assert get_doc_store() is not None
 
         clear_doc_store()
@@ -341,7 +337,7 @@ class TestSingletonLifecycle:
 
         clear_doc_store()
         # First init: builds from scratch, writes build_complete sentinel.
-        store1 = _init_with_fake_ef(settings, tmp_path)
+        store1 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
         count1 = store1._collection.count()
         assert count1 > 0
         assert store1.is_ready is True
@@ -353,7 +349,7 @@ class TestSingletonLifecycle:
 
         clear_doc_store()
         # Second init with same chroma_path: should ADOPT (sentinel present).
-        store2 = _init_with_fake_ef(settings, tmp_path)
+        store2 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
         assert store2.is_ready is True
         assert store2._collection.count() == count1
 
@@ -365,13 +361,20 @@ class TestSingletonLifecycle:
         Simulates a hard-killed mid-build: rows exist but sentinel was never
         written.  init_doc_store must rebuild rather than serve partial results.
         This exercises the readiness invariant (no misleading partial answers).
+
+        The partial collection is stamped with the CURRENT project's
+        ``project_root`` fingerprint but WITHOUT ``build_complete`` — this
+        isolates the sentinel conjunct in the adopt gate: the fingerprint
+        matches, so the ONLY thing preventing adoption is the missing sentinel.
+        Removing the ``and meta.get("build_complete")`` conjunct from
+        init_doc_store would make this test fail.
         """
         corpus = tmp_path / "corpus"
         _write_corpus(corpus)
         settings = _make_settings(tmp_path, corpus)
 
         # Simulate an interrupted build: create collection and add rows, but
-        # deliberately skip collection.modify(metadata={"build_complete": True}).
+        # deliberately skip the build_complete sentinel.
         fake_ef = FakeEmbeddingFunction()
         # Match DocStore's client settings (telemetry off) — ChromaDB caches one
         # system per path and requires subsequent clients to use identical settings.
@@ -385,12 +388,18 @@ class TestSingletonLifecycle:
             configuration={"hnsw": {"space": "cosine"}},
         )
         partial_col.add(ids=["partial-1"], documents=["orphaned chunk from interrupted build"])
-        # Confirm no sentinel is present.
-        assert (partial_col.metadata or {}).get("build_complete") is None
+        # Stamp the CURRENT project's fingerprint but NOT build_complete, so the
+        # fingerprint check passes and only the missing sentinel blocks adoption.
+        current_fingerprint = str(pathlib.Path(settings.project_root).resolve())
+        partial_col.modify(metadata={"project_root": current_fingerprint})
+        # Confirm the fingerprint matches but the sentinel is absent.
+        partial_meta = partial_col.metadata or {}
+        assert partial_meta.get("project_root") == current_fingerprint
+        assert partial_meta.get("build_complete") is None
 
-        # Now call _init_with_fake_ef (which mirrors init_doc_store sentinel logic).
+        # Now call the real init_doc_store.
         clear_doc_store()
-        store = _init_with_fake_ef(settings, tmp_path)
+        store = init_doc_store(settings, embedding_function=fake_ef)
 
         # Must be ready (rebuild ran to completion).
         assert store.is_ready is True
@@ -407,6 +416,129 @@ class TestSingletonLifecycle:
         meta = store._collection.metadata or {}
         assert meta.get("build_complete") is True, (
             "Sentinel must be present after rebuild triggered by interrupted-build detection"
+        )
+
+        clear_doc_store()
+
+    def test_init_doc_store_assigns_ready_singleton(self, tmp_path: pathlib.Path) -> None:
+        """The singleton is assigned AND the returned store is ready.
+
+        Distinct from test_init_doc_store_sets_singleton: that only checks the
+        identity assignment; this additionally guards that init_doc_store does
+        NOT publish a not-ready store as the singleton (a mutant that assigned
+        the singleton before rebuild completed, leaving is_ready False, would
+        pass the plain identity check but fail here).
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        clear_doc_store()
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        published = get_doc_store()
+        assert published is store
+        assert published is not None
+        assert published.is_ready is True
+        clear_doc_store()
+
+
+# ---------------------------------------------------------------------------
+# DS-05: cross-project contamination — collection identity checks.
+# ---------------------------------------------------------------------------
+
+
+class TestDocStoreCrossProjectIdentity:
+    def test_repointing_project_root_does_not_adopt_other_project(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Repointing project_root at a DIFFERENT project must not adopt the
+        previous project's collection, even with the same chroma_path/doc_collection.
+
+        Regression for DS-05: pre-fix, init_doc_store adopted any collection
+        with count() > 0 and build_complete set, with no identity check —
+        searching project B's store silently returned project A's docs.
+        """
+        chroma_path = tmp_path / "chroma"
+
+        corpus_a = tmp_path / "project_a"
+        corpus_a.mkdir(parents=True, exist_ok=True)
+        (corpus_a / "a.md").write_text(
+            "# Project A\n\nThis mentions zzzunique_alpha_token in its docs.\n",
+            encoding="utf-8",
+        )
+        settings_a = Settings(
+            chroma_path=str(chroma_path),
+            project_root=str(corpus_a),
+            doc_glob_patterns="**/*.md",
+        )
+
+        corpus_b = tmp_path / "project_b"
+        corpus_b.mkdir(parents=True, exist_ok=True)
+        (corpus_b / "b.md").write_text(
+            "# Project B\n\nThis mentions zzzunique_beta_token in its docs.\n",
+            encoding="utf-8",
+        )
+        settings_b = Settings(
+            chroma_path=str(chroma_path),
+            project_root=str(corpus_b),
+            doc_glob_patterns="**/*.md",
+            doc_collection=settings_a.doc_collection,  # SAME collection name.
+        )
+
+        clear_doc_store()
+        store_a = init_doc_store(settings_a, embedding_function=FakeEmbeddingFunction())
+        assert store_a.is_ready is True
+        results_a = store_a.search("zzzunique_alpha_token", n_results=5)
+        assert any("zzzunique_alpha_token" in r["text"] for r in results_a), (
+            "Project A's own store must find A's content"
+        )
+        clear_doc_store()
+
+        # Repoint at a DIFFERENT project_root, same chroma_path + doc_collection.
+        store_b = init_doc_store(settings_b, embedding_function=FakeEmbeddingFunction())
+        assert store_b.is_ready is True
+
+        results_b_for_beta = store_b.search("zzzunique_beta_token", n_results=5)
+        assert any("zzzunique_beta_token" in r["text"] for r in results_b_for_beta), (
+            "Project B's store must be rebuilt for B and find B's content"
+        )
+
+        results_b_for_alpha = store_b.search("zzzunique_alpha_token", n_results=5)
+        alpha_hits = [r for r in results_b_for_alpha if "zzzunique_alpha_token" in r["text"]]
+        assert alpha_hits == [], (
+            "Project B's store must NOT contain project A's content — "
+            "cross-project contamination (DS-05)"
+        )
+
+        clear_doc_store()
+
+    def test_same_project_root_adopts_without_rebuild(self, tmp_path: pathlib.Path) -> None:
+        """Re-init with the SAME project_root + chroma_path adopts (build-once
+        persistence is preserved) — rebuild() must NOT be called on the second init.
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        clear_doc_store()
+        store1 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert store1.is_ready is True
+        clear_doc_store()
+
+        rebuild_calls: list[None] = []
+        orig_rebuild = DocStore.rebuild
+
+        def _spy_rebuild(self: DocStore) -> int:
+            rebuild_calls.append(None)
+            return orig_rebuild(self)
+
+        with patch.object(DocStore, "rebuild", _spy_rebuild):
+            store2 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+
+        assert store2.is_ready is True
+        assert rebuild_calls == [], (
+            "Same project_root + chroma_path must adopt, not rebuild "
+            "(build-once persistence, DS-05 scope)"
         )
 
         clear_doc_store()
@@ -484,44 +616,6 @@ class TestDocStoreExcludePatterns:
             "Expected CHANGELOG.md to be indexed when doc_exclude_patterns is empty"
         )
         assert any("guide.md" in f for f in files_found), "Expected guide.md to be indexed"
-
-
-def _init_with_fake_ef(settings: Settings, tmp_path: pathlib.Path) -> DocStore:
-    """Helper: init DocStore with a fake EF (bypasses model download).
-
-    Mirrors the init_doc_store adopt-branch logic, including:
-    - passing the fake EF to get_collection so adopted collections use FakeEF
-      (not DefaultEmbeddingFunction) — keeps tests fully offline.
-    - checking the build_complete sentinel before adopting (Finding 1 / Finding 3).
-    """
-    fake_ef = FakeEmbeddingFunction()
-    store = DocStore(settings, embedding_function=fake_ef)
-
-    from chromadb.errors import NotFoundError
-
-    # Mirror init_doc_store logic but inject the fake EF on both paths.
-    adopted = False
-    try:
-        # Pass embedding_function so the adopted collection uses FakeEF, not
-        # DefaultEF — without this the adopt path would silently trigger a real
-        # model download, breaking offline test isolation.
-        existing = store._client.get_collection(settings.doc_collection, embedding_function=fake_ef)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-        meta = existing.metadata or {}
-        if existing.count() > 0 and meta.get("build_complete"):
-            store._collection = existing
-            store._ready = True
-            adopted = True
-    except NotFoundError:
-        pass
-
-    if not adopted:
-        store.rebuild()
-
-    # Wire into singleton.
-    import rust_lsp_mcp.doc_store as _mod
-
-    _mod._doc_store = store
-    return store
 
 
 def test_two_doc_stores_same_path_do_not_raise(tmp_path: pathlib.Path) -> None:
