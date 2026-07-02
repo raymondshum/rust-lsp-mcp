@@ -31,6 +31,9 @@ lives on `main` at `.bob/skills/session-handoff/SKILL.md`:
   hardening follow-ups: KI-9 (#87, nav-delegate hang), a production-image smoke test (#88), and the Lows
   #89–#92. Tracker: GitHub issues **#87–#92** (label `followup-2026-07-02`); living register
   [../impl/known-issues.md](../impl/known-issues.md) (KI-8, KI-9).
-- The 2026-07-01 defect-sweep resolution (issues #45–#63, DS-01…DS-28) is **complete** — evidence in
-  [../security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md) (all rows ✅). Its own
-  session seed (`defect-sweep-resolution-handoff.md`) lives on the `bob_prototype` branch only.
+- [defect-sweep-resolution-handoff.md](defect-sweep-resolution-handoff.md) — seed that drove the 2026-07-01
+  defect-sweep resolution (issues #45–#63, DS-01…DS-28) to **completion** (PRs #65–#85); evidence in
+  [../security/defect-sweep-2026-07-01.md](../security/defect-sweep-2026-07-01.md) (all rows ✅). Kicked off
+  with the [resolve-defect-sweep skill](../../.bob/skills/resolve-defect-sweep/SKILL.md) — a
+  Fable-orchestrated Claude Code effort, so both it and this seed are `main`-first (cherry-picked to
+  `bob_prototype`), like the code and audit they cover.
