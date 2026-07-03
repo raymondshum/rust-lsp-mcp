@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-02
 **Method:** 3-phase multi-agent workflow — 6 fact-sheet readers → 5 usability analysts by dimension → 1 adversarial verifier per finding (36 agents total). 1 finding rejected in verification.
-**Status:** Round-2 adversarial review (24 red-team agents + 3 cross-cutting critics, 2026-07-02): COMPLETE — dispositions below.
+**Status:** Round-2 adversarial review (24 red-team agents + 3 cross-cutting critics, 2026-07-02): COMPLETE — dispositions below. Implementation: COMPLETE 2026-07-03 — Batch A (PR #108), Batch B (PR #109), Batch C (PR #110), Batch D (PR #111); UR-17 parked for a design session; CC-2/CC-3/CC-5 registered in known-issues.
 
 ## Summary
 
@@ -64,6 +64,15 @@
 
 - **Sequencing:** Batch A (text-only, contract-safe): UR-1, UR-2, UR-7, UR-8, UR-9, UR-10, UR-14, UR-22. Batch B (envelope): UR-6 first, then structured wiring of 7/8/9/10. Batch C (response shape): UR-11 (+5/12), UR-16 (+13), UR-18. Batch D (observability): UR-20 (+24), UR-21. UR-17 goes to a grill/plan session.
 - **New candidates from the completeness critic (not yet triaged):** CC-1 no ToolAnnotations (readOnlyHint/destructiveHint) on any tool; CC-2 out-of-workspace (std/deps) definitions degrade to a misleading not_found; CC-3 MCP resources/prompts unused; CC-4 refresh's global blast radius/latency undisclosed in its description; CC-5 no version introspection (server / rust-analyzer / multilspy).
+
+### Implementation record (2026-07-03)
+
+- **Batch A — PR #108** (merged): UR-1 (+UR-19 folded), UR-2 (description-only), UR-7/8/9/10 message halves, UR-14, UR-22. 4 tests added post-review for the UR-14 strip and UR-10's two messages; review also surfaced that an empty-list LSP response must take the zero-matches message (`if not raw:`).
+- **Batch B — PR #109** (merged): UR-6 narrowed (`recovery` field: fix_input | refresh | poll_status | unknown) + structured wiring of UR-7/8/9/10; CC-1 (ToolAnnotations: readOnlyHint everywhere, refresh destructive/non-idempotent); CC-4 (refresh blast-radius disclosure). Accepted tradeoff: the doc-rebuild-failure site carries `recovery="refresh"` under the four-value constraint — a purely field-branching agent could re-trigger the destructive restart; the message text is the guardrail. Revisit only if agents are observed looping on it.
+- **Batch C — PR #110** (merged): UR-11 (total/truncated, MAX_LIST_RESULTS=200; absorbs UR-5/UR-12 incl. the search_docs limit ceiling), UR-16 (opt-in include_source on find_references; absorbs UR-13), UR-18 (local `detail` on document_symbols). Review catch fixed pre-merge: source lines split on "\n" only (splitlines() would shift lines after \f et al.).
+- **Batch D — PR #111** (merged): UR-20 (`doc_index_chunk_count`, None-vs-0 semantics incl. the DS-24 adopt path; absorbs UR-24), UR-21 narrowed (advisory preflight via lifespan, surfaced as `preflight_warnings`). Review hardening applied: preflight body exception-guarded so "never fatal" is unconditional.
+- **Caveat on UR-15**: its round-2 red-team agent returned near-placeholder output; the drop disposition rests on the contract-compat critic's independent evidence (removing a documented always-present key), which was verified against tools.md and the settled schema.
+- **Dropped, confirmed not implemented**: UR-3, UR-4, UR-15, UR-23.
 
 ## UR-1 — Position tools never tell the agent how to obtain a position (the find_symbol→goto chain is undocumented)
 
