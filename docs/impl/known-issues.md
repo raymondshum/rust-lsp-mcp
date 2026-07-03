@@ -45,7 +45,8 @@ Check this list at these lifecycle checkpoints (see
   the position/null-vs-empty ambiguities mirror the exact class of bugs UR-10
   and UR-11 already found in the existing tools — building this without a
   grill/plan session risks repeating both.
-- **Status:** open — needs a grill/plan session before implementation.
+- **Status:** open — needs a grill/plan session before implementation. Tracked
+  as [#113](https://github.com/raymondshum/rust-lsp-mcp/issues/113).
   Reference: [docs/audit/2026-07-02-usability-review.md](../audit/2026-07-02-usability-review.md) UR-17.
 
 ### KI-11 — Out-of-workspace navigation degrades to a misleading `not_found`
@@ -63,7 +64,9 @@ Check this list at these lifecycle checkpoints (see
   false-negative indistinguishable from "you misspelled this / it doesn't
   exist," which is worse than an honest "outside workspace" answer and can
   send the agent down an unproductive debugging path.
-- **Status:** open. Reference: docs/audit/2026-07-02-usability-review.md,
+- **Status:** open. Tracked as
+  [#114](https://github.com/raymondshum/rust-lsp-mcp/issues/114).
+  Reference: docs/audit/2026-07-02-usability-review.md,
   Cross-cutting findings, completeness critic (CC-2).
 
 ### KI-12 — No version introspection
@@ -77,7 +80,9 @@ Check this list at these lifecycle checkpoints (see
   subtly wrong navigation results (missing features, different position
   semantics) with no in-band signal to distinguish "healthy but old" from
   "healthy and current," pushing diagnosis outside the MCP boundary.
-- **Status:** open. Reference: docs/audit/2026-07-02-usability-review.md,
+- **Status:** open. Tracked as
+  [#115](https://github.com/raymondshum/rust-lsp-mcp/issues/115).
+  Reference: docs/audit/2026-07-02-usability-review.md,
   Cross-cutting findings, completeness critic (CC-5).
 
 ---
