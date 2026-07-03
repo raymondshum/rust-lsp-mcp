@@ -15,6 +15,7 @@ from rust_lsp_mcp.analyzer import (
     AnalyzerTornDownError,
 )
 from rust_lsp_mcp.core import (
+    cap_list_results,
     get_manager,
     mcp,
     require_ready,
@@ -43,7 +44,10 @@ async def document_symbols(file: str) -> dict[str, Any]:
     - ``ok`` + ``symbols`` list — query succeeded.  The list may be empty if the
       file exists but defines no symbols.  **Empty symbols is not an error** — it
       is a valid, meaningful answer (e.g. a file with only comments or macros).
-      Each symbol::
+      Also always carries ``total`` (the full symbol count, before any cap) and
+      ``truncated`` (``true`` only when the list exceeded ``MAX_LIST_RESULTS``
+      == 200, in which case only the first 200 symbols, in existing order, are
+      returned).  Each symbol::
 
           {
             "name":      str,        # symbol name as declared
@@ -51,7 +55,15 @@ async def document_symbols(file: str) -> dict[str, Any]:
             "line":      int,        # 1-indexed line number of the symbol NAME
             "character": int,        # 1-indexed character offset of the symbol NAME
             "container": str | null  # enclosing scope name, or null
+            "detail":    str,        # OPTIONAL — present only when rust-analyzer
+                                     # supplied a non-empty signature for this symbol
           }
+
+      ``detail`` is rust-analyzer's ``DocumentSymbol.detail`` string (typically
+      the symbol's signature, e.g. ``"fn foo(x: u32) -> bool"``) — omitted
+      entirely when absent or empty, never emitted as ``null`` (see UR-15's
+      rejected always-``null`` pattern in
+      ``docs/audit/2026-07-02-usability-review.md``).
 
       ``line``/``character`` point at the symbol's *name* (LSP
       ``selectionRange``), not the start of the full declaration — so a symbol
@@ -131,6 +143,19 @@ async def document_symbols(file: str) -> dict[str, Any]:
             "character": mapped["character"],
             "container": mapped["container"],
         }
+        # UR-18 (revised): surface rust-analyzer's signature when present.
+        # Read directly off the raw LSP symbol here (not threaded through
+        # symbol_to_external / find_symbol — workspace/symbol results have no
+        # `detail` field, so adding it there would only add an always-null key).
+        # Omit the key entirely when absent/empty rather than emitting
+        # "detail": null (the always-null pattern UR-15 rejected).
+        detail = sym.get("detail")
+        if detail:
+            entry["detail"] = detail
         symbols.append(entry)
 
-    return ok(symbols=symbols)
+    # UR-11 (revised): always report the full count, and cap the returned page
+    # at MAX_LIST_RESULTS (preserving order) rather than silently dumping an
+    # unbounded list.
+    capped, total, truncated = cap_list_results(symbols)
+    return ok(symbols=capped, total=total, truncated=truncated)

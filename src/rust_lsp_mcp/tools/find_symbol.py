@@ -14,7 +14,7 @@ from rust_lsp_mcp.analyzer import (
     AnalyzerNotReadyError,
     AnalyzerTornDownError,
 )
-from rust_lsp_mcp.core import get_manager, mcp, require_ready, symbol_to_external
+from rust_lsp_mcp.core import cap_list_results, get_manager, mcp, require_ready, symbol_to_external
 from rust_lsp_mcp.envelope import lsp_failure, not_found, not_ready, ok
 
 _log = logging.getLogger(__name__)
@@ -34,7 +34,11 @@ async def find_symbol(name: str) -> dict[str, Any]:
 
     Returns a ``{status, ...}`` envelope:
 
-    - ``ok`` + ``results`` list — one or more candidates found.  Each candidate::
+    - ``ok`` + ``results`` list — one or more candidates found.  Also always
+      carries ``total`` (the full candidate count, before any cap) and
+      ``truncated`` (``true`` only when the list exceeded ``MAX_LIST_RESULTS``
+      == 200, in which case only the first 200 candidates, in existing order,
+      are returned).  Each candidate::
 
           {
             "name":      str,          # symbol name as declared
@@ -47,6 +51,10 @@ async def find_symbol(name: str) -> dict[str, Any]:
 
       Multiple candidates are a normal multi-hit list — the caller picks the
       right one by kind/container/location.  There is no ``ambiguous`` status.
+      There is deliberately no ``detail``/signature field here — workspace-symbol
+      results carry no such data (rust-analyzer only populates ``detail`` on
+      ``document_symbols``); see ``docs/audit/2026-07-02-usability-review.md``
+      (UR-18).
 
     - ``not_found`` — zero matches (or the LSP returned null).  This means
       name resolution failed; it is NOT the same as ``ok``+empty.
@@ -117,4 +125,8 @@ async def find_symbol(name: str) -> dict[str, Any]:
             "std are not returned)."
         )
 
-    return ok(results=results)
+    # UR-11 (revised): always report the full count, and cap the returned page
+    # at MAX_LIST_RESULTS (preserving order) rather than silently dumping an
+    # unbounded list.
+    capped, total, truncated = cap_list_results(results)
+    return ok(results=capped, total=total, truncated=truncated)

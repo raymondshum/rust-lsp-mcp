@@ -425,3 +425,35 @@ def symbol_to_external(
         "character": character,
         "container": sym.get("containerName"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Response-size cap — shared by every list-returning navigation tool
+# ---------------------------------------------------------------------------
+
+# High safety cap on unbounded LSP result lists (find_references, find_symbol,
+# document_symbols). No pagination/offset — narrowing the query (a more
+# specific position/name) is the intended way to get past this, not paging.
+# See docs/audit/2026-07-02-usability-review.md, UR-11 (revised, absorbs UR-5
+# and UR-12): always report `total`, and only set `truncated: true` when the
+# full list actually exceeds the cap.
+MAX_LIST_RESULTS = 200
+
+
+def cap_list_results(items: list[Any]) -> tuple[list[Any], int, bool]:
+    """Cap a result list at ``MAX_LIST_RESULTS``, preserving existing order.
+
+    Args:
+        items: The full, already-ordered result list.
+
+    Returns:
+        A 3-tuple ``(page, total, truncated)`` where ``page`` is ``items``
+        unchanged when ``len(items) <= MAX_LIST_RESULTS``, else the first
+        ``MAX_LIST_RESULTS`` items; ``total`` is ``len(items)`` (the full,
+        pre-cap count); and ``truncated`` is ``True`` only when the cap
+        actually cut the list.
+    """
+    total = len(items)
+    if total > MAX_LIST_RESULTS:
+        return items[:MAX_LIST_RESULTS], total, True
+    return items, total, False

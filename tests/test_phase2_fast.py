@@ -751,3 +751,44 @@ class TestUriDotDotEscapeHardening:
         assert result["status"] == STATUS_OK
         r = result["results"][0]
         assert r["file"] == "lib.rs"  # normalized path relative to repo root
+
+
+# ---------------------------------------------------------------------------
+# UR-11 (revised): total / truncated
+# ---------------------------------------------------------------------------
+
+
+class TestFindSymbolTotalAndTruncation:
+    """ok envelopes always carry total/truncated; cap kicks in over MAX_LIST_RESULTS."""
+
+    def test_total_matches_result_count_under_cap(self) -> None:
+        from multilspy.multilspy_types import SymbolKind
+
+        syms = [
+            _sym("build", SymbolKind.Method, "src/a.rs", 10, 4, container="Builder"),
+            _sym("build", SymbolKind.Function, "src/b.rs", 20, 0),
+        ]
+        mgr = _make_manager(STATE_READY)
+        result = _run_find_symbol(mgr, "build", syms)
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 2
+        assert result["truncated"] is False
+        assert len(result["results"]) == 2
+
+    def test_truncation_over_cap(self) -> None:
+        """More than MAX_LIST_RESULTS (200) candidates -> capped page + truncated=True."""
+        from multilspy.multilspy_types import SymbolKind
+
+        syms = [
+            _sym(f"sym_{i:03d}", SymbolKind.Function, f"src/f{i:03d}.rs", i, 0) for i in range(250)
+        ]
+        mgr = _make_manager(STATE_READY)
+        result = _run_find_symbol(mgr, "sym_", syms)
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 250
+        assert result["truncated"] is True
+        assert len(result["results"]) == 200
+        names = [r["name"] for r in result["results"]]
+        assert names == [f"sym_{i:03d}" for i in range(200)]

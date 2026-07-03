@@ -31,9 +31,19 @@ Test coverage:
     Mapping / deduplication:
         - Unmappable locations (None from location_to_external) are skipped.
         - Multiple references from different files all appear in output.
+    total / truncated (UR-11, revised):
+        - total is always present and correct, including total==0.
+        - truncated is False under the cap, True over it (250 -> 200 + total=250).
+        - Order is preserved under truncation.
+    include_source (UR-16, revised):
+        - Default off is byte-compatible (no "source" key).
+        - True populates "source" from a real on-disk file.
+        - Unreadable file -> source=None, never raises.
+        - The cap is applied BEFORE enrichment (>=200 hits never all read).
 """
 
 import asyncio
+import pathlib
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -77,6 +87,23 @@ def _make_location(rel_path: str, lsp_line: int, lsp_character: int) -> dict[str
     }
 
 
+def _loc_in_root(root: str, rel_path: str, lsp_line: int, lsp_character: int) -> dict[str, Any]:
+    """Like ``_make_location`` but the URI is anchored under an explicit ``root``.
+
+    Needed for include_source tests that point ``mgr._repository_root`` at a
+    real (e.g. ``tmp_path``) directory rather than the fixed ``/fake/repo`` —
+    ``location_to_external`` derives the relative path from the URI, so the
+    URI must actually live under the same root the tool will read from.
+    """
+    return {
+        "uri": f"file://{root.rstrip('/')}/{rel_path}",
+        "range": {
+            "start": {"line": lsp_line, "character": lsp_character},
+            "end": {"line": lsp_line, "character": lsp_character + 1},
+        },
+    }
+
+
 def _run_find_references(
     manager: AnalyzerManager | None,
     file: str,
@@ -85,6 +112,7 @@ def _run_find_references(
     include_declaration: bool,
     refs_result: list[Any],
     defs_result: list[Any] | None = None,
+    include_source: bool = False,
 ) -> dict[str, Any]:
     """Patch core._manager and call find_references; inject fake LSP results.
 
@@ -108,6 +136,7 @@ def _run_find_references(
                         line=line,
                         character=character,
                         include_declaration=include_declaration,
+                        include_source=include_source,
                     )
                     # Expose mocks for test introspection via a side-channel.
                     # We stash them on the result dict under a private key so
@@ -122,6 +151,7 @@ def _run_find_references(
                     line=line,
                     character=character,
                     include_declaration=include_declaration,
+                    include_source=include_source,
                 )
 
     return asyncio.run(_inner())
@@ -632,6 +662,122 @@ class TestErrorHandling:
         assert result["status"] == STATUS_ERROR
         assert "message" in result
         assert "def boom" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# UR-11 (revised): total / truncated
+# ---------------------------------------------------------------------------
+
+
+class TestTotalAndTruncation:
+    """ok envelopes always carry total/truncated; cap kicks in over MAX_LIST_RESULTS."""
+
+    def test_total_zero_when_no_references(self) -> None:
+        """total answers the ok+[] case (UR-5, folded into UR-11) without a new flag."""
+        mgr = _make_manager(STATE_READY)
+        result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, [])
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 0
+        assert result["truncated"] is False
+
+    def test_total_matches_reference_count_under_cap(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        refs = [
+            _make_location("src/a.rs", 0, 0),
+            _make_location("src/b.rs", 4, 12),
+        ]
+        result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, refs)
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 2
+        assert result["truncated"] is False
+        assert len(result["references"]) == 2
+
+    def test_truncation_over_cap(self) -> None:
+        """More than MAX_LIST_RESULTS (200) references -> capped page + truncated=True."""
+        mgr = _make_manager(STATE_READY)
+        refs = [_make_location(f"src/f{i:03d}.rs", i, 0) for i in range(250)]
+        result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, refs)
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 250
+        assert result["truncated"] is True
+        assert len(result["references"]) == 200
+
+    def test_order_preserved_under_truncation(self) -> None:
+        """The first 200 entries in existing order are returned, not an arbitrary subset."""
+        mgr = _make_manager(STATE_READY)
+        refs = [_make_location(f"src/f{i:03d}.rs", i, 0) for i in range(210)]
+        result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, refs)
+
+        files = [r["file"] for r in result["references"]]
+        assert files == [f"src/f{i:03d}.rs" for i in range(200)]
+
+
+# ---------------------------------------------------------------------------
+# UR-16 (revised): opt-in include_source enrichment
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeSource:
+    """include_source=False (default) is byte-compatible; =True adds `source`."""
+
+    def test_default_off_no_source_key(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        refs = [_make_location("src/main.rs", 9, 3)]
+        result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, refs)
+
+        assert "source" not in result["references"][0]
+
+    def test_include_source_true_populates_source_for_real_file(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "lib.rs").write_text("fn foo() {}\nfn bar() { foo(); }\n")
+
+        mgr = _make_manager(STATE_READY)
+        mgr._repository_root = str(tmp_path)
+
+        # LSP line=1 (0-indexed) -> external line 2 -> "fn bar() { foo(); }".
+        refs = [_loc_in_root(str(tmp_path), "src/lib.rs", 1, 11)]
+        result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, refs, include_source=True)
+
+        assert result["status"] == STATUS_OK
+        ref = result["references"][0]
+        assert ref["line"] == 2
+        assert ref["source"] == "fn bar() { foo(); }"
+
+    def test_include_source_null_for_unreadable_file(self) -> None:
+        """A hit whose file cannot be read gets source=None, never raises."""
+        mgr = _make_manager(STATE_READY)
+        refs = [_make_location("src/missing.rs", 0, 0)]
+        result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, refs, include_source=True)
+
+        assert result["status"] == STATUS_OK
+        assert result["references"][0]["source"] is None
+
+    def test_cap_applied_before_enrichment(self) -> None:
+        """At most MAX_LIST_RESULTS (200) lines are ever read, even with 250 hits."""
+        mgr = _make_manager(STATE_READY)
+        refs = [_make_location(f"src/f{i:03d}.rs", i, 0) for i in range(250)]
+
+        read_paths: list[str] = []
+
+        def _counting_read_text(self: pathlib.Path, *a: Any, **kw: Any) -> str:
+            read_paths.append(str(self))
+            raise OSError("simulated unreadable path")
+
+        with patch.object(pathlib.Path, "read_text", new=_counting_read_text):
+            result = _run_find_references(mgr, "src/lib.rs", 1, 1, False, refs, include_source=True)
+
+        assert result["total"] == 250
+        assert result["truncated"] is True
+        assert len(result["references"]) == 200
+        assert len(read_paths) <= 200, (
+            "enrichment must only ever read the capped page, never the full 250"
+        )
+        assert all(r["source"] is None for r in result["references"])
 
 
 # ---------------------------------------------------------------------------
