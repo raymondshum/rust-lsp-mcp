@@ -77,3 +77,13 @@ dispatcher, and an adversarial review gate. Kickoff is a single recurring messag
 Claude Code: **"Continue the build per docs/handoff/continue.md."** Risk-first order
 (Phase 0 → readiness → name→position → tools → doc-RAG) is encoded in the tracker's
 dependency graph.
+
+## Later efforts (post-original-build)
+
+- **2026-07-02 — CLI frontend: grilled, verified, frozen.** Plan at
+  [cli-frontend.md](cli-frontend.md): warm streamable-HTTP daemon (loopback-only,
+  in the existing compose container) + import-light `rust-lsp` CLI client +
+  capability-branched skill, for agents without MCP tool access. Verification
+  pass done same day (four new `docs/reference/` entries; only residue is U4
+  per-call latency, runtime-only, measured in the podman gate). Ready for the
+  implementation cycle.
