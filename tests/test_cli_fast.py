@@ -494,3 +494,24 @@ def test_running_cli_subcommand_never_imports_server_package() -> None:
     # cli.main(['status']) prints the JSON envelope to stdout before the
     # leak-check's "OK" -- only the trailing marker matters here.
     assert result.stdout.rstrip().endswith("OK")
+
+
+class TestWaitFiniteGuard:
+    """--wait must reject non-finite values (nan/inf hang the poll loop
+    forever — C2 adversarial note N1)."""
+
+    def test_wait_nan_rejected_as_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            cli.build_parser().parse_args(["--wait", "nan", "status"])
+        assert excinfo.value.code == 2
+        assert capsys.readouterr().out == ""
+
+    def test_wait_inf_rejected_as_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            cli.build_parser().parse_args(["--wait", "inf", "status"])
+        assert excinfo.value.code == 2
+        assert capsys.readouterr().out == ""
+
+    def test_wait_finite_still_accepted(self) -> None:
+        args = cli.build_parser().parse_args(["--wait", "180", "status"])
+        assert args.wait == 180.0

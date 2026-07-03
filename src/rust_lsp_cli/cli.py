@@ -135,6 +135,21 @@ def _add_position_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("character", type=int, help=f"Character offset. {_POSITION_HELP}")
 
 
+def _finite_float(value: str) -> float:
+    """argparse type for --wait: a finite float.
+
+    `nan`/`inf` pass `type=float` but make the poll deadline arithmetic
+    never terminate (monotonic() >= now + nan is always False) — a hang is
+    the one failure mode worse than a crash (C2 adversarial note N1).
+    """
+    import math
+
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError(f"--wait must be finite, got {value!r}")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the static argparse parser for every subcommand (D6/D7)."""
     parser = argparse.ArgumentParser(
@@ -150,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wait",
-        type=float,
+        type=_finite_float,
         metavar="SECS",
         default=None,
         help=(
