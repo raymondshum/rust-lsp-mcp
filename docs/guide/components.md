@@ -201,13 +201,23 @@ not touched.
 **File:** [`envelope.py`](../../src/rust_lsp_mcp/envelope.py)
 
 Every tool returns the same kind of object: a plain Python dict with a `status`
-field plus any additional payload fields. `envelope.py` provides the four
-builder functions that produce these objects:
+field plus any additional payload fields. `envelope.py` provides the builder
+functions that produce these objects:
 
 - `ok(**kwargs)` — success; merges any extra fields into the result.
-- `not_ready(message=...)` — the analyzer is still indexing; caller should retry.
+- `not_ready(message=...)` — the analyzer is still indexing; caller should
+  retry. Always carries `recovery="poll_status"`.
 - `not_found(message=...)` — the symbol or position was not found.
-- `error(message)` — something went wrong; the message explains what.
+- `error(message, recovery="unknown")` — something went wrong; the message
+  explains what, and `recovery` is a machine-readable hint at the next action
+  (`"fix_input"` / `"refresh"` / `"poll_status"` / `"unknown"`).
+- `lsp_failure(exc, context="")` — a thin wrapper over `error()` for the
+  catch-all unexpected-LSP-exception case shared by every nav tool; always
+  passes `recovery="unknown"`.
+
+The `recovery` field is additive-only: no key renames, no new `status` values,
+and deliberately no `retriable` boolean or separate `code` enum (see
+`docs/audit/2026-07-02-usability-review.md`, UR-6).
 
 The distinction between `not_found` and `ok` with an empty payload is
 intentional: `not_found` means the resolution step itself failed (the symbol

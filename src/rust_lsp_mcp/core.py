@@ -35,7 +35,7 @@ from rust_lsp_mcp.analyzer import (
     analyzer_lifespan,
 )
 from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store_background
-from rust_lsp_mcp.envelope import error, not_ready
+from rust_lsp_mcp.envelope import RECOVERY_FIX_INPUT, RECOVERY_REFRESH, error, not_ready
 from rust_lsp_mcp.positions import lsp_to_external
 from rust_lsp_mcp.settings import get_settings
 
@@ -108,17 +108,19 @@ def require_ready() -> dict[str, Any] | None:
         # ... proceed with analyzer call ...
 
     Returns:
-        An ``error`` envelope if the analyzer's background run failed
-        (``state == "error"`` — permanent until ``refresh`` recovers it), a
-        ``not_ready`` envelope if it is still indexing or the manager has not
-        started, else ``None`` once ready.
+        An ``error`` envelope (``recovery: "refresh"``) if the analyzer's
+        background run failed (``state == "error"`` — permanent until
+        ``refresh`` recovers it), a ``not_ready`` envelope
+        (``recovery: "poll_status"``) if it is still indexing or the manager
+        has not started, else ``None`` once ready.
     """
     if _manager is not None and _manager.state == STATE_ERROR:
         return error(
             "The analyzer failed to start and cannot serve navigation queries: "
             f"{_manager.error_message or 'unknown error'}. "
             "Call the refresh tool to retry, or check the server configuration "
-            "(e.g. RLM_RUST_ANALYZER_BIN)."
+            "(e.g. RLM_RUST_ANALYZER_BIN).",
+            recovery=RECOVERY_REFRESH,
         )
     if _manager is None or not _manager.is_ready:
         return not_ready(INDEXING_RETRY_MESSAGE)
@@ -241,12 +243,14 @@ def validate_workspace_file(file: str) -> tuple[str, dict[str, Any] | None]:
     Returns:
         ``(normalized_file, None)`` when ``file`` is valid, else
         ``(file, error_envelope)`` when it is invalid (empty, absolute,
-        NUL-containing, or ``..``-escaping).
+        NUL-containing, or ``..``-escaping).  The error envelope carries
+        ``recovery: "fix_input"``.
     """
     if not _is_contained_relpath(file):
         return file, error(
             f"Invalid file path {file!r}: must be a workspace-relative path "
-            "that does not resolve outside the workspace root."
+            "that does not resolve outside the workspace root.",
+            recovery=RECOVERY_FIX_INPUT,
         )
     return os.path.normpath(file), None
 

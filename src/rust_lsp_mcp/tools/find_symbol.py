@@ -6,6 +6,8 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 from rust_lsp_mcp.analyzer import (
     INDEXING_RETRY_MESSAGE,
     TORN_DOWN_RETRY_MESSAGE,
@@ -18,7 +20,7 @@ from rust_lsp_mcp.envelope import lsp_failure, not_found, not_ready, ok
 _log = logging.getLogger(__name__)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def find_symbol(name: str) -> dict[str, Any]:
     """Resolve a Rust symbol name to its workspace position(s).
 
@@ -50,9 +52,12 @@ async def find_symbol(name: str) -> dict[str, Any]:
       name resolution failed; it is NOT the same as ``ok``+empty.
 
     - ``not_ready`` — the analyzer is still indexing; retry after
-      ``analyzer_status`` reports ``"ready"``.
+      ``analyzer_status`` reports ``"ready"``.  Carries
+      ``recovery: "poll_status"``.
 
     - ``error`` — unexpected exception from the LSP layer; includes a message.
+      Carries ``recovery: "unknown"`` (the catch-all LSP-exception fallback;
+      there is no input-validation ``error`` site in this tool).
 
     Defensive handling:
         Candidates missing a ``location``, with a null ``relativePath``, or whose

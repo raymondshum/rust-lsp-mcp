@@ -5,11 +5,13 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 from rust_lsp_mcp.core import get_manager, mcp, require_ready
 from rust_lsp_mcp.envelope import ok
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def analyzer_status() -> dict[str, Any]:
     """Return the current readiness state of the rust-analyzer backend.
 
@@ -30,7 +32,7 @@ def analyzer_status() -> dict[str, Any]:
     return ok(state=state)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def probe() -> dict[str, Any]:
     """Gated no-op probe — proves the fail-fast gate works end-to-end.
 

@@ -6,6 +6,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Annotated, Any
 
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from rust_lsp_mcp.analyzer import (
@@ -21,13 +22,13 @@ from rust_lsp_mcp.core import (
     require_ready,
     validate_workspace_file,
 )
-from rust_lsp_mcp.envelope import error, lsp_failure, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import RECOVERY_FIX_INPUT, error, lsp_failure, not_found, not_ready, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def goto_definition(
     file: str,
     line: Annotated[
@@ -75,14 +76,17 @@ async def goto_definition(
       NOT the same as ``ok``+empty.
 
     - ``not_ready`` — the analyzer is still indexing; retry after
-      ``analyzer_status`` reports ``"ready"``.
+      ``analyzer_status`` reports ``"ready"``.  Carries
+      ``recovery: "poll_status"``.
 
     - ``error`` — input validation failure or unexpected LSP exception; includes
       a message.  Positions must be >= 1 (1-indexed); supplying 0 or negative
       values returns an ``error`` immediately without calling the analyzer.
       ``file`` must be a workspace-relative path that does not resolve outside
       the workspace root (absolute paths and ``..``-escaping paths are
-      rejected immediately, without calling the analyzer).
+      rejected immediately, without calling the analyzer).  Carries
+      ``recovery: "fix_input"`` for the position/path validation failures
+      above, or ``"unknown"`` for the catch-all LSP-exception fallback.
 
     Requires an exact position (file + 1-indexed line/character) such as one
     returned by ``find_symbol`` or ``document_symbols``; if you only have a
@@ -92,7 +96,7 @@ async def goto_definition(
     """
     # Step 1: validate 1-indexed inputs
     if line < 1 or character < 1:
-        return error("line and character are 1-indexed; must be >= 1")
+        return error("line and character are 1-indexed; must be >= 1", recovery=RECOVERY_FIX_INPUT)
 
     # Step 2: validate the file path (reject absolute/escaping paths before
     # the analyzer ever sees them).  The normalized form is forwarded so a

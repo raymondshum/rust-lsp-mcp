@@ -9,10 +9,11 @@ import weakref
 from typing import Any
 
 from anyio.to_thread import run_sync
+from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, mcp
 from rust_lsp_mcp.doc_store import DOC_STATE_ERROR, get_doc_store, init_doc_store
-from rust_lsp_mcp.envelope import error, ok
+from rust_lsp_mcp.envelope import RECOVERY_REFRESH, error, ok
 from rust_lsp_mcp.settings import get_settings
 
 _log = logging.getLogger(__name__)
@@ -76,9 +77,20 @@ def _get_doc_store_refresh_lock() -> asyncio.Lock:
     return lock
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
+)
 async def refresh() -> dict[str, Any]:
     """Tear down the running analyzer and start a fresh wholesale re-index.
+
+    **Blast radius:** this tears down and re-indexes the single global
+    analyzer shared by the whole server — every other navigation tool
+    (``goto_definition``, ``find_references``, ``hover``, ``find_symbol``,
+    ``document_symbols``) returns ``not_ready`` for every caller until
+    re-indexing completes, which can take minutes on large projects. Do not
+    invoke this mid-task unless the index is actually stale or broken (e.g.
+    ``status``/``analyzer_status`` reports ``state == "error"``, or you know
+    the workspace changed since the last index).
 
     Behaviour contract:
         - **Unconditional**: every call re-indexes wholesale regardless of the
@@ -131,7 +143,12 @@ async def refresh() -> dict[str, Any]:
         an ``error`` envelope if the analyzer manager is not running, or an
         ``error`` envelope if the doc-store rebuild/re-init failed (the
         analyzer re-index will still be running in the background in that
-        case).
+        case).  The doc-store-rebuild-failure ``error`` carries
+        ``recovery: "refresh"`` — the analyzer half is already recovering;
+        fix the doc-index cause (e.g. the embedding model or Chroma path)
+        and call ``refresh`` again.  The analyzer-not-running ``error`` is a
+        rare startup-ordering case and carries the default
+        ``recovery: "unknown"``.
     """
     mgr = get_manager()
     if mgr is None:
@@ -180,7 +197,8 @@ async def refresh() -> dict[str, Any]:
             "The analyzer re-index is already running in the background and will "
             "complete on its own — do NOT call refresh again to fix the analyzer. "
             "Only the documentation index failed to rebuild; once the underlying "
-            "cause is fixed, calling refresh again will rebuild it."
+            "cause is fixed, calling refresh again will rebuild it.",
+            recovery=RECOVERY_REFRESH,
         )
 
     return ok(
