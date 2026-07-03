@@ -1,20 +1,35 @@
 """Shared pytest fixtures for the rust-lsp-mcp test suite.
 
-Currently just doc-store singleton hygiene (FINDING 5): the doc store keeps
-module-level global state (``_doc_store`` / ``_init_error`` / ``_build_task``
-in :mod:`rust_lsp_mcp.doc_store`).  A test that constructs or errors the store
-and fails partway through — before its own ``clear_doc_store()`` cleanup runs
-— would otherwise leak that state into whatever test happens to run next
-(observably: a later ``search_docs`` / ``status`` / ``doc_store_state`` test
-reading a stale singleton).  This autouse fixture resets it before AND after
-every test so ordering can never matter.
+Two responsibilities:
 
-It is intentionally global (applies to all tests, not just the doc-store
-files): clearing the singleton is a no-op for the ~hundreds of tests that
-never touch it, and strictly safer for the ones that do.  No test in the suite
-relies on the doc-store singleton persisting across test functions (the
-integration tests build ``DocStore`` instances directly and/or clear the
-singleton in their own teardown).
+1. Doc-store singleton hygiene (FINDING 5): the doc store keeps
+   module-level global state (``_doc_store`` / ``_init_error`` / ``_build_task``
+   in :mod:`rust_lsp_mcp.doc_store`).  A test that constructs or errors the store
+   and fails partway through — before its own ``clear_doc_store()`` cleanup runs
+   — would otherwise leak that state into whatever test happens to run next
+   (observably: a later ``search_docs`` / ``status`` / ``doc_store_state`` test
+   reading a stale singleton).  This autouse fixture resets it before AND after
+   every test so ordering can never matter.
+
+   It is intentionally global (applies to all tests, not just the doc-store
+   files): clearing the singleton is a no-op for the ~hundreds of tests that
+   never touch it, and strictly safer for the ones that do.  No test in the suite
+   relies on the doc-store singleton persisting across test functions (the
+   integration tests build ``DocStore`` instances directly and/or clear the
+   singleton in their own teardown).
+
+2. Registering the ``daemon_app`` fixture (Phase C1, QA round 1): pytest only
+   discovers fixtures defined in conftest files, registered plugins, or the
+   test module itself — ``tests/daemon_fixture.py`` is a plain helper module,
+   so its ``@pytest.fixture`` decoration alone registers NOTHING (the daemon
+   integration tests errored at setup with "fixture 'daemon_app' not found").
+   The re-export below places the fixture function in this conftest's
+   namespace, which IS scanned, making it resolvable suite-wide.  A
+   ``pytest_plugins = ["tests.daemon_fixture"]`` entry was rejected: modern
+   pytest only honors ``pytest_plugins`` in the ROOTDIR conftest, and this
+   repo's rootdir is the repo root (pyproject.toml), not ``tests/`` — the
+   import re-export works regardless of conftest depth.  Guarded by the fast
+   test ``tests/test_daemon_fixture_wiring.py``.
 """
 
 import contextlib
@@ -22,6 +37,7 @@ import contextlib
 import pytest
 
 import rust_lsp_mcp.doc_store as doc_store_mod
+from tests.daemon_fixture import daemon_app  # noqa: F401 — fixture re-export (see docstring)
 
 
 @pytest.fixture(autouse=True)

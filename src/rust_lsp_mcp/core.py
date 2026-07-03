@@ -165,16 +165,56 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ign
 # FastMCP application
 # ---------------------------------------------------------------------------
 
-mcp: FastMCP[dict[str, Any]] = FastMCP(  # type: ignore[type-arg]
-    "rust-lsp-mcp",
-    lifespan=_lifespan,
-    instructions=(
-        "Navigation pattern: resolve a symbol NAME to a position with "
-        "find_symbol or document_symbols, then act on that position with "
-        "goto_definition, find_references, or hover. All positions "
-        "(file, line, character) are 1-indexed."
-    ),
+_INSTRUCTIONS = (
+    "Navigation pattern: resolve a symbol NAME to a position with "
+    "find_symbol or document_symbols, then act on that position with "
+    "goto_definition, find_references, or hover. All positions "
+    "(file, line, character) are 1-indexed."
 )
+
+
+def _build_mcp(settings: Settings) -> FastMCP[dict[str, Any]]:  # type: ignore[type-arg]
+    """Construct the FastMCP app, keyed on ``settings.transport``.
+
+    Two mutually exclusive shapes (docs/planning/cli-frontend.md D2/D3):
+        - stdio (default): ``lifespan=_lifespan``, byte-identical to the
+          server's pre-Phase-1 wiring. ``MCPServer.run()`` enters this once
+          for the single stdio session.
+        - streamable-http: NO ``lifespan=`` kwarg — under this SDK version
+          FastMCP's own ``lifespan=`` runs per MCP session (per request when
+          ``stateless_http=True``), which would cold-spawn/tear down the
+          analyzer on every call. Instead ``server.main()`` composes a
+          process-level lifespan that nests ``_lifespan`` wholesale around the
+          SDK's session-manager lifespan (see the reference doc). ``host`` is
+          hard-coded to ``"127.0.0.1"`` here — never taken from settings, so
+          no configuration path can bind a non-loopback address (D3/D4).
+
+    Split out from module scope so the branch is unit-testable without an
+    ``importlib.reload`` dance: call this directly with a constructed
+    ``Settings`` and inspect the resulting ``FastMCP.settings``.
+    """
+    if settings.transport == "streamable-http":
+        return FastMCP(  # type: ignore[type-arg]
+            "rust-lsp-mcp",
+            host="127.0.0.1",
+            port=settings.http_port,
+            stateless_http=True,
+            json_response=True,
+            instructions=_INSTRUCTIONS,
+        )
+    return FastMCP(  # type: ignore[type-arg]
+        "rust-lsp-mcp",
+        lifespan=_lifespan,
+        instructions=_INSTRUCTIONS,
+    )
+
+
+# Transport is read once at import time — the module-level ``mcp`` app is
+# built exactly once per process, matching the "process-level" contract the
+# daemon relies on. There is no supported way to flip transport within a
+# running process; a different transport means a different process (see the
+# reference doc's testability note).
+mcp: FastMCP[dict[str, Any]] = _build_mcp(get_settings())  # type: ignore[type-arg]
 
 
 # ---------------------------------------------------------------------------
