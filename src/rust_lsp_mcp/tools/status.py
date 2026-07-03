@@ -12,8 +12,8 @@ from typing import Any
 
 from mcp.types import ToolAnnotations
 
-from rust_lsp_mcp.core import get_manager, mcp
-from rust_lsp_mcp.doc_store import doc_store_state
+from rust_lsp_mcp.core import get_manager, get_preflight_warnings, mcp
+from rust_lsp_mcp.doc_store import doc_index_chunk_count, doc_store_state
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
 
@@ -51,6 +51,17 @@ async def status() -> dict[str, Any]:
                            ``state`` above — see ``search_docs``).
     - ``doc_index_error`` — diagnostic message when ``doc_index_state ==
                            "error"``, else ``null``.
+    - ``doc_index_chunk_count`` — number of indexed Markdown chunks
+                           (``collection.count()``), or ``null`` when
+                           ``doc_index_state != "ready"``. ``0`` is a valid
+                           reading (a completed corpus with zero matching
+                           Markdown files) and is distinct from ``null``
+                           (index not ready yet / no store) — see UR-20.
+    - ``preflight_warnings`` — list of advisory strings computed once at
+                           server startup (empty list = all clear, or the
+                           preflight never ran — e.g. most unit tests). Never
+                           fatal and never affects ``state``/``doc_index_state``
+                           — see UR-21.
 
     .. caution::
 
@@ -65,22 +76,28 @@ async def status() -> dict[str, Any]:
     """
     mgr = get_manager()
 
-    # Read all in-process state up front, BEFORE the only suspension point
-    # below, so the analyzer/doc-store fields form one point-in-time snapshot
-    # that a concurrent restart()/refresh() cannot tear across the await.
+    # Read all in-process state up front, BEFORE the suspension points below,
+    # so the analyzer/doc-store fields form one point-in-time snapshot that a
+    # concurrent restart()/refresh() cannot tear across the awaits.
+    # (Exception: doc_index_chunk_count is read in a thread hop below, so
+    # during an active rebuild it can momentarily disagree with the
+    # doc_index_state snapshotted here — a stale count, never corruption.)
     state: str = mgr.state if mgr is not None else "indexing"
     analyzer_error: str | None = mgr.error_message if mgr is not None else None
     indexed_commit: str | None = mgr.indexed_commit if mgr is not None else None
     repo_root: str = mgr.repository_root if mgr is not None else get_settings().project_root
     doc_state, doc_err = doc_store_state()
+    preflight_warnings = get_preflight_warnings()
 
     # DS-19: the pinned MCP SDK runs non-async tools INLINE on the event loop
-    # (no thread offload), so a synchronous subprocess.run here would block
-    # every other in-flight request for a git fork+exec on the hottest
-    # polling path. Offload to a worker thread; _git_head itself stays
-    # synchronous (it's the worker-thread body — mirrors
-    # AnalyzerManager._capture_head_commit's identical pattern).
+    # (no thread offload), so synchronous I/O here would block every other
+    # in-flight request on the hottest polling path. Offload both the git
+    # fork+exec and the doc-store's collection.count() (a ChromaDB/SQLite
+    # query) to worker threads; each helper stays synchronous (it's the
+    # worker-thread body — mirrors AnalyzerManager._capture_head_commit's
+    # identical pattern).
     current_commit: str | None = await asyncio.to_thread(_git_head, repo_root)
+    doc_chunk_count: int | None = await asyncio.to_thread(doc_index_chunk_count)
 
     stale: bool | None
     if indexed_commit is None or current_commit is None:
@@ -96,6 +113,8 @@ async def status() -> dict[str, Any]:
         stale=stale,
         doc_index_state=doc_state,
         doc_index_error=doc_err,
+        doc_index_chunk_count=doc_chunk_count,
+        preflight_warnings=preflight_warnings,
     )
 
 

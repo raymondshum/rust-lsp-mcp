@@ -245,6 +245,22 @@ either index finishing:
       swallowed silently) and surfaced via `status` as `doc_index_state ==
       "error"` with a diagnostic message — the code-navigation tools are
       unaffected either way, and `refresh` is the recovery path (§7).
+    - `status` also exposes `doc_index_chunk_count` — a live `collection.count()`
+      read (works whether the index was rebuilt or adopted), so a completed
+      index over zero matching Markdown files (a common misconfiguration: wrong
+      glob, empty/un-mounted project) is observable as `0` rather than reading
+      indistinguishably "healthy" from a populated index.
+
+Once, at the very start of the lifespan, a non-fatal advisory preflight also
+runs: it checks whether the configured `rust_analyzer_bin` resolves to an
+existing executable and whether `project_root` exists and is a directory.
+Neither check can fail startup or set `state`/`doc_index_state` to `"error"`
+— the results are collected into a list and surfaced as `status`'s
+`preflight_warnings` (empty when both checks pass). This is deliberately
+narrower than a full readiness gate: no `Cargo.toml` check, since
+`project_root` is repo-agnostic by design and a Cargo.toml-at-root requirement
+would misfire on valid `rust-project.json` / subdirectory-Cargo.toml
+configurations.
 
 When the server stops, both the code analyzer and the documentation store are
 shut down cleanly. The lifespan wiring lives in

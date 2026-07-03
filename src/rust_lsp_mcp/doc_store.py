@@ -159,6 +159,42 @@ class DocStore:
         """``"{ExceptionType}: {message}"`` if the last ``rebuild()`` failed, else ``None``."""
         return self._error
 
+    def chunk_count(self) -> int | None:
+        """Return the collection's live ``count()``, or ``None`` if not ``"ready"``.
+
+        Deliberately queries the collection directly rather than returning a
+        value captured during a build — that is what makes it work on BOTH
+        the ``rebuild()`` path (populated or intentionally-empty corpus) AND
+        the DS-24 adopt path (an existing collection adopted without ever
+        running ``_rebuild_locked`` in this process). An intentionally-empty
+        adopted corpus (DS-24: ready, ``build_complete``, 0 rows) correctly
+        reports ``0``, not ``None`` — only "not ready" (no collection yet, or
+        state != ``"ready"``) reports ``None``.
+
+        Lock choice (DS-12): only the readiness check + collection snapshot
+        is taken under ``_read_lock`` (briefly); the ``collection.count()``
+        Chroma/SQLite call itself happens OUTSIDE the lock — unlike
+        ``search()``, which holds ``_read_lock`` across its own
+        ``count()``+``query()``. This is a deliberate trade for this accessor:
+        it is called on every ``status`` poll (a frequent, low-stakes read),
+        so holding ``_read_lock`` across the Chroma call would serialize
+        every poll behind a concurrent rebuild's brief start/end transitions.
+        Reading a possibly-stale/wrong count on the rare occasion a rebuild's
+        destructive start transition lands between the snapshot and the
+        ``count()`` call is the better trade than adding that contention. If
+        the snapshotted collection object is invalidated by such a race
+        before ``count()`` returns, the exception is swallowed and ``None``
+        is reported rather than propagating.
+        """
+        with self._read_lock:
+            if self._state != DOC_STATE_READY or self._collection is None:
+                return None
+            collection = self._collection
+        try:
+            return collection.count()
+        except Exception:
+            return None
+
     def rebuild(self) -> int:
         """Wholesale rebuild: drop + recreate the collection, re-index every
         matching ``*.md``.  Flips ``state`` to ``"building"`` during the rebuild
@@ -454,6 +490,20 @@ def doc_store_state() -> tuple[str, str | None]:
     if _init_error is not None:
         return DOC_STATE_ERROR, _init_error
     return DOC_STATE_BUILDING, None
+
+
+def doc_index_chunk_count() -> int | None:
+    """Return the doc store's current chunk count, or ``None`` if unavailable.
+
+    Mirrors :func:`doc_store_state` — usable even before the singleton exists
+    (returns ``None`` in that case, same as "not ready"). See
+    :meth:`DocStore.chunk_count` for what ``None`` vs ``0`` means and the
+    DS-12 lock-safety rationale for reading it without holding a lock across
+    the underlying Chroma call.
+    """
+    if _doc_store is None:
+        return None
+    return _doc_store.chunk_count()
 
 
 def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | None) -> bool:

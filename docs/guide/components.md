@@ -380,7 +380,7 @@ dropping a new file in `tools/` — no central registry edit is needed.
 | [`find_references.py`](../../src/rust_lsp_mcp/tools/find_references.py) | `find_references` — find all places a symbol at a given position is used |
 | [`hover.py`](../../src/rust_lsp_mcp/tools/hover.py) | `hover` — get the documentation and type signature at a given position |
 | [`search_docs.py`](../../src/rust_lsp_mcp/tools/search_docs.py) | `search_docs` — semantic search over the indexed Markdown documentation |
-| [`status.py`](../../src/rust_lsp_mcp/tools/status.py) | `status` — full 4-field status report (state, indexed commit, current commit, stale flag) |
+| [`status.py`](../../src/rust_lsp_mcp/tools/status.py) | `status` — full status report: analyzer state/staleness (indexed vs. current commit), doc-index state/chunk count, and advisory startup preflight warnings |
 | [`diagnostics.py`](../../src/rust_lsp_mcp/tools/diagnostics.py) | `analyzer_status` (minimal one-field readiness check) and `probe` (gated no-op for testing the readiness gate) |
 | [`refresh.py`](../../src/rust_lsp_mcp/tools/refresh.py) | `refresh` — tear down the analyzer and doc store and rebuild both from scratch |
 
