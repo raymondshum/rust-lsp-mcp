@@ -183,7 +183,8 @@ The distinction that matters is what happens when the window *does* expire:
 
 - **Never connected within `SECS`** (exit `3`) — the daemon likely isn't
   running yet, or the CLI is pointed at the wrong URL/port. Start the daemon
-  (`docker compose up -d`) or check `RLM_HTTP_PORT`/`RLM_CLI_URL`.
+  (`docker compose up -d rust-lsp-mcp` — always name the service) or check
+  `RLM_HTTP_PORT`/`RLM_CLI_URL`.
 - **Connected but never reported `ready`** (exit `2`) — the daemon is up but
   stuck indexing (or has permanently failed — check `state` in a plain
   `rust-lsp status` call). A larger `--wait` won't help a permanently failed

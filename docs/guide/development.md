@@ -60,7 +60,7 @@ Certain folders are stored *outside* the container, under `.devcontainer/cache/`
 | `chroma-model-cache/` | `~/.cache/chroma` | The ~80 MB ONNX embedding model, downloaded once |
 | `chroma/` | `/workspaces/chroma` | The documentation-search vector database |
 
-> **Production image:** the same categories of persistent data live on a single named Docker volume mounted at `/data`, rather than these `.devcontainer/cache/` bind mounts. You choose the volume name in the `docker run` command (the examples below use `rust-lsp-mcp-data`); the `docker-compose.yml` warm-start path uses its own volume (`rlm-data`), so the two launch methods keep separate caches.
+> **Production image:** the same categories of persistent data live on a single named Docker volume mounted at `/data`, rather than these `.devcontainer/cache/` bind mounts. You choose the volume name in the `docker run` command (the examples below use `rust-lsp-mcp-data`) — and note that `docker-compose.yml`'s volume, though keyed `rlm-data` in the file, is pinned to the **same physical name** (`name: rust-lsp-mcp-data`). The two launch methods therefore share one `/data` store, so the single-writer rule ([KI-13](../impl/known-issues.md#ki-13--chromadb-cross-process-single-writer-hazard-on-a-shared-data-volume)) applies across them: don't run the compose daemon and a `docker run` MCP session against that volume at the same time.
 
 ### Automatic first-time setup
 
