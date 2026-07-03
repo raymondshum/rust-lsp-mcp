@@ -23,8 +23,9 @@ One file. No new skill directory.
 
 ## Definition of done (QA gate)
 The QA agent dry-runs the skill's commands **verbatim** (copy-paste) against
-C1's daemon fixture in the podman gate and records the transcript in
-[progress-cli.md](progress-cli.md).
+C1's daemon fixture in the podman gate and **reports the transcript to the
+orchestrator, who records it** in [progress-cli.md](progress-cli.md) (the
+orchestrator is the tracker's sole writer).
 
 ## Adversarial (LOW)
 Falsify: a command in the skill that doesn't run verbatim; MCP-tool guidance

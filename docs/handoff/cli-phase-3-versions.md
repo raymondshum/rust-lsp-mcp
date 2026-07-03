@@ -10,10 +10,13 @@ podman integration gate serializes).
 - [known-issues.md](../impl/known-issues.md) KI-12 / GitHub #115.
 
 ## Build
-- `status` envelope gains: server version + multilspy version
-  (`importlib.metadata`, per-call) and rust-analyzer version (subprocess
-  `<rust_analyzer_bin> --version` **once at manager start**, cached on the
-  manager for the process lifetime — never per status call).
+- `status` envelope gains **exactly these fields** (pinned; C2's `version`
+  subcommand surfaces them by these names): `server_version` + 
+  `multilspy_version` (`importlib.metadata`, per-call) and
+  `rust_analyzer_version` (subprocess `<rust_analyzer_bin> --version`
+  **once at manager start**, cached on the manager for the process
+  lifetime — never per status call). Fields degrade to `null` on capture
+  failure, never crash.
 - Any new `self._lsp`-adjacent code must respect the KI-9 rule (`_race_teardown`)
   — though this phase should not need new LSP awaits.
 

@@ -1,6 +1,7 @@
 # Phase C2 — `rust-lsp` CLI client (durable prompt)
 
-**Depends on C1** (daemon + its integration fixture).
+**Depends on C1** (daemon + its integration fixture) **and C3** (the pinned
+`status` version fields that `version` surfaces).
 
 ## Read first
 - [cli-frontend.md](../planning/cli-frontend.md) — D5–D10 and the Phase 2
@@ -15,7 +16,11 @@
 - New top-level package `src/rust_lsp_cli/` — **import-light**: `argparse`,
   `json`, `os`, the `mcp` client only. It must NEVER import `rust_lsp_mcp`
   (heavy imports + a second Chroma client). Console script `rust-lsp` via a
-  one-line `packages` append + `[project.scripts]` entry in `pyproject.toml`.
+  one-line `packages` append + `[project.scripts]` entry in `pyproject.toml`
+  (this edit is inside C2's file ownership — packaging only, zero
+  dependency/lock changes; the shared-config sole-writer rule targets
+  dep/lock edits and parallel writers, neither of which applies to this
+  serial phase).
 - Subcommands (D7): `find-symbol`, `goto-definition`, `find-references`,
   `hover`, `document-symbols`, `search-docs`, `status`, `refresh`,
   `validate-file-path`, `version`. Static argparse; positional ergonomics for
@@ -27,8 +32,10 @@
 - `--wait SECS` (D9): poll `status` every 2 s; connection-refused/handshake
   errors are **retriable inside the window**. URL default
   `http://127.0.0.1:${RLM_HTTP_PORT:-8000}/mcp`, `RLM_CLI_URL` override.
-- `version` (D10): client version via `importlib.metadata`; daemon fields
-  `null` + stderr note + **exit 0** when the daemon is down.
+- `version` (D10): client version via `importlib.metadata`; daemon versions
+  surfaced from the C3-pinned `status` fields (`server_version`,
+  `multilspy_version`, `rust_analyzer_version`); daemon fields `null` +
+  stderr note + **exit 0** when the daemon is down.
 - **Parity test** (D6): fast test imports the server in-process, compares
   `mcp.list_tools()` names against the CLI's command table with documented
   exclusions (`probe`, `analyzer_status`).
