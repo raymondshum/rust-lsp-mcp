@@ -64,7 +64,12 @@ Why the module-reload dance (``_reload_daemon_app_modules``) is necessary:
     bodies never execute) — and every test module's own
     ``from rust_lsp_mcp.core import mcp``-style binding was already resolved
     at collection time, before this fixture's setup ever runs, so the reload
-    cannot retroactively change what an unrelated test observes.
+    cannot retroactively change what an unrelated test observes. As
+    belt-and-suspenders for a mixed-tier bare ``pytest`` run (and for any
+    future integration test that reads ``core.mcp`` after this session
+    fixture tears down), the fixture's teardown undoes the env patch and
+    reloads the modules AGAIN, restoring stdio wiring (see ``daemon_app``'s
+    outer ``finally``).
 """
 
 import importlib
@@ -213,7 +218,17 @@ def daemon_app() -> Iterator[DaemonHandle]:
             uvicorn_server.should_exit = True
             thread.join(timeout=30.0)
     finally:
+        # Self-cleaning (review fix): undo the env FIRST so RLM_TRANSPORT is
+        # back to its pre-fixture value (stdio default), THEN reload so
+        # core/tools/server are rebuilt in stdio wiring. Without this, the
+        # HTTP-built `mcp` singleton would outlive the fixture — harmless
+        # under `-m integration` alone, but a mixed-tier bare `pytest` run
+        # (or any future integration test reading `core.mcp` after this
+        # session fixture tore down) would silently observe daemon-mode
+        # wiring. Ordering matters: reload-before-undo would rebuild in
+        # streamable-http mode again.
         mp.undo()
+        _reload_daemon_app_modules()
 
 
 # ---------------------------------------------------------------------------
@@ -251,14 +266,24 @@ async def call_tool(
 async def wait_until_ready(
     base_url: str, deadline_seconds: float = DEFAULT_READY_DEADLINE_SECONDS
 ) -> dict[str, Any]:
-    """Poll `status` until `state == "ready"`, or raise `TimeoutError`."""
-    deadline = time.monotonic() + deadline_seconds
+    """Poll `status` until `state == "ready"`, or raise `TimeoutError`.
+
+    The deadline is a hard `anyio.fail_after` bound, not just a wall-clock
+    check between polls (review fix): a single `status` round-trip that hung
+    would never return control to a `time.monotonic()` loop condition,
+    wedging the QA gate — `fail_after` cancels it and fails the test instead.
+    The cap itself is unchanged (300s default, matching the existing
+    cold-index budget in tests/test_phase1_integration.py).
+    """
     last: dict[str, Any] = {}
-    while time.monotonic() < deadline:
-        last = await call_tool(base_url, "status")
-        if last.get("state") == "ready":
-            return last
-        await anyio.sleep(1.0)
-    raise TimeoutError(
-        f"daemon never reached ready within {deadline_seconds}s; last status={last!r}"
-    )
+    try:
+        with anyio.fail_after(deadline_seconds):
+            while True:
+                last = await call_tool(base_url, "status")
+                if last.get("state") == "ready":
+                    return last
+                await anyio.sleep(1.0)
+    except TimeoutError:
+        raise TimeoutError(
+            f"daemon never reached ready within {deadline_seconds}s; last status={last!r}"
+        ) from None

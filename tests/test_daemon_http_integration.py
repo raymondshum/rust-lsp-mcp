@@ -65,8 +65,16 @@ def test_warm_across_connections_same_analyzer(daemon_app: DaemonHandle) -> None
     manager_after_first = daemon_app.core_mod.get_manager()
     assert manager_after_first is not None
 
+    async def _second_status() -> dict[str, Any]:
+        # Hard bound (review fix): a hung round-trip must FAIL the test, not
+        # wedge the QA gate. Generous — the analyzer is already warm here, so
+        # 120s is orders of magnitude above a healthy round-trip; the timing
+        # assertion below is the real "warm" check.
+        with anyio.fail_after(120):
+            return await call_tool(daemon_app.base_url, "status")
+
     start = time.monotonic()
-    second = anyio.run(call_tool, daemon_app.base_url, "status")
+    second = anyio.run(_second_status)
     elapsed = time.monotonic() - start
 
     assert second["state"] == "ready"
@@ -110,10 +118,16 @@ def test_refresh_races_concurrent_nav_calls(daemon_app: DaemonHandle) -> None:
         async def _refresh() -> None:
             refresh_result_holder["result"] = await call_tool(daemon_app.base_url, "refresh")
 
-        async with anyio.create_task_group() as tg:
-            for i in range(n_nav_calls):
-                tg.start_soon(_nav, i)
-            tg.start_soon(_refresh)
+        # Hard bound (review fix): the exact hang this test exists to catch
+        # (a nav request wedged mid-teardown, KI-9) must FAIL the test with a
+        # TimeoutError, not wedge the whole QA gate. Generous — the analyzer
+        # is warm when the race starts; the only slow leg is refresh's
+        # synchronous doc-store rebuild, well under this bound.
+        with anyio.fail_after(120):
+            async with anyio.create_task_group() as tg:
+                for i in range(n_nav_calls):
+                    tg.start_soon(_nav, i)
+                tg.start_soon(_refresh)
 
         return nav_results, refresh_result_holder["result"]
 
@@ -121,8 +135,8 @@ def test_refresh_races_concurrent_nav_calls(daemon_app: DaemonHandle) -> None:
 
     assert refresh_result["status"] == "ok", f"refresh did not report ok: {refresh_result!r}"
 
-    # Every nav call must have completed cleanly (anyio.run returning at all
-    # already rules out a hang) with a status that is an ANSWER, not a
+    # Every nav call must have completed cleanly (the fail_after above turns
+    # a hang into a hard failure) with a status that is an ANSWER, not a
     # failure: "ok"/"not_found" if it beat the teardown, "not_ready" if it
     # landed during the re-index window. "error" would mean the readiness
     # guard was bypassed mid-teardown (KI-9) and must never appear.
