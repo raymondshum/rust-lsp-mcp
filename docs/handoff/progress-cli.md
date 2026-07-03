@@ -28,8 +28,8 @@ the date in the log below.
 | C1 — Daemon transport | [cli-phase-1-daemon.md](cli-phase-1-daemon.md) | — | With C3 on the fast tier only; podman integration gates serialize | done |
 | C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | done |
 | C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | done |
-| C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | pr-open |
-| C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | not-started |
+| C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | done |
+| C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | pr-open |
 
 ## Dependency graph (what the orchestrator may fan out)
 
@@ -152,3 +152,23 @@ C3 ──┘ └────> C5      (C4 ∥ C5 after C2; disjoint files)
   applies across launch methods). Orchestrator decision recorded: full `-m
   integration` re-run waived for this docs-only phase (no src/tests changes; live
   smoke was the meaningful gate; CI fast tier on the PR).
+- 2026-07-03 Phase C4 → **done**. PR #124 merged to `main` (d71414f). Flip rides in
+  C5's PR.
+- 2026-07-03 Phase C5 → **pr-open**. Skill revision built, reviewed, QA'd,
+  red-teamed. Shipped: capability-branched "How to invoke" section in
+  rust-code-navigation/SKILL.md — MCP-tools-if-available branch; CLI branch with
+  engine auto-detect (docker→podman, CONTAINER_ENGINE override), full-path exec
+  form (`/app/.venv/bin/rust-lsp` — bare name is NOT on the image PATH), dev-
+  container `uv run rust-lsp` form, `--wait 180` first call, intent→command table,
+  D8 exit-code table (not_found→0 doctrine; version always 0), actionable exit-3
+  remediation (named service + RUST_PROJECT), shared-daemon refresh warning,
+  KI-16 symptom routing to cli.md troubleshooting. Pre-existing skill content
+  byte-identical (verified programmatically) — triggers unchanged. Gates: fast
+  tier green (docs-only); review `major` → fixed (bare `rust-lsp` exec forms
+  would exit 127 — the PATH catch that also hardened C4's docs); QA live verbatim
+  dry-run PASS (all 11 command-table rows executed copy-paste against the real
+  compose daemon: expected exit codes incl. not_found→0, auto-detect snippet
+  resolved podman correctly); adversarial `no-breaks` (trigger safety re-verified
+  byte-identical; skill↔docs consistency confirmed; optional KI-16 routing note
+  applied). QA transcript recorded by orchestrator (sole writer), per the
+  gate-zero-corrected DoD.
