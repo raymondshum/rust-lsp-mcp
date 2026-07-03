@@ -35,14 +35,21 @@ original_lifespan = app.router.lifespan_context # == lambda app: session_manager
 
 @contextlib.asynccontextmanager
 async def process_lifespan(app):
-    ...startup once per process (analyzer, doc store)...
-    async with original_lifespan(app):          # MUST delegate: runs session_manager.run()
-        yield
-    ...shutdown once per process...
+    async with _lifespan(app):                  # rust-lsp-mcp: NEST the existing core._lifespan
+        async with original_lifespan(app):      # MUST delegate: runs session_manager.run()
+            yield
 
 app.router.lifespan_context = process_lifespan
 uvicorn.run(app, host="127.0.0.1", port=PORT)   # we OWN the uvicorn call
 ```
+
+**Production note (2026-07-02 plan review):** do NOT re-implement a subset of
+the startup — nest the existing `core._lifespan` wholesale, as above. It also
+computes preflight warnings (surfaced in `status`), guards doc-store init
+errors, and clears the doc store + singletons on shutdown; a hand-rolled
+`analyzer_lifespan`-only version silently drops those. `_lifespan` ignores its
+argument, so passing the Starlette app is harmless — and stdio/daemon startup
+become provably one code path.
 
 Live proof: two separate `streamablehttp_client` connections (initialize →
 `call_tool` each) saw `init_count == 1` and the same shared-object id.
@@ -69,6 +76,15 @@ Live proof: two separate `streamablehttp_client` connections (initialize →
   Settings fields (`fastmcp/server.py:83-85,139-140`), forwarded to the session
   manager at `:858-864`. `json_response=True` returns a single JSON body, not
   an SSE stream.
+- **`structuredContent` IS populated** for tools annotated `-> dict[str, Any]`
+  (routed to `RootModel[dict[str,Any]]` → valid output schema,
+  `func_metadata.py:310-313`; confirmed on the wire 2026-07-02). A CLI should
+  still parse `content[0].text` as the authoritative envelope — it is always
+  the full `json.dumps(envelope)` regardless of annotation drift, whereas the
+  structured path errors if a tool with an output schema returns
+  structured-None (`lowlevel/server.py:483-498`).
+- **Default mount path is `/mcp`** (`streamable_http_path`,
+  `fastmcp/server.py:138`) — `http://127.0.0.1:<port>/mcp` is correct.
 - **Benign log noise:** in stateless mode each request logs a
   `ClosedResourceError` "Error in message router" traceback
   (`streamable_http.py:880`, transport `terminate()` racing the message

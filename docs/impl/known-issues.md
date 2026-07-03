@@ -85,6 +85,28 @@ Check this list at these lifecycle checkpoints (see
   Reference: docs/audit/2026-07-02-usability-review.md,
   Cross-cutting findings, completeness critic (CC-5).
 
+### KI-13 — ChromaDB cross-process single-writer hazard on a shared `/data` volume
+- **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
+  (`PersistentClient` at `chroma_path`) · [docker-compose.yml](../../docker-compose.yml)
+  (both services share the `rust-lsp-mcp-data` volume).
+- **What:** the guarded one-client-per-path invariant (regression test in
+  `tests/test_doc_store.py`) is **intra-process only**. Two OS processes opening
+  the same on-disk Chroma SQLite concurrently — two `docker run` sessions on one
+  volume today, or (post-CLI-frontend) the HTTP daemon plus a `docker exec …
+  rust-lsp-mcp` stdio *server* in the same container — are unguarded and risk
+  `database is locked` errors or store corruption, especially during a
+  `refresh`-driven rebuild.
+- **Why it matters:** silent doc-index corruption; the CLI-frontend daemon
+  ([cli-frontend.md](../planning/cli-frontend.md) D12) makes the concurrent-
+  process scenario more likely because a long-lived writer now always exists.
+  Note the import-light CLI itself never opens Chroma — the hazard is a second
+  *server* process, not `rust-lsp`.
+- **Status:** decided: D12's single-writer mandate (documented in the
+  CLI-frontend Phase 4 compose/README rewrite: one process per Chroma path;
+  separate volume names if two servers are truly needed). Entry stays open
+  until a stronger guard (e.g. an on-disk lock or per-mode volumes by default)
+  is decided.
+
 ---
 
 ## Resolved

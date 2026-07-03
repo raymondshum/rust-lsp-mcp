@@ -11,23 +11,35 @@ for the red-team step.
 This file is **rust-lsp-mcp's concrete instance** of the general
 [implementation cycle](../conventions/implementation-cycle.md); the steps below add
 this project's specifics (the Phase 0 container seam, the single serialized
-analyzer, and [progress.md](progress.md)). The plan it executes follows the
+analyzer, and the effort trackers). Each plan it executes follows the
 [phasal-plan](../conventions/phasal-plan.md) contract; the whole flow sits in the
 [delivery lifecycle](../conventions/lifecycle.md).
 
+## Efforts (dispatch order)
+
+Pick the **first effort with an eligible phase**; all cycle steps below then
+operate on that effort's plan + tracker. "progress tracker" / "the plan" in
+the steps means *the active effort's*. The live analyzer + podman integration
+gate are one serialized resource **across efforts**, not just phases.
+
+| Effort | Plan | Tracker | Status |
+|--------|------|---------|--------|
+| Original build (Phases 0–5) | [implementation-plan.md](../planning/implementation-plan.md) | [progress.md](progress.md) | complete — all phases `done` |
+| CLI frontend (Phases C1–C5) | [cli-frontend.md](../planning/cli-frontend.md) | [progress-cli.md](progress-cli.md) | active |
+
 ## The cycle (run once per invocation)
 
-1. **Orient.** Read [CLAUDE.md](../../CLAUDE.md), the
-   [implementation plan](../planning/implementation-plan.md), and
-   [progress.md](progress.md). Do not relitigate settled decisions.
-2. **Gate-zero (own stop point).** If `progress.md`'s gate-zero line is `not-run`,
+1. **Orient.** Read [CLAUDE.md](../../CLAUDE.md), then pick the active effort
+   from the table above and read its plan and tracker. Do not relitigate
+   settled decisions.
+2. **Gate-zero (own stop point).** If the active tracker's gate-zero line is `not-run`,
    launch the adversarial pass over `docs/handoff/` **including this `continue.md`**
    ([adversarial-review.md](adversarial-review.md) → gate-zero). Apply fixes and re-check
    until clean; **only if clean** set gate-zero `passed`, then **stop and report** — do
    not start a phase the same run. If a finding can't be resolved, record gate-zero
    `blocked: <reason>` and stop for the human. (If gate-zero is already `passed`, skip
    to 3.)
-3. **Pick the phase.** From [progress.md](progress.md), choose the first phase whose
+3. **Pick the phase.** From the active effort's tracker, choose the first phase whose
    dependencies are `done` and is not itself `done`. A `blocked` phase is re-picked
    here; resume it at the gate that blocked it (per its log line), once the human has
    cleared the blocker — not from scratch. If two are eligible (e.g. 3+4 and 5), you may
@@ -38,7 +50,7 @@ analyzer, and [progress.md](progress.md)). The plan it executes follows the
    the other; if a shared module like `refresh` can't be cleanly assigned to one phase,
    do **not** run them concurrently. Collect both phases' `uv add` needs and apply them
    serially (orchestrator-only, before any fan-out).
-4. **Handle the Phase 0 seam (branch on current state).**
+4. **Handle the Phase 0 seam (original effort only — skip for other efforts).**
    - If Phase 0 state is `not-started`/`authoring`: do **Beat A** (host authoring), set
      state `awaiting-container-build`, **stop** and tell the human to build/reopen the
      container.
@@ -52,7 +64,7 @@ analyzer, and [progress.md](progress.md)). The plan it executes follows the
    (parallelizable) vs analyzer-bound (serial).
 6. **Delegate (build).** Launch Sonnet build agents — parallel in their own worktrees
    for analyzer-free tasks; serial for analyzer-bound. You are the **sole writer** of
-   `progress.md` and shared config.
+   the active tracker and shared config.
 7. **Review.** For each returned branch, launch the reviewer agent. Merge clean branches
    into the integration branch. A real conflict → escalate (don't resolve on-thread).
 8. **QA.** Launch the QA agent: fast tier always; the live-analyzer integration gate if
@@ -64,8 +76,8 @@ analyzer, and [progress.md](progress.md)). The plan it executes follows the
    then re-run review→QA→adversarial); after **2** rework rounds unresolved, set
    `blocked` and stop for the human.
 10. **PR + record.** On all-pass, open **one PR for the phase** to `main`. Update
-    `progress.md` (state + log line). If the PR can't be opened, set `pr-open`→`blocked`
-    with the branch ready and pause for the human.
+    the active tracker (state + log line). If the PR can't be opened, set
+    `pr-open`→`blocked` with the branch ready and pause for the human.
 11. **Stop and report.** Summarize what shipped, gate results, and the next eligible
     phase. **Do not** start the next phase.
 

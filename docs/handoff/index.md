@@ -8,16 +8,24 @@ plan and `docs/reference/`; these files only orchestrate.
   build / reviewer / QA / adversarial agents; worktrees; parallelism rules.
 - [adversarial-review.md](adversarial-review.md) — the contract-falsification pass
   applied after QA on every phase, and gate-zero over this folder.
-- [progress.md](progress.md) — **single source of truth for "where are we."** Phase
-  states + the dependency graph. Orchestrator is the sole writer.
-- [continue.md](continue.md) — the universal dispatcher. Recurring kickoff:
-  "Continue per docs/handoff/continue.md."
-- Per-phase durable prompts:
+- [progress.md](progress.md) — the **original build's** tracker (Phases 0–5, all
+  done). Orchestrator is the sole writer.
+- [progress-cli.md](progress-cli.md) — the **CLI-frontend effort's** tracker
+  (Phases C1–C5; plan: [cli-frontend.md](../planning/cli-frontend.md)).
+- [continue.md](continue.md) — the universal dispatcher (routes across the efforts
+  table). Recurring kickoff: "Continue per docs/handoff/continue.md."
+- Per-phase durable prompts — original build:
   - [phase-0-foundation.md](phase-0-foundation.md)
   - [phase-1-readiness.md](phase-1-readiness.md)
   - [phase-2-resolution.md](phase-2-resolution.md)
   - [phase-3-4-tools.md](phase-3-4-tools.md)
   - [phase-5-doc-rag.md](phase-5-doc-rag.md)
+- Per-phase durable prompts — CLI frontend:
+  - [cli-phase-1-daemon.md](cli-phase-1-daemon.md)
+  - [cli-phase-2-cli.md](cli-phase-2-cli.md)
+  - [cli-phase-3-versions.md](cli-phase-3-versions.md)
+  - [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md)
+  - [cli-phase-5-skill.md](cli-phase-5-skill.md)
 - [phase-1-docker-verification.md](phase-1-docker-verification.md) — host-side
   checklist + Claude Code prompt to verify the production Docker image (clears the
   repo-agnostic plan's residue R1/R2/R3, which needs a machine with Docker).
