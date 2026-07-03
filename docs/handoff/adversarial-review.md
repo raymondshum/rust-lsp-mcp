@@ -42,9 +42,9 @@ contract-check on Phase 0 config and trivial nav tools — but it always runs.
 ## Gate-zero over docs/handoff/
 
 Before the first build agent launches, an adversarial agent reads the durable prompts,
-[continue.md](continue.md) (the dispatcher logic itself), [progress.md](progress.md)'s
+[continue.md](continue.md) (the dispatcher logic itself), the active effort's tracker's
 dependency graph, and [roles.md](roles.md) and hunts for places they would let an agent:
 skip a gate, deadlock the Phase 0 seam, touch the live analyzer in parallel, write
 shared state (incl. `pyproject.toml`/lock) concurrently, exceed a phase's scope, or
-merge a real conflict on the lean thread. Fix findings, set `progress.md` gate-zero
+merge a real conflict on the lean thread. Fix findings, set the active tracker's gate-zero
 `passed`, then stop for human review before building.

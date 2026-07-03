@@ -1,13 +1,15 @@
 # Orchestration model (roles, worktrees, parallelism)
 
-How the implementation is executed. Read with [progress.md](progress.md) (state) and
+How the implementation is executed. Read with the active effort's tracker (see
+[continue.md](continue.md)'s efforts table — e.g. [progress.md](progress.md) for the
+original build, [progress-cli.md](progress-cli.md) for the CLI effort) and
 [continue.md](continue.md) (the loop).
 
 ## Roles
 
 - **Orchestrator — Opus, lean.** Dispatches work, owns the integration branch and all
   merges, owns the PR/pause decision, and is the **sole writer** of
-  [progress.md](progress.md) and shared config (`pyproject.toml`, `.vscode/`, CI). It
+  the active effort's tracker and shared config (`pyproject.toml`, `.vscode/`, CI). It
   does *not* do context-heavy work itself (no implementing, no diff-reading marathons,
   no semantic conflict resolution on-thread). Sole-writer scope includes **all
   dependency/lockfile changes** (`uv add`, `uv lock`): do them serially before fan-out;
@@ -39,7 +41,7 @@ and the ChromaDB store live on **shared bind mounts** (download-once). Therefore
 
 Parallelize **within** a phase, **never across** the risk-first sequence; fan out only
 on analyzer-free tasks; partition by file ownership so merges stay trivial. The
-per-phase parallel/serial split is encoded in [progress.md](progress.md)'s dependency
+per-phase parallel/serial split is encoded in the active effort's tracker dependency
 graph.
 
 ## Merge & conflict policy

@@ -25,7 +25,12 @@ gate.** Prove the once-per-process warm daemon before the CLI client exists.
   replace `app.router.lifespan_context` with the composed lifespan that nests
   `_lifespan` and delegates to the SDK original, then own `uvicorn.run()`.
 - **New daemon-mode integration fixture**: launch the streamable-HTTP server
-  in-container + a raw-client loopback driver. Reused by C2 and C5.
+  in-container + a raw-client loopback driver. Reused by C2 and C5. Lives
+  under `tests/`, behind the existing `integration` marker; the gate runs via
+  the podman harness described in
+  [cli-frontend-effort-handoff.md](cli-frontend-effort-handoff.md)
+  "Stack commands" (docker socket is denied — podman, rust:1 image,
+  persistent `rlm-*` volumes).
 
 ## Scope / stop boundary
 No CLI client, no compose/docs changes. Stop once the daemon is proven warm
@@ -37,7 +42,10 @@ Fast tier (ruff, ty, fast pytest) **plus** the podman integration gate:
 re-index; assert via `status` + timing); (b) **teardown-race test**: `refresh`
 concurrent with N in-flight nav calls over separate HTTP requests → nav
 returns clean `not_ready` (no hang), manager recovers to `ready`,
-`_server_instances` stays empty; (c) stdio regression — existing integration
+`_server_instances` stays empty (observe `_server_instances` via an
+in-process variant — run the composed app under uvicorn in a task/thread
+inside the test process, as the reference proof did; it is not observable
+across processes); (c) stdio regression — existing integration
 suite green. Note: HTTP wiring can't be tested by in-process transport
 flipping (module built at import) — use the fixture.
 

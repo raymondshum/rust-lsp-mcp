@@ -49,7 +49,9 @@ gate are one serialized resource **across efforts**, not just phases.
    the `{status}` envelope) must be owned by exactly one phase and merely consumed by
    the other; if a shared module like `refresh` can't be cleanly assigned to one phase,
    do **not** run them concurrently. Collect both phases' `uv add` needs and apply them
-   serially (orchestrator-only, before any fan-out).
+   serially (orchestrator-only, before any fan-out). For the CLI effort the analogous
+   pairs are C1+C3 and C4+C5 — fast-tier parallel only; both members' podman
+   integration gates run strictly serially.
 4. **Handle the Phase 0 seam (original effort only — skip for other efforts).**
    - If Phase 0 state is `not-started`/`authoring`: do **Beat A** (host authoring), set
      state `awaiting-container-build`, **stop** and tell the human to build/reopen the

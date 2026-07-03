@@ -51,7 +51,9 @@ C4 ∥ C5. One PR per phase to `main`.
   to completion fully automated** — the orchestrator opens **and merges** the
   per-phase PRs itself (CI must be green before merge; merge-commit style, as
   the repo history uses). This consciously overrides continue.md's
-  stop-at-phase-boundary / await-human-merge for this effort. Everything else
+  stop-at-phase-boundary / await-human-merge for this effort, **and also
+  gate-zero's stop-and-report: once gate-zero passes (fixes applied and
+  recorded), proceed directly into the phases in the same run.** Everything else
   in the cycle is unchanged: per phase, build → **review subagent** → QA
   (fast tier **and** integration gate — both written *and run*) →
   **adversarial subagent** → PR + record. Rework caps: 2 rounds per gate;
