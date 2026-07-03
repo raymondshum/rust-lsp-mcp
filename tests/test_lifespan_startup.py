@@ -146,6 +146,11 @@ class TestLifespanYieldsWhileBuildInFlight:
             self._state = DOC_STATE_BUILDING
             self._error = None
             self._build_lock = threading.Lock()
+            # UR-20: status() now also calls chunk_count() (via
+            # doc_index_chunk_count()), which takes _read_lock — this
+            # lightweight stand-in must carry it too, or that call raises
+            # AttributeError the moment status() is invoked mid-test below.
+            self._read_lock = threading.Lock()
 
         def _patched_rebuild(self: DocStore) -> int:
             # Blocks the WORKER THREAD (asyncio.to_thread) until the test

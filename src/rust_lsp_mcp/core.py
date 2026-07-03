@@ -20,6 +20,7 @@ file self-registers with zero edits to a central registry.
 import logging
 import os
 import pathlib
+import shutil
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -37,7 +38,7 @@ from rust_lsp_mcp.analyzer import (
 from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store_background
 from rust_lsp_mcp.envelope import RECOVERY_FIX_INPUT, RECOVERY_REFRESH, error, not_ready
 from rust_lsp_mcp.positions import lsp_to_external
-from rust_lsp_mcp.settings import get_settings
+from rust_lsp_mcp.settings import Settings, get_settings
 
 _log = logging.getLogger(__name__)
 
@@ -50,10 +51,92 @@ _log = logging.getLogger(__name__)
 _manager: AnalyzerManager | None = None
 
 
+# ---------------------------------------------------------------------------
+# Advisory startup preflight (UR-21, narrowed) — non-fatal, computed ONCE.
+#
+# Deliberately lives here (in the lifespan wrapper), NOT inside
+# AnalyzerManager.start()/_run: the fast/race test suites (test_phase1_fast.py,
+# test_lifecycle_races.py, test_analyzer_error_state.py) construct
+# AnalyzerManager directly with fake paths ('/fake/repo', '/nonexistent', ...)
+# and a mocked LSP, then drive start()/_run themselves — a preflight wired
+# into that seam would fire on every one of those fake-path constructions and
+# is not what they exist to test. Computing it here means it only runs when
+# the real FastMCP lifespan runs (production, and test_lifespan_startup.py's
+# direct `core._lifespan` exercises), never when a test drives the manager in
+# isolation.
+#
+# Holder default is an empty list — this single value does double duty as
+# "startup preflight has not run yet" (test contexts that never touch
+# core._lifespan) AND "startup ran and found nothing to warn about". Callers
+# cannot distinguish the two from the list alone, which is intentional: an
+# empty list means "nothing to show the caller" either way, and status() has
+# no other field that claims to report whether preflight itself ran.
+# ---------------------------------------------------------------------------
+
+_preflight_warnings: list[str] = []
+
+
+def _compute_preflight_warnings(settings: Settings) -> list[str]:
+    """Return advisory (never fatal) warnings about the resolved settings.
+
+    Two cheap, high-value checks only (UR-21 round-2 revision):
+        - the configured ``rust_analyzer_bin`` resolves to an existing,
+          executable file — ``shutil.which`` handles both a bare command name
+          (searched on ``PATH``) and an explicit/relative path (checked
+          directly, no ``PATH`` search) with the same call, matching how the
+          setting is actually consumed.
+        - the configured ``project_root`` exists and is a directory.
+
+    Deliberately does NOT check for a ``Cargo.toml`` at the root — rejected:
+    ``project_root`` is documented as repo-agnostic (rust-project.json
+    projects, or a Cargo.toml in a subdirectory, are both valid), so that
+    check would misfire on legitimate configurations.
+
+    Never raises; never touches analyzer/doc-store state. Pure function of
+    ``settings`` so it is trivially unit-testable without the lifespan.
+    """
+    warnings: list[str] = []
+    try:
+        if shutil.which(settings.rust_analyzer_bin) is None:
+            warnings.append(
+                f"rust-analyzer binary {settings.rust_analyzer_bin!r} was not "
+                "found or is not executable (checked PATH for a bare name, or "
+                "directly for a path) — set RLM_RUST_ANALYZER_BIN to a valid "
+                "rust-analyzer executable."
+            )
+        if not pathlib.Path(settings.project_root).is_dir():
+            warnings.append(
+                f"project_root {settings.project_root!r} does not exist or is "
+                "not a directory — set RLM_PROJECT_ROOT to the target Rust "
+                "project."
+            )
+    except Exception:
+        # "Never fatal" must hold unconditionally: a pathological setting
+        # value (e.g. an embedded NUL byte making Path() raise) must not
+        # kill server startup over an advisory check.
+        _log.exception("preflight: advisory check itself failed — skipping")
+    return warnings
+
+
+def get_preflight_warnings() -> list[str]:
+    """Return the advisory startup preflight warnings (empty list = all clear).
+
+    See the module-level comment above ``_preflight_warnings`` for what an
+    empty list means when the lifespan never ran (e.g. most unit tests).
+    """
+    return list(_preflight_warnings)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ignore[type-arg]
     """Thin wrapper around analyzer_lifespan that also wires the module-level ref."""
-    global _manager
+    global _manager, _preflight_warnings
+    # Advisory preflight (UR-21): computed ONCE per lifespan start, from the
+    # same settings the analyzer/doc-store are about to use. Never fatal —
+    # failures here must never prevent the analyzer/doc-store from starting,
+    # so this runs before anything else and cannot itself raise (see
+    # _compute_preflight_warnings's docstring).
+    _preflight_warnings = _compute_preflight_warnings(get_settings())
     async with analyzer_lifespan(app) as ctx:
         _manager = ctx["manager"]
         try:
@@ -74,6 +157,7 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ign
             yield ctx
         finally:
             _manager = None
+            _preflight_warnings = []
             clear_doc_store()
 
 

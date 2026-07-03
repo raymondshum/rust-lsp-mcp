@@ -34,6 +34,7 @@ from rust_lsp_mcp.doc_store import (
     DocStore,
     DocStoreNotReady,
     clear_doc_store,
+    doc_index_chunk_count,
     get_doc_store,
     init_doc_store,
 )
@@ -255,6 +256,104 @@ class TestDocStoreRebuild:
 
         results = store.search("anything", n_results=5)
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# chunk_count() — UR-20: lock-safe live count(), None-vs-0 distinction.
+# ---------------------------------------------------------------------------
+
+
+class TestDocStoreChunkCount:
+    def test_chunk_count_none_before_rebuild(self, tmp_path: pathlib.Path) -> None:
+        """Not yet ready (state="building", never rebuilt) -> None, not 0."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+
+        assert store.chunk_count() is None
+
+    def test_chunk_count_zero_for_empty_ready_corpus(self, tmp_path: pathlib.Path) -> None:
+        """DS-24: an intentionally-empty completed corpus reports 0, not None."""
+        corpus = tmp_path / "empty_corpus"
+        corpus.mkdir()
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+
+        store.rebuild()
+        assert store.is_ready is True
+        assert store.chunk_count() == 0
+
+    def test_chunk_count_positive_for_populated_corpus(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+
+        count = store.rebuild()
+        assert count > 0
+        assert store.chunk_count() == count
+
+    def test_chunk_count_none_after_error(self, tmp_path: pathlib.Path) -> None:
+        """A failed rebuild leaves state="error" -> chunk_count() must be None."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+
+        with (
+            patch("rust_lsp_mcp.doc_store.chunk_markdown", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            store.rebuild()
+
+        assert store.chunk_count() is None
+
+
+class TestDocIndexChunkCountAccessor:
+    """Module-level ``doc_index_chunk_count()`` — mirrors ``doc_store_state()``.
+
+    Works on BOTH the rebuild path AND the DS-24 adopt path, since it reads
+    ``collection.count()`` live rather than a value captured at build time.
+    """
+
+    def test_none_when_no_singleton(self) -> None:
+        clear_doc_store()
+        assert doc_index_chunk_count() is None
+
+    def test_zero_on_adopted_empty_corpus(self, tmp_path: pathlib.Path) -> None:
+        """Reuses the DS-24 empty-corpus fixture pattern: build once (writes the
+        sentinel), clear the singleton, then adopt on a fresh init_doc_store —
+        the adopt path never calls rebuild(), so this proves the accessor reads
+        the live collection rather than a rebuild-time count."""
+        corpus = tmp_path / "empty_corpus"
+        corpus.mkdir()
+        settings = _make_settings(tmp_path, corpus)
+
+        clear_doc_store()
+        store1 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert store1._collection.count() == 0
+        clear_doc_store()
+
+        # Second init adopts (no rebuild) — see test_init_doc_store_adopts_
+        # intentionally_empty_corpus for the rebuild-call spy proving this.
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_index_chunk_count() == 0
+
+        clear_doc_store()
+
+    def test_positive_on_populated_corpus(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        clear_doc_store()
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        expected = store._collection.count()
+        assert expected > 0
+        assert doc_index_chunk_count() == expected
+
+        clear_doc_store()
 
 
 class TestDocStoreSearch:

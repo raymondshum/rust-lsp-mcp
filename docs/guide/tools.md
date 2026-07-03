@@ -468,6 +468,8 @@ Always `ok`, with these fields:
 | `stale` | boolean or `null` | `true` if the two commit hashes differ; `false` if they match; `null` if either hash is unknown. |
 | `doc_index_state` | `"building"`, `"ready"`, or `"error"` | Whether the documentation search index (used by `search_docs`) has finished building. Independent of `state` above. |
 | `doc_index_error` | string or `null` | Diagnostic message when `doc_index_state` is `"error"`, else `null`. |
+| `doc_index_chunk_count` | integer or `null` | Number of indexed Markdown chunks (a live `collection.count()`), or `null` when `doc_index_state != "ready"`. `0` is a valid, meaningful reading — a completed index over zero matching Markdown files (e.g. wrong `RLM_DOC_GLOB_PATTERNS`, empty/un-mounted project, or a project that genuinely ships no docs) — and is distinct from `null` ("not ready yet / no store"). Works whether the index was just rebuilt or adopted from a prior run. |
+| `preflight_warnings` | array of strings | Advisory-only diagnostics computed once at server startup: whether the configured `rust_analyzer_bin` resolves to an existing executable, and whether `project_root` exists and is a directory. An empty array means either "both checks passed" or "the preflight has not run yet" (e.g. some test contexts) — these are intentionally indistinguishable. Warnings here never affect `state`, `doc_index_state`, or the envelope `status` — they are a hint, not a failure signal. |
 
 **Caution on `stale`:** the comparison looks at committed versions only. If you
 have uncommitted edits in your working tree, `stale` will still be `false`. It
@@ -484,7 +486,9 @@ means "no committed changes since indexing began," not a freshness guarantee.
   "current_commit": "a3f1c9d",
   "stale": false,
   "doc_index_state": "ready",
-  "doc_index_error": null
+  "doc_index_error": null,
+  "doc_index_chunk_count": 42,
+  "preflight_warnings": []
 }
 ```
 

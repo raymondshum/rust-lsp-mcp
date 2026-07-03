@@ -29,6 +29,10 @@ from rust_lsp_mcp.envelope import STATUS_OK
 _FAKE_COMMIT_A = "aabbccdd" * 5  # 40-char hex
 _FAKE_COMMIT_B = "11223344" * 5  # different 40-char hex
 
+# Sentinel distinguishing "doc_index_chunk_count_return not passed" from an
+# explicitly-passed None (which is itself a meaningful value: "not ready").
+_UNSET: Any = object()
+
 
 def _make_manager(
     state: str,
@@ -67,6 +71,8 @@ def _call_status(
     subprocess_run_return: Any = None,
     subprocess_raises: Exception | None = None,
     doc_store_state_return: tuple[str, str | None] | None = None,
+    doc_index_chunk_count_return: Any = _UNSET,
+    preflight_warnings_return: list[str] | None = None,
 ) -> dict[str, Any]:
     """Invoke the status tool with the given manager and git subprocess stub.
 
@@ -77,12 +83,16 @@ def _call_status(
     otherwise the real (module-singleton-backed) ``doc_store_state`` runs,
     which is fine for tests that don't care about the doc-index fields but
     would be nondeterministic (and coupled to other test files' state) for
-    tests that do.
+    tests that do. ``doc_index_chunk_count_return`` (any of ``None``/``0``/a
+    positive int counts as "given" — the sentinel default distinguishes "not
+    passed" from "explicitly None") and ``preflight_warnings_return`` follow
+    the same pattern for the two UR-20/UR-21 fields.
 
     DS-19: ``status`` is now an ``async def`` tool (it offloads the blocking
-    git subprocess call to a worker thread via ``asyncio.to_thread``) — drive
-    it with ``asyncio.run`` here so every existing synchronous caller/assertion
-    in this module keeps working unchanged.
+    git subprocess call and the doc-store's ``collection.count()`` to worker
+    threads via ``asyncio.to_thread``) — drive it with ``asyncio.run`` here so
+    every existing synchronous caller/assertion in this module keeps working
+    unchanged.
     """
     import rust_lsp_mcp.core as core_mod
     import rust_lsp_mcp.tools.status as status_mod
@@ -99,6 +109,18 @@ def _call_status(
     if doc_store_state_return is not None:
         patches.append(
             patch.object(status_mod, "doc_store_state", return_value=doc_store_state_return)
+        )
+    if doc_index_chunk_count_return is not _UNSET:
+        patches.append(
+            patch.object(
+                status_mod, "doc_index_chunk_count", return_value=doc_index_chunk_count_return
+            )
+        )
+    if preflight_warnings_return is not None:
+        patches.append(
+            patch.object(
+                status_mod, "get_preflight_warnings", return_value=preflight_warnings_return
+            )
         )
     with contextlib.ExitStack() as stack:
         for p in patches:
@@ -301,3 +323,86 @@ class TestStatusDocIndex:
             doc_store_state_return=("building", None),
         )
         assert result["analyzer_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: doc_index_chunk_count (UR-20) and preflight_warnings (UR-21)
+# ---------------------------------------------------------------------------
+
+
+class TestStatusDocIndexChunkCount:
+    def test_none_when_not_ready(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("building", None),
+            doc_index_chunk_count_return=None,
+        )
+        assert result["doc_index_chunk_count"] is None
+
+    def test_zero_for_empty_adopted_corpus(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("ready", None),
+            doc_index_chunk_count_return=0,
+        )
+        assert result["doc_index_state"] == "ready"
+        assert result["doc_index_chunk_count"] == 0
+
+    def test_positive_for_populated_corpus(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("ready", None),
+            doc_index_chunk_count_return=42,
+        )
+        assert result["doc_index_chunk_count"] == 42
+
+    def test_status_still_ok(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            doc_store_state_return=("ready", None),
+            doc_index_chunk_count_return=0,
+        )
+        assert result["status"] == STATUS_OK
+
+
+class TestStatusPreflightWarnings:
+    def test_empty_list_when_all_clear(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            preflight_warnings_return=[],
+        )
+        assert result["preflight_warnings"] == []
+
+    def test_surfaces_whatever_the_holder_contains(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        warnings = [
+            "rust-analyzer binary '/fake/rust-analyzer' was not found",
+            "project_root '/fake/repo' does not exist or is not a directory",
+        ]
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            preflight_warnings_return=warnings,
+        )
+        assert result["preflight_warnings"] == warnings
+
+    def test_status_still_ok_with_warnings_present(self) -> None:
+        """preflight_warnings is advisory-only — must never flip envelope status."""
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(
+            mgr,
+            subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+            preflight_warnings_return=["something to warn about"],
+        )
+        assert result["status"] == STATUS_OK
+        assert result["state"] == STATE_READY
