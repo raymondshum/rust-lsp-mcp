@@ -47,9 +47,10 @@ library.
 
 ## A CLI-only variable: `RLM_CLI_URL`
 
-`RLM_CLI_URL`, if set, overrides the daemon URL the `rust-lsp` CLI client
-connects to (default: derived from `RLM_HTTP_PORT` as
-`http://127.0.0.1:<port>/mcp`). It is **not** in the table above and not in
+A **non-empty** `RLM_CLI_URL` value overrides the daemon URL the `rust-lsp`
+CLI client connects to (default: derived from `RLM_HTTP_PORT` as
+`http://127.0.0.1:<port>/mcp`; a variable that is exported but empty is
+treated as unset). It is **not** in the table above and not in
 `env.sample` on purpose: it configures the CLI client, not the server, so it
 is not a `Settings` field the server reads, and the `env.sample`
 honesty test (which checks `env.sample` against `Settings` fields) does not

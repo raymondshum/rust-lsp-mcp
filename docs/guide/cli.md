@@ -24,8 +24,9 @@ page covers the parts that are specific to invoking them from a shell.
 
 By default, `rust-lsp` talks to `http://127.0.0.1:${RLM_HTTP_PORT:-8000}/mcp`
 — the same port the daemon reads from `RLM_HTTP_PORT`, so the two can't
-silently disagree. Set `RLM_CLI_URL` to override the target URL outright
-(e.g. to point at a non-default port); see
+silently disagree. Set `RLM_CLI_URL` to a non-empty value to override the
+target URL outright (e.g. to point at a non-default port; an
+exported-but-empty value is treated as unset); see
 [Configuration](configuration.md#a-cli-only-variable-rlm_cli_url) for why
 this variable is CLI-only and not in `env.sample`.
 
