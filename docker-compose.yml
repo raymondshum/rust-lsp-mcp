@@ -62,7 +62,11 @@ services:
     restart: unless-stopped
     volumes:
       # The target Rust project, read-only. Set RUST_PROJECT to its host path.
-      - "${RUST_PROJECT:?set RUST_PROJECT to your Rust project's absolute path}:/project:ro"
+      # The `z` is the SHARED SELinux relabel (lowercase — never the private
+      # `Z`; see the README's mount notes): without it, SELinux-enforcing
+      # hosts (e.g. rootless podman on Fedora) silently deny the container
+      # read access to /project. Harmless no-op on non-SELinux hosts.
+      - "${RUST_PROJECT:?set RUST_PROJECT to your Rust project's absolute path}:/project:ro,z"
       # Persistent caches (chroma store + cargo target/registry). The embedding
       # model is baked into the image, not stored here.
       - rlm-data:/data

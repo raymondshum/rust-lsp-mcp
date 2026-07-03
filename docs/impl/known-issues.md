@@ -146,6 +146,34 @@ Check this list at these lifecycle checkpoints (see
   controls. Low severity (cosmetic/log-noise only). Revisit whether it's
   still present on the next `mcp` SDK upgrade past 1.12.4.
 
+### KI-16 — Unreadable `/project` mount (e.g. SELinux) is masked as ready-with-zero-docs + generic errors
+- **Where:** doc-store index build in
+  [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
+  (the corpus glob + `read_text`, ~lines 270–307 — an unreadable `/project`
+  simply yields zero files, which builds a "successful" empty index) ·
+  analyzer-side file reads, surfaced through the navigation tools' generic
+  LSP-error envelope. Trigger observed on an SELinux-enforcing
+  rootless-podman host where the `${RUST_PROJECT}:/project:ro` bind mount
+  lacked a relabel: `container_t` cannot read e.g. `user_tmp_t` files.
+- **What:** when the container can mount but not **read** the project, no
+  in-band signal distinguishes it from a healthy empty project: `status`
+  reports `state: "ready"` with `doc_index_chunk_count: 0`
+  (indistinguishable from a project that genuinely ships no Markdown), and
+  every navigation call returns a generic "LSP error: File read failed …
+  Retry" envelope with `recovery: "unknown"` — guidance that is actively
+  misleading, since retrying an access denial never helps.
+- **Why it matters:** silent wrong answers (an agent concludes "this project
+  has no docs" / "file reads fail transiently") plus retry-suggesting
+  recovery text for a permanent host-side condition. QA hit exactly this in
+  the C4 compose smoke and needed a host-side
+  `chcon -Rt container_file_t` to unmask it.
+- **Status:** open — docs mitigate for now: the compose project mount ships
+  `:ro,z` (the shared SELinux relabel, matching the README's `z`-not-`Z`
+  convention) and [docs/guide/cli.md](../guide/cli.md#troubleshooting) has a
+  troubleshooting row for the symptom pair. A real fix is a **preflight
+  readability check** on `/project` (surfaced via `preflight_warnings`, or
+  failing louder) — future work, out of the C4 phase's docs-only scope.
+
 ---
 
 ## Resolved

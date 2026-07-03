@@ -152,7 +152,7 @@ docker run -i --rm \
 - `-v rust-lsp-mcp-data:/data` — a named volume that persists the Chroma vector store, cargo registry, and build cache across `--rm` runs.
 - `-i` — keeps stdin open so the MCP client can communicate over stdio.
 
-> **SELinux note:** Under SELinux-enforcing rootless Podman, append `,Z` to the bind mount: `-v /abs/path/to/your/project:/project:ro,Z`. Plain `:ro` is correct for a standard Docker daemon.
+> **SELinux note:** Under SELinux-enforcing rootless Podman, append `,z` to the bind mount: `-v /abs/path/to/your/project:/project:ro,z`. Use the lowercase, **shared** label `z` — never the private `Z`, which relabels the source tree for one container only and then denies every other container or tool that mounts the same directory (including `scripts/prime-cache.sh`, which uses `:z`); see the README's mount notes for the full explanation. Plain `:ro` is correct for a standard Docker daemon.
 
 The env-var defaults baked into the image (`RLM_PROJECT_ROOT=/project`, `RLM_CHROMA_PATH=/data/chroma`, `RLM_DOC_COLLECTION=project_docs`, and the cargo-cache paths) work out of the box for this invocation. See [Configuration](configuration.md) to override them.
 
