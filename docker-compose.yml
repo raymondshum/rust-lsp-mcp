@@ -1,23 +1,50 @@
-# Optional: the "warm-start" / `docker exec` launch path.
+# Daemon launch path: a warm `rust-lsp-mcp` server, in streamable-HTTP mode,
+# that the `rust-lsp` CLI connects to for fast, low-latency calls from agents
+# that don't have MCP tool access (see docs/guide/cli.md).
 #
-# The default, recommended launch is ephemeral `docker run -i --rm` per session
-# (see README "Connect it to an AI assistant"). That starts a fresh
-# rust-analyzer process each session — correct, but it re-indexes every time
-# (rust-analyzer's index is in-memory and rebuilt on each start; only the cargo
-# cache on the volume warms incremental `cargo check`).
+# SUPERSEDED: this file used to keep the container alive with `sleep infinity`
+# and have an MCP client `docker exec -i … /app/.venv/bin/rust-lsp-mcp` into it
+# as a stdio "warm-start" — a second stdio *server* process re-using the same
+# rust-analyzer/Chroma state across sessions. That story is gone. Post-flip,
+# repeating it is actively dangerous: this compose file's entrypoint already
+# runs one long-lived server against the shared `/data` Chroma store, and a
+# second stdio server opened via `docker exec` against the SAME store is an
+# unguarded cross-process SQLite writer — silent index corruption risk (see
+# docs/impl/known-issues.md KI-13). **Exactly one server process per Chroma
+# path, always.**
 #
-# If that per-session warmup becomes annoying, keep ONE long-lived container up
-# with this compose file and have the MCP client `docker exec` into it, so the
-# rust-analyzer process stays hot between sessions:
+# What replaces it:
+#   - MCP clients (Claude Desktop, etc.) — UNCHANGED. Keep using the default,
+#     ephemeral `docker run -i --rm …` path from the README's "Connect it to
+#     an AI assistant" section. That path never touches this compose file.
+#   - CLI users (agents without MCP tool access) — bring this daemon up once,
+#     then run one-off commands against it. Run from this repo's directory
+#     (compose reads this file relative to the working directory) with
+#     RUST_PROJECT set to the absolute host path of the Rust project you want
+#     to analyze — the same variable the volume mount below requires:
 #
-#   RUST_PROJECT=/abs/path/to/your/rust/project docker compose up -d rust-lsp-mcp
+#       RUST_PROJECT=/abs/path/to/your/rust/project docker compose up -d rust-lsp-mcp
+#       docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp --wait 180 status
+#       docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp find-symbol MyStruct
 #
-# (Name the service explicitly — a bare `up -d` would ALSO start the
-# rust-lsp-mcp-isolated variant below, giving you two containers on one volume.)
+#     Use the FULL PATH `/app/.venv/bin/rust-lsp` — the image's PATH (see
+#     Dockerfile) only adds /usr/local/cargo/bin, not /app/.venv/bin, so a
+#     bare `rust-lsp` is "command not found" under `docker exec`/`podman exec`.
+#     `--wait` (see docs/guide/cli.md) must come BEFORE the subcommand.
 #
-# Then point the MCP client at:
-#   "command": "docker",
-#   "args": ["exec", "-i", "rust-lsp-mcp", "/app/.venv/bin/rust-lsp-mcp"]
+#     (Name the service explicitly — a bare `up -d` would ALSO start the
+#     `rust-lsp-mcp-isolated` variant below, giving you two servers on one
+#     volume, the same double-writer hazard as above. `podman compose` /
+#     `podman exec` work identically.)
+#
+# NEVER add a `ports:` mapping to either service below. The daemon's HTTP
+# listener is intentionally loopback-only (127.0.0.1, hard-coded, not
+# configurable) and unauthenticated — it exists so `rust-lsp` can reach it
+# from inside the SAME container, not so other hosts or containers can. This
+# container also executes untrusted `build.rs`/proc-macro code from whatever
+# Rust project it's pointed at; publishing the port would let that project's
+# code (or anything else on the network) reach the MCP tools too. See the
+# README security section for the full rationale (D4).
 
 services:
   rust-lsp-mcp:
@@ -26,27 +53,38 @@ services:
       dockerfile: Dockerfile
     image: rust-lsp-mcp
     container_name: rust-lsp-mcp
-    # Keep the container alive; the server is launched per session via
-    # `docker exec`. This overrides the image ENTRYPOINT (which is the server).
-    entrypoint: ["sleep", "infinity"]
+    # No entrypoint override: the image ENTRYPOINT (/app/.venv/bin/rust-lsp-mcp)
+    # runs directly, reading RLM_TRANSPORT below to start in streamable-HTTP
+    # daemon mode instead of the default stdio mode.
+    environment:
+      RLM_TRANSPORT: streamable-http
+      RLM_HTTP_PORT: "8000"
+    restart: unless-stopped
     volumes:
       # The target Rust project, read-only. Set RUST_PROJECT to its host path.
       - "${RUST_PROJECT:?set RUST_PROJECT to your Rust project's absolute path}:/project:ro"
       # Persistent caches (chroma store + cargo target/registry). The embedding
       # model is baked into the image, not stored here.
       - rlm-data:/data
+    # NO ports: — see the header comment. The server listens on 127.0.0.1
+    # inside the container only; reach it via
+    # `docker exec … /app/.venv/bin/rust-lsp <cmd>` (full path — see header).
 
-  # Network-isolated warm-start variant. Same as above but with NO network, so
+  # Network-isolated daemon variant. Same as above but with NO network, so
   # untrusted build.rs / proc-macro code executed by rust-analyzer cannot reach
   # outbound. Prime the cargo cache first (scripts/prime-cache.sh) or analysis of
   # un-cached external crates will be degraded — see README "Network isolation".
   #   RUST_PROJECT=/abs/project docker compose up -d rust-lsp-mcp-isolated
+  #   docker exec rust-lsp-mcp-isolated /app/.venv/bin/rust-lsp --wait 180 status
   rust-lsp-mcp-isolated:
     extends:
       service: rust-lsp-mcp
     container_name: rust-lsp-mcp-isolated
     network_mode: none
     environment:
+      # RLM_TRANSPORT/RLM_HTTP_PORT are inherited from the base service via
+      # `extends` (compose merges `environment` maps); only the isolated-mode
+      # addition is listed here.
       CARGO_NET_OFFLINE: "true"
 
 volumes:
@@ -55,4 +93,9 @@ volumes:
     # default (rust-lsp-mcp-data). Without this, compose would prefix it to
     # `<project>_rlm-data`, and priming the default volume would warm a DIFFERENT
     # cache than the isolated service reads — shipping degraded offline analysis.
+    #
+    # Both services above point at this SAME volume/Chroma path. Per KI-13's
+    # single-writer mandate, run at most ONE of them (or any other server
+    # process against this volume) at a time; use a differently-named volume
+    # if you genuinely need two servers live concurrently.
     name: rust-lsp-mcp-data
