@@ -4,15 +4,18 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from rust_lsp_mcp.analyzer import (
+    INDEXING_RETRY_MESSAGE,
     TORN_DOWN_RETRY_MESSAGE,
     AnalyzerNotReadyError,
     AnalyzerTornDownError,
 )
 from rust_lsp_mcp.core import get_manager, mcp, require_ready, validate_workspace_file
-from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import error, lsp_failure, not_found, not_ready, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
@@ -64,7 +67,22 @@ def _contents_to_str(contents: Any) -> str:
 
 
 @mcp.tool()
-async def hover(file: str, line: int, character: int) -> dict[str, Any]:
+async def hover(
+    file: str,
+    line: Annotated[
+        int,
+        Field(
+            description="1-indexed line number; the first line is 1 (NOT 0-indexed like raw LSP)."
+        ),
+    ],
+    character: Annotated[
+        int,
+        Field(
+            description="1-indexed Unicode-codepoint offset within the line; the first "
+            "character is 1."
+        ),
+    ],
+) -> dict[str, Any]:
     """Return rust-analyzer hover markdown at the given position (type signature + docs).
 
     Queries rust-analyzer for hover information at the specified 1-indexed
@@ -102,6 +120,12 @@ async def hover(file: str, line: int, character: int) -> dict[str, Any]:
     rust-analyzer emits ``contents`` as ``MarkupContent`` (confirmed live in the
     Phase 3+4 integration gate). The helper still defensively normalizes the other
     documented shapes (``MarkedString`` / list) in case a future version differs.
+
+    Requires an exact position (file + 1-indexed line/character) such as one
+    returned by ``find_symbol`` or ``document_symbols``; if you only have a
+    symbol NAME, call ``find_symbol`` first. To answer "what is this and
+    where is it defined?" in one turn, call ``hover`` and ``goto_definition``
+    at the same position in parallel rather than sequentially.
     """
     # 1. Input validation.
     if line < 1 or character < 1:
@@ -131,12 +155,12 @@ async def hover(file: str, line: int, character: int) -> dict[str, Any]:
         # require_ready() so a permanently-errored analyzer still maps to
         # error, not a misleading not_ready (#98).
         guard = require_ready()
-        return guard if guard is not None else not_ready()
+        return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
     except AnalyzerTornDownError:
         return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("hover: LSP error at %s:%d:%d", file, line, character)
-        return error(f"LSP error: {exc}")
+        return lsp_failure(exc)
 
     # 5. Handle None (no hover info).
     if hov is None:

@@ -14,6 +14,14 @@ from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
 
 _log = logging.getLogger(__name__)
 
+# Canonical not_ready message for the doc-index-still-building case — shared by
+# all three not_ready branches below so they name the same poll tool/field
+# (mirrors analyzer.py's INDEXING_RETRY_MESSAGE for the analyzer side).
+DOC_INDEXING_RETRY_MESSAGE = (
+    "The documentation index is still building. Retry after status reports "
+    "doc_index_state == 'ready'."
+)
+
 
 def _errored_build_envelope(reason: str | None) -> dict[str, Any]:
     """Return the ``error`` envelope for a permanently-failed doc-index build.
@@ -50,7 +58,7 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
           {
             "file":       str,    # workspace-relative path of the source .md
             "breadcrumb": str,    # heading trail, e.g. "GUIDE.md > Config > Foo"
-            "text":       str,    # the chunk text that was embedded
+            "text":       str,    # the chunk body (breadcrumb prefix stripped)
             "distance":   float,  # cosine distance (0 = identical, lower = closer)
           }
 
@@ -74,7 +82,10 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
       This only happens when the collection is empty (semantic search over a
       populated collection always returns the top-k nearest neighbours).  It is
       semantically distinct from ``not_ready``: here the store *is* ready and
-      genuinely found nothing.
+      genuinely found nothing.  The message enumerates the possible causes of
+      an empty corpus (no Markdown matched, all matched files excluded, matched
+      files empty, or the project simply ships no docs) without asserting
+      misconfiguration.
 
     Invariant (load-bearing):
         ``not_ready``/``error`` is returned whenever ``is_ready`` is ``False``,
@@ -104,16 +115,10 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
                 "The documentation index failed to initialise and is unavailable: "
                 f"{doc_err or 'unknown error'}. Run the refresh tool to rebuild it."
             )
-        return not_ready(
-            "The documentation index is still building. "
-            "Retry after checking doc_index_state via status, or after refresh returns."
-        )
+        return not_ready(DOC_INDEXING_RETRY_MESSAGE)
 
     if not store.is_ready:
-        return not_ready(
-            "The documentation index is not available or is currently rebuilding. "
-            "Retry after the store is ready."
-        )
+        return not_ready(DOC_INDEXING_RETRY_MESSAGE)
 
     try:
         hits = await run_sync(lambda: store.search(query, n_results=limit))
@@ -128,15 +133,17 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
         # rather than briefly mislabelling a now-errored store as not_ready.
         if getattr(store, "state", None) == DOC_STATE_ERROR:
             return _errored_build_envelope(store.error_message)
-        return not_ready(
-            "The documentation index is rebuilding. Retry after status reports "
-            "doc_index_state == 'ready'."
-        )
+        return not_ready(DOC_INDEXING_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("search_docs: store.search raised for query %r", query)
         return error(f"Documentation search error: {exc}")
 
     if not hits:
-        return not_found(f"No documentation chunks matched {query!r}. The collection may be empty.")
+        return not_found(
+            "The documentation index is ready but contains 0 chunks. Possible causes: "
+            "no Markdown files matched RLM_DOC_GLOB_PATTERNS; all matches were excluded "
+            "by RLM_DOC_EXCLUDE_PATTERNS; the matched files were empty; or this project "
+            "simply ships no Markdown docs."
+        )
 
     return ok(results=hits)

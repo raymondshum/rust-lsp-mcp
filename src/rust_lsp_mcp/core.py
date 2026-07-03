@@ -28,7 +28,12 @@ from urllib.parse import unquote, urlparse
 from mcp.server.fastmcp import FastMCP
 from multilspy.multilspy_types import SymbolKind
 
-from rust_lsp_mcp.analyzer import STATE_ERROR, AnalyzerManager, analyzer_lifespan
+from rust_lsp_mcp.analyzer import (
+    INDEXING_RETRY_MESSAGE,
+    STATE_ERROR,
+    AnalyzerManager,
+    analyzer_lifespan,
+)
 from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store_background
 from rust_lsp_mcp.envelope import error, not_ready
 from rust_lsp_mcp.positions import lsp_to_external
@@ -79,6 +84,12 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ign
 mcp: FastMCP[dict[str, Any]] = FastMCP(  # type: ignore[type-arg]
     "rust-lsp-mcp",
     lifespan=_lifespan,
+    instructions=(
+        "Navigation pattern: resolve a symbol NAME to a position with "
+        "find_symbol or document_symbols, then act on that position with "
+        "goto_definition, find_references, or hover. All positions "
+        "(file, line, character) are 1-indexed."
+    ),
 )
 
 
@@ -110,7 +121,7 @@ def require_ready() -> dict[str, Any] | None:
             "(e.g. RLM_RUST_ANALYZER_BIN)."
         )
     if _manager is None or not _manager.is_ready:
-        return not_ready()
+        return not_ready(INDEXING_RETRY_MESSAGE)
     return None
 
 

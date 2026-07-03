@@ -316,6 +316,72 @@ class TestDocStoreSearch:
         for result in results:
             assert result["breadcrumb"], "Breadcrumb should not be empty"
 
+    def test_search_text_is_body_only(self, tmp_path: pathlib.Path) -> None:
+        """text carries the chunk body only — the breadcrumb prefix is stripped (UR-14).
+
+        The embedded document is ``breadcrumb + "\\n\\n" + body``; search() must
+        strip that prefix at read time so the breadcrumb is not shipped twice
+        (once as the structured field, once as the prefix of text).
+        """
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+
+        results = store.search("ignore files", n_results=10)
+        assert len(results) > 0
+        for result in results:
+            bc = result["breadcrumb"]
+            # (a) body-only: text must not re-ship the breadcrumb as a prefix.
+            assert not result["text"].startswith(bc), (
+                f"text still starts with its breadcrumb {bc!r}: {result['text']!r}"
+            )
+            # (c) the breadcrumb field itself is unchanged (heading trail form).
+            assert bc.startswith("intro.md") or bc.startswith("guide.md"), (
+                f"Unexpected breadcrumb shape: {bc!r}"
+            )
+
+        # The known guide.md body must survive the strip intact.
+        bodies = [r["text"] for r in results]
+        assert any("Use a .gitignore or --glob pattern to skip files." in b for b in bodies), (
+            f"Expected a known body text among results, got: {bodies}"
+        )
+
+    def test_search_header_only_chunk_yields_empty_text(self, tmp_path: pathlib.Path) -> None:
+        """A header-only chunk (embedded text == breadcrumb verbatim) yields text == "" (UR-14).
+
+        A headed section with no body is embedded as the bare breadcrumb (no
+        ``"\\n\\n"``), so the startswith-guarded strip cannot match — the result
+        must degrade to an empty body, never re-ship the breadcrumb as text.
+        """
+        corpus = tmp_path / "corpus"
+        corpus.mkdir(parents=True, exist_ok=True)
+        # "# Only A Header" has no body of its own (the next line is a
+        # sub-header), producing a chunk whose embedded text is exactly its
+        # breadcrumb — verified against chunk_markdown's else-branch.
+        (corpus / "hdr.md").write_text(
+            "# Only A Header\n\n## Sub With Body\n\nSome body content here.\n",
+            encoding="utf-8",
+        )
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        count = store.rebuild()
+        assert count == 2  # header-only chunk + sub-section chunk
+
+        results = store.search("anything", n_results=10)
+        by_breadcrumb = {r["breadcrumb"]: r for r in results}
+
+        # (b) header-only chunk → empty body, breadcrumb field intact.
+        header_only = by_breadcrumb["hdr.md > Only A Header"]
+        assert header_only["text"] == "", (
+            f"Header-only chunk must have empty body text, got: {header_only['text']!r}"
+        )
+
+        # The sibling chunk with a real body keeps it (body-only, no prefix).
+        with_body = by_breadcrumb["hdr.md > Only A Header > Sub With Body"]
+        assert with_body["text"] == "Some body content here."
+
     def test_search_before_rebuild_raises_not_ready(self, tmp_path: pathlib.Path) -> None:
         """search() before any rebuild raises DocStoreNotReady (collection is None).
 

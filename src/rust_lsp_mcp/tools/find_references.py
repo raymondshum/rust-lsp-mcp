@@ -4,9 +4,12 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from rust_lsp_mcp.analyzer import (
+    INDEXING_RETRY_MESSAGE,
     TORN_DOWN_RETRY_MESSAGE,
     AnalyzerNotReadyError,
     AnalyzerTornDownError,
@@ -18,7 +21,7 @@ from rust_lsp_mcp.core import (
     require_ready,
     validate_workspace_file,
 )
-from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import error, lsp_failure, not_found, not_ready, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
@@ -27,8 +30,19 @@ _log = logging.getLogger(__name__)
 @mcp.tool()
 async def find_references(
     file: str,
-    line: int,
-    character: int,
+    line: Annotated[
+        int,
+        Field(
+            description="1-indexed line number; the first line is 1 (NOT 0-indexed like raw LSP)."
+        ),
+    ],
+    character: Annotated[
+        int,
+        Field(
+            description="1-indexed Unicode-codepoint offset within the line; the first "
+            "character is 1."
+        ),
+    ],
     include_declaration: bool = False,
 ) -> dict[str, Any]:
     """Find all references to the symbol at the given position.
@@ -102,6 +116,10 @@ async def find_references(
       workspace-relative path that does not resolve outside the workspace
       root (absolute paths and ``..``-escaping paths are rejected
       immediately, without calling the analyzer).
+
+    Requires an exact position (file + 1-indexed line/character) such as one
+    returned by ``find_symbol`` or ``document_symbols``; if you only have a
+    symbol NAME, call ``find_symbol`` first.
     """
     # Step 1: validate input positions (must be 1-indexed, i.e. >= 1).
     if line < 1 or character < 1:
@@ -136,12 +154,12 @@ async def find_references(
         # require_ready() so a permanently-errored analyzer still maps to
         # error, not a misleading not_ready (#98).
         guard = require_ready()
-        return guard if guard is not None else not_ready()
+        return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
     except AnalyzerTornDownError:
         return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("find_references: LSP error for %r at (%d, %d)", file, line, character)
-        return error(f"LSP error: {exc}")
+        return lsp_failure(exc)
 
     # refs is list[Location] | None.
     # None means the LSP returned null (no symbol at this position) — not_found.
@@ -174,7 +192,7 @@ async def find_references(
             # re-consult require_ready() so a permanently-errored analyzer
             # still maps to error, not a misleading not_ready (#98).
             guard = require_ready()
-            return guard if guard is not None else not_ready()
+            return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
         except AnalyzerTornDownError:
             return not_ready(TORN_DOWN_RETRY_MESSAGE)
         except Exception as exc:
@@ -184,7 +202,7 @@ async def find_references(
                 line,
                 character,
             )
-            return error(f"LSP error (definition): {exc}")
+            return lsp_failure(exc, context="definition")
 
         # defs is list[Location] | None.
         # None means no symbol at this position — skip silently; the references

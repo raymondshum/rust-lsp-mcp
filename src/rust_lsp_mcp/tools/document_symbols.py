@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from rust_lsp_mcp.analyzer import (
+    INDEXING_RETRY_MESSAGE,
     TORN_DOWN_RETRY_MESSAGE,
     AnalyzerNotReadyError,
     AnalyzerTornDownError,
@@ -18,7 +19,7 @@ from rust_lsp_mcp.core import (
     symbol_to_external,
     validate_workspace_file,
 )
-from rust_lsp_mcp.envelope import error, not_ready, ok
+from rust_lsp_mcp.envelope import lsp_failure, not_ready, ok
 
 _log = logging.getLogger(__name__)
 
@@ -101,12 +102,12 @@ async def document_symbols(file: str) -> dict[str, Any]:
         # require_ready() so a permanently-errored analyzer still maps to
         # error, not a misleading not_ready (#98).
         guard = require_ready()
-        return guard if guard is not None else not_ready()
+        return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
     except AnalyzerTornDownError:
         return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("document_symbols: LSP error for file %r", file)
-        return error(f"LSP error: {exc}")
+        return lsp_failure(exc)
 
     repo_root = manager.repository_root
 

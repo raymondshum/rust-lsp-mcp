@@ -247,6 +247,47 @@ class TestFindSymbolNotFound:
         ok_empty = _ok(results=[])
         assert nf["status"] != ok_empty["status"]
 
+    def test_zero_matches_message_suggests_prefix_or_exact_name(self) -> None:
+        """UR-10(a): the zero-matches not_found message carries recovery hints.
+
+        Both the LSP-null (None) and empty-list shapes are "zero candidates
+        returned" and must take the same recovery-hint message.
+        """
+        mgr = _make_manager(STATE_READY)
+        for raw in (None, []):
+            result = _run_find_symbol(mgr, "nonexistent", raw)
+            assert result["status"] == STATUS_NOT_FOUND
+            msg = result["message"]
+            assert "shorter prefix" in msg, f"Missing prefix hint (raw={raw!r}): {msg!r}"
+            assert "exact declared name" in msg, f"Missing exact-name hint (raw={raw!r}): {msg!r}"
+
+    def test_all_filtered_message_mentions_workspace_boundary(self) -> None:
+        """UR-10(b): the all-candidates-filtered not_found message names the boundary.
+
+        When candidates WERE returned but every one resolves outside the
+        workspace, the message must say so — distinct from the zero-matches
+        message — and must not claim deps/std are un-"indexed" (they are
+        indexed; they are filtered as non-navigable).
+        """
+        from multilspy.multilspy_types import SymbolKind
+
+        mgr = _make_manager(STATE_READY)
+        # /usr/lib/rustlib is outside /fake/repo → candidate is dropped.
+        sym = _sym_uri_only(
+            "std_fn",
+            SymbolKind.Function,
+            uri="file:///usr/lib/rustlib/x.rs",
+            line=0,
+            character=0,
+        )
+        result = _run_find_symbol(mgr, "std_fn", [sym])
+        assert result["status"] == STATUS_NOT_FOUND
+        msg = result["message"]
+        assert "outside the workspace" in msg, f"Missing boundary explanation: {msg!r}"
+        assert "navigable" in msg, f"Missing 'navigable' wording: {msg!r}"
+        # Must be the filtered-path message, not the zero-matches one.
+        assert "shorter prefix" not in msg, f"Wrong (zero-matches) message: {msg!r}"
+
 
 class TestFindSymbolMapping:
     """Correct field mapping, 1-indexed output, readable kind."""

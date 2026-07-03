@@ -335,9 +335,17 @@ class DocStore:
             {
                 "file":       str,    # workspace-relative path of the source .md
                 "breadcrumb": str,    # e.g. "GUIDE.md > Configuration > Ignoring files"
-                "text":       str,    # the chunk text that was embedded
+                "text":       str,    # the chunk BODY — breadcrumb prefix stripped
                 "distance":   float,  # cosine distance (0 = identical), lower = closer
             }
+
+        ``text`` is body-only: the embedded document is ``breadcrumb + "\\n\\n" +
+        body``, and that prefix is stripped here at read time so the breadcrumb
+        is not shipped twice (once structured, once as a text prefix).  For a
+        header-only chunk (no body — the embedded document equals the
+        breadcrumb verbatim), ``text`` is ``""`` rather than the breadcrumb
+        again, keeping the "text = body-only" contract consistent across all
+        chunks.
 
         Returns an empty list only if the collection is empty.  (Semantic search
         over a non-empty collection always returns the top-k nearest neighbours.)
@@ -378,11 +386,21 @@ class DocStore:
 
         output: list[dict[str, Any]] = []
         for doc_text, meta, dist in zip(docs_row, metas_row, dists_row, strict=False):
+            breadcrumb = meta.get("breadcrumb", "")
+            # Strip the "{breadcrumb}\n\n" prefix so text is body-only — the
+            # breadcrumb already ships as its own structured field and
+            # otherwise doubles up (UR-14).  Guarded rather than a blind
+            # slice: a header-only chunk's embedded text is the breadcrumb
+            # verbatim (no "\n\n", no body), so it does not match the
+            # startswith check and correctly degrades to "" instead of a
+            # silently truncated/garbage slice.
+            prefix = breadcrumb + "\n\n"
+            text = doc_text[len(prefix) :] if doc_text.startswith(prefix) else ""
             output.append(
                 {
                     "file": meta.get("file", ""),
-                    "breadcrumb": meta.get("breadcrumb", ""),
-                    "text": doc_text,
+                    "breadcrumb": breadcrumb,
+                    "text": text,
                     "distance": float(dist),
                 }
             )

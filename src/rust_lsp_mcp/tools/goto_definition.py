@@ -4,9 +4,12 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from rust_lsp_mcp.analyzer import (
+    INDEXING_RETRY_MESSAGE,
     TORN_DOWN_RETRY_MESSAGE,
     AnalyzerNotReadyError,
     AnalyzerTornDownError,
@@ -18,14 +21,29 @@ from rust_lsp_mcp.core import (
     require_ready,
     validate_workspace_file,
 )
-from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import error, lsp_failure, not_found, not_ready, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
 
 
 @mcp.tool()
-async def goto_definition(file: str, line: int, character: int) -> dict[str, Any]:
+async def goto_definition(
+    file: str,
+    line: Annotated[
+        int,
+        Field(
+            description="1-indexed line number; the first line is 1 (NOT 0-indexed like raw LSP)."
+        ),
+    ],
+    character: Annotated[
+        int,
+        Field(
+            description="1-indexed Unicode-codepoint offset within the line; the first "
+            "character is 1."
+        ),
+    ],
+) -> dict[str, Any]:
     """Jump to the definition of the symbol at the given 1-indexed position.
 
     Sends an LSP ``textDocument/definition`` request for the specified position
@@ -65,6 +83,12 @@ async def goto_definition(file: str, line: int, character: int) -> dict[str, Any
       ``file`` must be a workspace-relative path that does not resolve outside
       the workspace root (absolute paths and ``..``-escaping paths are
       rejected immediately, without calling the analyzer).
+
+    Requires an exact position (file + 1-indexed line/character) such as one
+    returned by ``find_symbol`` or ``document_symbols``; if you only have a
+    symbol NAME, call ``find_symbol`` first. To answer "what is this and
+    where is it defined?" in one turn, call ``hover`` and ``goto_definition``
+    at the same position in parallel rather than sequentially.
     """
     # Step 1: validate 1-indexed inputs
     if line < 1 or character < 1:
@@ -97,12 +121,12 @@ async def goto_definition(file: str, line: int, character: int) -> dict[str, Any
         # require_ready() so a permanently-errored analyzer still maps to
         # error, not a misleading not_ready (#98).
         guard = require_ready()
-        return guard if guard is not None else not_ready()
+        return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
     except AnalyzerTornDownError:
         return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("goto_definition: LSP error for %r line=%d char=%d", file, line, character)
-        return error(f"LSP error: {exc}")
+        return lsp_failure(exc)
 
     # Step 7: map results to external (1-indexed) positions
     if not locs:

@@ -7,12 +7,13 @@ import logging
 from typing import Any
 
 from rust_lsp_mcp.analyzer import (
+    INDEXING_RETRY_MESSAGE,
     TORN_DOWN_RETRY_MESSAGE,
     AnalyzerNotReadyError,
     AnalyzerTornDownError,
 )
 from rust_lsp_mcp.core import get_manager, mcp, require_ready, symbol_to_external
-from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import lsp_failure, not_found, not_ready, ok
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +59,11 @@ async def find_symbol(name: str) -> dict[str, Any]:
         path resolves outside the workspace root are silently skipped (logged at
         DEBUG level).  This keeps the tool from crashing on malformed LSP
         responses while still returning all usable in-workspace candidates.
+
+    Each result's ``{file, line, character}`` can be passed directly to
+    ``goto_definition``, ``find_references``, or ``hover``.  For "where is X
+    defined?", the top result is usually itself the answer — but when
+    multiple candidates return, pick by ``kind``/``container`` before acting.
     """
     if (guard := require_ready()) is not None:
         return guard
@@ -73,16 +79,21 @@ async def find_symbol(name: str) -> dict[str, Any]:
         # require_ready() so a permanently-errored analyzer still maps to
         # error, not a misleading not_ready (#98).
         guard = require_ready()
-        return guard if guard is not None else not_ready()
+        return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
     except AnalyzerTornDownError:
         return not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("find_symbol: LSP error for query %r", name)
-        return error(f"LSP error: {exc}")
+        return lsp_failure(exc)
 
-    # multilspy returns None when the server returns no result at all
-    if raw is None:
-        return not_found(f"No symbol found matching {name!r}.")
+    # multilspy returns None when the server returns no result at all; an
+    # empty list is equally "zero candidates returned" — both take the
+    # zero-matches message.  The all-filtered message below is reserved for
+    # the case where candidates WERE returned but every one was dropped.
+    if not raw:
+        return not_found(
+            f"No symbol found matching {name!r}. Try a shorter prefix or the exact declared name."
+        )
 
     repo_root = manager.repository_root
 
@@ -95,6 +106,10 @@ async def find_symbol(name: str) -> dict[str, Any]:
         results.append(mapped)
 
     if not results:
-        return not_found(f"No symbol found matching {name!r}.")
+        return not_found(
+            f"{len(raw)} candidate(s) matched {name!r}, but all resolve outside the "
+            "workspace — only in-workspace symbols are navigable (dependencies and "
+            "std are not returned)."
+        )
 
     return ok(results=results)

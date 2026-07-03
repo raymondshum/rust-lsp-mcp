@@ -175,7 +175,13 @@ async def refresh() -> dict[str, Any]:
         # DocStore.rebuild() sets state="error" on failure, so search_docs
         # will correctly surface the failure after this — the invariant holds.
         _log.exception("refresh: doc-store rebuild failed")
-        return error(f"Analyzer re-index started, but documentation rebuild failed: {exc}")
+        return error(
+            f"Analyzer re-index started, but documentation rebuild failed: {exc}. "
+            "The analyzer re-index is already running in the background and will "
+            "complete on its own — do NOT call refresh again to fix the analyzer. "
+            "Only the documentation index failed to rebuild; once the underlying "
+            "cause is fixed, calling refresh again will rebuild it."
+        )
 
     return ok(
         state=refresh_state,
