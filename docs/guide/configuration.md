@@ -40,6 +40,21 @@ library.
 | `RLM_CHROMA_PATH` | `/workspaces/chroma` | Folder where the documentation search database is stored. Kept on a persistent mount so the index survives container rebuilds. |
 | `RLM_DOC_GLOB_PATTERNS` | `**/*.md` | Which Markdown files to include in documentation search, written as comma-separated path patterns relative to the project folder. The default includes every Markdown file anywhere in the project. |
 | `RLM_DOC_EXCLUDE_PATTERNS` | `**/CHANGELOG.md` | Which files to exclude even if they matched the include patterns above. The default leaves out `CHANGELOG.md`, whose long list of version-by-version change notes would otherwise crowd out more useful documentation in search results. |
+| `RLM_TRANSPORT` | `stdio` | How the server talks to its client. `stdio` (default) is the normal MCP-client mode: one process per session, communicating over standard input/output. `streamable-http` starts the server as a long-lived daemon instead, for the `rust-lsp` CLI to connect to (see [CLI reference](cli.md)) — used by `docker-compose.yml`, not by the default `docker run -i` MCP path. |
+| `RLM_HTTP_PORT` | `8000` | TCP port the daemon listens on when `RLM_TRANSPORT=streamable-http`. Ignored in `stdio` mode. The listener always binds to `127.0.0.1` — this is hard-coded, not configurable, and is never published outside the container (see the [CLI reference](cli.md) and the README security note). Range-validated (1–65535) at startup. |
+
+---
+
+## A CLI-only variable: `RLM_CLI_URL`
+
+A **non-empty** `RLM_CLI_URL` value overrides the daemon URL the `rust-lsp`
+CLI client connects to (default: derived from `RLM_HTTP_PORT` as
+`http://127.0.0.1:<port>/mcp`; a variable that is exported but empty is
+treated as unset). It is **not** in the table above and not in
+`env.sample` on purpose: it configures the CLI client, not the server, so it
+is not a `Settings` field the server reads, and the `env.sample`
+honesty test (which checks `env.sample` against `Settings` fields) does not
+cover it. See [CLI reference](cli.md) for how the CLI resolves its target URL.
 
 ---
 
@@ -96,3 +111,4 @@ All other settings continue to use their built-in defaults.
 
 - [Development setup](development.md) — container setup, persistent mounts, and first-run steps.
 - [Architecture](architecture.md) — how the server components fit together.
+- [CLI reference](cli.md) — the `rust-lsp` client that talks to the `streamable-http` daemon.

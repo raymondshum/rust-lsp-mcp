@@ -146,9 +146,9 @@ shape is typical for clients such as Claude Desktop.
 **Note on startup:** each session starts a fresh rust-analyzer process, which
 re-indexes the project (seconds to a couple of minutes — the build cache on the
 `/data` volume keeps the underlying `cargo check` incremental, but the in-memory
-index is rebuilt each time). If you want rust-analyzer to stay hot between
-sessions, keep one container running and use `docker exec` instead — see
-[`docker-compose.yml`](docker-compose.yml).
+index is rebuilt each time). If you want rust-analyzer to stay hot across many
+calls, see [CLI access](#cli-access-for-agents-without-mcp) below — that's a
+different launch shape (a long-lived daemon), not another MCP-client config.
 
 ### Network isolation (recommended for untrusted code)
 
@@ -241,6 +241,86 @@ For a client that loads skills — such as Claude Code — copy that `SKILL.md`
 into your own project's `.claude/skills/rust-code-navigation/` so it travels
 with the repo you are exploring.
 
+## CLI access (for agents without MCP)
+
+The two paths above assume your AI assistant can call MCP tools directly. Some
+agents — or subagents that don't inherit their parent's MCP tool access — can
+only run shell commands. For those, this repo ships a third launch shape: a
+long-lived **daemon** container plus a `rust-lsp` command-line client that
+talks to it, so a shell-only agent gets the same read-only navigation and doc
+search as an MCP client, just invoked as a subprocess instead of a tool call.
+
+This replaces the old "warm-start" `docker exec -i … /app/.venv/bin/rust-lsp-mcp`
+pattern some earlier versions of this README described. That pattern started a
+second **stdio server** inside a long-lived container; it's gone because
+running two servers against one Chroma store is an unguarded cross-process
+write hazard (see [known issue KI-13](docs/impl/known-issues.md#ki-13--chromadb-cross-process-single-writer-hazard-on-a-shared-data-volume)).
+The daemon replaces it with exactly **one** server process per container,
+reached through a client (`rust-lsp`), not a second server.
+
+**1. Start the daemon** (once; it stays warm across calls). Run this from
+this repository's own directory — `docker compose` reads `docker-compose.yml`
+relative to the current directory — with `RUST_PROJECT` set to the absolute
+host path of the Rust project you want to analyze:
+
+```
+RUST_PROJECT=/absolute/path/to/your/rust/project docker compose up -d rust-lsp-mcp
+```
+
+This builds the image if needed and starts `rust-lsp-mcp` in streamable-HTTP
+mode, listening on `127.0.0.1` **inside the container only** — see the
+security note below. Use `rust-lsp-mcp-isolated` instead for the no-network
+variant (same cache-priming caveats as [Network isolation](#network-isolation-recommended-for-untrusted-code)
+above).
+
+**2. Run commands against it** with `docker exec` (or `podman exec` —
+identical usage). Use the **full path** `/app/.venv/bin/rust-lsp` — the
+image's `PATH` only adds `/usr/local/cargo/bin`, not `/app/.venv/bin`, so a
+bare `rust-lsp` is "command not found" here:
+
+```
+# First call after starting the daemon: ride out indexing (up to 180s).
+# --wait must come BEFORE the subcommand.
+docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp --wait 180 status
+
+# Look up a symbol
+docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp find-symbol MyStruct
+
+# Client (and, if reachable, daemon) version info
+docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp version
+```
+
+Every command prints a JSON envelope to stdout (`{"status": ..., ...}`,
+matching the [Tools / API reference](docs/guide/tools.md)) and exits with a
+code that tells a shell script or agent what happened, without needing to
+parse the JSON to decide:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | `ok` or `not_found` — the daemon answered (an empty/negative result is still an answer, not a failure). |
+| `1` | `error` envelope — bad input or an internal failure; see `message` in the JSON. |
+| `2` | `not_ready` — the daemon is reachable but still indexing (or a `--wait` window expired while it was still not ready). |
+| `3` | The daemon could not be reached at all (not started yet, wrong port, or a `--wait` window expired without ever connecting). |
+
+Each subprocess call is fast once the daemon is warm — a `status` call
+measured well under a second (about 0.9s wall-clock, including process
+startup) in local testing — plus a one-time indexing wait the first time the
+project is analyzed (`--wait` rides through that automatically). Full
+subcommand reference, `--wait` semantics, and troubleshooting:
+[docs/guide/cli.md](docs/guide/cli.md).
+
+**Security note (loopback-only, not authentication):** the daemon's HTTP
+listener binds to `127.0.0.1` and is hard-coded that way — it is not
+configurable and this compose file never publishes it with a `ports:` mapping.
+That listener has no authentication of its own; loopback-only is the entire
+protection. This matters because the same container also executes **untrusted
+code from the Rust project it's pointed at** — rust-analyzer runs that
+project's `build.rs` build scripts and proc-macros to produce its index (see
+[Network isolation](#network-isolation-recommended-for-untrusted-code) above).
+Keeping the listener off any published port means that code (or anything else
+on the network) cannot reach the MCP tools, which are read-only regardless.
+Never add a `ports:` mapping to `docker-compose.yml` for either service.
+
 ## Documentation
 
 | Page | Description |
@@ -249,6 +329,7 @@ with the repo you are exploring.
 | [Architecture](docs/guide/architecture.md) | How the pieces fit together and the ideas behind the design. |
 | [Tools / API reference](docs/guide/tools.md) | Every tool, its inputs, and its responses. |
 | [Configuration](docs/guide/configuration.md) | All settings and environment variables. |
+| [CLI reference](docs/guide/cli.md) | The `rust-lsp` command-line client: subcommands, exit codes, `--wait`, and troubleshooting. |
 | [Development setup](docs/guide/development.md) | The dev container, running the server, and the tests. |
 | [Components](docs/guide/components.md) | A guided tour of the code, module by module. |
 | [Dependencies](docs/guide/dependencies.md) | The main libraries and tools and what each is for. |

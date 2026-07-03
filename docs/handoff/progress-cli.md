@@ -26,9 +26,9 @@ the date in the log below.
 | Phase | Prompt | Depends on | Parallelizable? | State |
 |-------|--------|-----------|-----------------|-------|
 | C1 — Daemon transport | [cli-phase-1-daemon.md](cli-phase-1-daemon.md) | — | With C3 on the fast tier only; podman integration gates serialize | done |
-| C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | pr-open |
+| C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | done |
 | C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | done |
-| C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | not-started |
+| C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | pr-open |
 | C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | not-started |
 
 ## Dependency graph (what the orchestrator may fan out)
@@ -127,3 +127,28 @@ C3 ──┘ └────> C5      (C4 ∥ C5 after C2; disjoint files)
   poll loop forever — note N1) + 3 regression tests. Record notes: N2 raw traceback
   on Ctrl-C (cosmetic), N3 RLM_HTTP_PORT= (empty) yields port-less URL → clean exit
   3, N4 uv-wrapper stderr warning (not the installed script).
+- 2026-07-03 Phase C2 → **done**. PR #123 merged to `main` (ed4e8e7); post-merge CI
+  verified green. Flip rides in C4's PR.
+- 2026-07-03 Phase C4 → **pr-open**. Deployment + docs built, reviewed, QA'd,
+  red-teamed. Shipped: compose flip (both services daemons via RLM_TRANSPORT env;
+  entrypoint override removed; restart: unless-stopped; no ports + forbidding
+  comments; project mount gains `:ro,z` shared SELinux label; header rewritten with
+  migration note — old exec-stdio warm-start retired as KI-13 double-writer);
+  README CLI-access section + security note; new docs/guide/cli.md (full reference,
+  exit codes, --wait, health check, log story, troubleshooting incl. SELinux
+  masked-failure row); configuration.md (RLM_TRANSPORT/RLM_HTTP_PORT server-side;
+  RLM_CLI_URL CLI-side, non-empty-overrides semantics); KI-14 (refresh shared-index,
+  decided:documented), KI-15 (ClosedResourceError noise, open-low), KI-16
+  (unreadable /project masked as ready-with-zero-docs, open — found live by QA on
+  SELinux-enforcing podman), KI-13 addendum. Gates: fast tier 766 green; review
+  `major` (development.md still taught the retired warm-start — rewritten with
+  KI-13 pointer; RLM_CLI_URL empty-vs-unset nit; historical handoff log annotated;
+  in-passing ,Z→,z correction accepted); QA live compose smoke PASS (image built,
+  daemon ready, exec sweep green, no ports, restart policy, health check, expected
+  log noise; SELinux gap found → :ro,z + troubleshooting + KI-16); adversarial
+  `breaks-found` → 2 fixed (cli.md exit-3 hint named the service; development.md
+  false "separate caches" claim corrected — compose `rlm-data` is pinned to the
+  SAME physical volume `rust-lsp-mcp-data` as the docker-run examples, KI-13
+  applies across launch methods). Orchestrator decision recorded: full `-m
+  integration` re-run waived for this docs-only phase (no src/tests changes; live
+  smoke was the meaningful gate; CI fast tier on the PR).

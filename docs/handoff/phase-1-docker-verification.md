@@ -60,6 +60,14 @@ residue **R1/R2/R3** from the
      the plan (U5) says rust-analyzer re-indexes every process start. Record both.
 
 5. **(Optional) `docker exec` warm path.**
+   > **Historical (point-in-time) instructions** — this step describes the
+   > compose file as it existed when this gate was written. The warm-start
+   > `docker exec -i … rust-lsp-mcp` MCP pattern has since been retired
+   > (CLI-frontend Phase 4): compose now runs a streamable-HTTP daemon, and
+   > exec-ing a second stdio *server* into it is the KI-13 Chroma
+   > double-writer hazard. Do not follow this step today — see
+   > [docs/guide/cli.md](../guide/cli.md).
+
    `RUST_PROJECT=/abs/path docker compose up -d`, then point the client at
    `docker exec -i rust-lsp-mcp /app/.venv/bin/rust-lsp-mcp`. After the first
    index, later sessions should be ~instant (RA stays hot). `docker compose down`

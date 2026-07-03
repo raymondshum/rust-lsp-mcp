@@ -90,6 +90,89 @@ Check this list at these lifecycle checkpoints (see
   separate volume names if two servers are truly needed). Entry stays open
   until a stronger guard (e.g. an on-disk lock or per-mode volumes by default)
   is decided.
+  **2026-07-03 (CLI-frontend Phase 4):** the compose flip landed —
+  [docker-compose.yml](../../docker-compose.yml)'s entrypoint now runs the
+  daemon directly (`RLM_TRANSPORT=streamable-http`), the old `sleep infinity`
+  + `docker exec … rust-lsp-mcp` stdio warm-start path is retired, and the
+  single-writer mandate is spelled out in the compose header comment, the
+  README's [CLI access](../../README.md#cli-access-for-agents-without-mcp)
+  section, and [docs/guide/cli.md](../guide/cli.md)'s troubleshooting table.
+  Entry remains open per the stronger-guard note above.
+
+### KI-14 — `refresh` blast radius on a shared daemon
+- **Where:** `refresh` MCP tool ([src/rust_lsp_mcp/tools/refresh.py](../../src/rust_lsp_mcp/tools/refresh.py))
+  and the `rust-lsp refresh` CLI subcommand
+  ([src/rust_lsp_cli/cli.py](../../src/rust_lsp_cli/cli.py)) · daemon topology
+  in [docker-compose.yml](../../docker-compose.yml).
+- **What:** the CLI-frontend daemon (D1/D12,
+  [cli-frontend.md](../planning/cli-frontend.md)) is one long-lived server
+  shared by every MCP client and every `rust-lsp` invocation against it.
+  `refresh` tears down and rebuilds the single analyzer and doc index that
+  server owns, so one caller's `refresh` makes every other caller's next
+  navigation call return `not_ready` until re-indexing completes — there is
+  no per-caller isolation to lose, this is inherent to the shared-daemon
+  design, not a bug.
+- **Why it matters:** an agent that calls `refresh` mid-task (e.g. reflexively,
+  without checking `status` first) can silently stall every other concurrent
+  user of the same daemon, which is easy to miss since the tool's own
+  response (`ok`, `state: "indexing"`) looks the same whether or not anyone
+  else is affected.
+- **Status:** decided: documented, not code-mitigated. Both the
+  `refresh` tool's own docstring/[Tools reference](../guide/tools.md#refresh)
+  blast-radius note and the CLI's
+  [docs/guide/cli.md](../guide/cli.md#refresh-shared-daemon-blast-radius)
+  warning tell callers to check `status` first; the
+  `rust-code-navigation` skill's refresh guidance (Phase 5) carries the same
+  warning. No stronger guard (e.g. per-caller index isolation) is planned —
+  it would undercut the "one warm analyzer" design the daemon exists for.
+
+### KI-15 — Benign `ClosedResourceError` log noise in stateless HTTP mode
+- **Where:** the streamable-HTTP daemon's per-request teardown, inside the
+  pinned `mcp` SDK (1.12.4) — not this project's code. Surfaces in
+  `docker logs`/`podman logs` for the daemon container
+  ([docker-compose.yml](../../docker-compose.yml)).
+- **What:** every stateless HTTP request (`stateless_http=True`, D3/U2 in
+  [cli-frontend.md](../planning/cli-frontend.md)) opens and tears down its
+  own transport; the SDK's teardown path logs a `ClosedResourceError`
+  traceback per request as part of that normal teardown. It does not affect
+  the response the caller receives (confirmed harmless during Phase 1/2's
+  live verification, U2) — it is log noise, not a failed call.
+- **Why it matters:** an operator tailing daemon logs (especially during a
+  long `--wait` poll loop, which issues a `status` call every 2 seconds) will
+  see a steady stream of tracebacks that look alarming but indicate nothing
+  wrong. Documented in [docs/guide/cli.md](../guide/cli.md#daemon-logs) so
+  it isn't mistaken for a real failure.
+- **Status:** open — upstream SDK behavior, not something this project's code
+  controls. Low severity (cosmetic/log-noise only). Revisit whether it's
+  still present on the next `mcp` SDK upgrade past 1.12.4.
+
+### KI-16 — Unreadable `/project` mount (e.g. SELinux) is masked as ready-with-zero-docs + generic errors
+- **Where:** doc-store index build in
+  [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
+  (the corpus glob + `read_text`, ~lines 270–307 — an unreadable `/project`
+  simply yields zero files, which builds a "successful" empty index) ·
+  analyzer-side file reads, surfaced through the navigation tools' generic
+  LSP-error envelope. Trigger observed on an SELinux-enforcing
+  rootless-podman host where the `${RUST_PROJECT}:/project:ro` bind mount
+  lacked a relabel: `container_t` cannot read e.g. `user_tmp_t` files.
+- **What:** when the container can mount but not **read** the project, no
+  in-band signal distinguishes it from a healthy empty project: `status`
+  reports `state: "ready"` with `doc_index_chunk_count: 0`
+  (indistinguishable from a project that genuinely ships no Markdown), and
+  every navigation call returns a generic "LSP error: File read failed …
+  Retry" envelope with `recovery: "unknown"` — guidance that is actively
+  misleading, since retrying an access denial never helps.
+- **Why it matters:** silent wrong answers (an agent concludes "this project
+  has no docs" / "file reads fail transiently") plus retry-suggesting
+  recovery text for a permanent host-side condition. QA hit exactly this in
+  the C4 compose smoke and needed a host-side
+  `chcon -Rt container_file_t` to unmask it.
+- **Status:** open — docs mitigate for now: the compose project mount ships
+  `:ro,z` (the shared SELinux relabel, matching the README's `z`-not-`Z`
+  convention) and [docs/guide/cli.md](../guide/cli.md#troubleshooting) has a
+  troubleshooting row for the symptom pair. A real fix is a **preflight
+  readability check** on `/project` (surfaced via `preflight_warnings`, or
+  failing louder) — future work, out of the C4 phase's docs-only scope.
 
 ---
 
