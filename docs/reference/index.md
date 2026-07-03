@@ -15,3 +15,7 @@ Check here before re-querying Context7.
 - [devcontainer-features.md](devcontainer-features.md) — rust:1 v1.5.0 (rust-analyzer in default components, path /usr/local/cargo/bin); NO official uv feature; RA cache = cargo.targetDir + CARGO_HOME, not an index dir (2026-06-19)
 - [mcp-inspector.md](mcp-inspector.md) — npx @modelcontextprotocol/inspector [--cli] -- uv run rust-lsp-mcp; UI :6274; Node ≥22.7.5 (2026-06-19)
 - [lsp-position-encoding.md](lsp-position-encoding.md) — LSP 3.17 positionEncoding negotiation; rust-analyzer supports utf-8 AND utf-32 (empirically verified) → KI-5 fix = negotiate utf-32 (codepoints, no transcoding) (rust-analyzer 1.96.0, 2026-06-21)
+- [mcp-streamable-http-daemon.md](mcp-streamable-http-daemon.md) — warm HTTP daemon wiring: own uvicorn.run + replace app.router.lifespan_context (delegating to session_manager.run); stateless no-leak; Host accepted by default (mcp 1.12.4, 2026-07-02)
+- [podman-exec-loopback.md](podman-exec-loopback.md) — loopback TCP works under --network none; podman exec preserves stdout/stderr/exit-code/stdin, no TTY needed (podman 5.8.2, 2026-07-02)
+- [hatchling-two-packages.md](hatchling-two-packages.md) — two src/ packages + two console scripts in one wheel via packages list append; no auto-detect gotcha (hatchling via uv build, 2026-07-02)
+- [version-introspection-sources.md](version-introspection-sources.md) — KI-12 fields: rust-analyzer --version once at start (multilspy discards serverInfo); importlib.metadata for the rest (multilspy 0.0.15 / RA 1.96.0, 2026-07-02)

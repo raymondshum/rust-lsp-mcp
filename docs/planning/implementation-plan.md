@@ -380,4 +380,10 @@ wholesale re-index (never cache cross-file-dependent results — defer invalidat
 to rust-analyzer/salsa); rely on rust-analyzer's on-disk cache (don't wipe it);
 plain doc-RAG (no GraphRAG); no precomputed code↔doc links; no file watching; RAG
 co-located in the same server process; ChromaDB local/embedded; stdio transport,
-single host.
+single host — **amended 2026-07-02:** stdio remains the default and the MCP-client
+path; an **optional loopback-only streamable-HTTP transport**
+(`RLM_TRANSPORT=streamable-http`, bound to `127.0.0.1` inside the container,
+never published) is added for the CLI-frontend daemon
+([cli-frontend.md](cli-frontend.md) D3/D4). New info justifying the amendment:
+agents without MCP tool access need a CLI path. Single-host intent preserved
+(no network exposure).
