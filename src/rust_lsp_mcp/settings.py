@@ -9,6 +9,7 @@ Defaults point at the known bind-mount paths so the server runs with no .env.
 
 import os
 import warnings
+from typing import Literal
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -83,6 +84,20 @@ class Settings(BaseSettings):
     # index, even if matched by doc_glob_patterns.  Default excludes CHANGELOG.md, whose
     # hundreds of changelog bullets otherwise flood semantic search (plan-decided remedy).
     doc_exclude_patterns: str = "**/CHANGELOG.md"
+
+    # -----------------------------------------------------------------------
+    # Transport (docs/planning/cli-frontend.md D2/D3 — CLI-frontend daemon)
+    # -----------------------------------------------------------------------
+
+    # "stdio" (default): today's MCP-over-stdio server, one process per client.
+    # "streamable-http": warm daemon mode for the CLI frontend — read once at
+    # import in core.py to key the FastMCP construction. Host is hard-coded to
+    # 127.0.0.1 in core.py/server.py — deliberately NOT a Settings field, so
+    # no configuration path can bind a non-loopback address (D3/D4).
+    transport: Literal["stdio", "streamable-http"] = "stdio"
+
+    # TCP port for streamable-http mode; ignored in stdio mode.
+    http_port: int = 8000
 
     @model_validator(mode="after")
     def _warn_deprecated_ripgrep_src(self) -> "Settings":
