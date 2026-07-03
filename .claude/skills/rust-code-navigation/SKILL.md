@@ -57,19 +57,27 @@ The CLI is a thin client for a warm daemon that must already be running.
 Where your shell sits relative to that daemon decides the prefix:
 
 - **Inside the daemon's own environment** (a shell sharing its
-  container/env — e.g. this repo's dev container running the daemon
-  directly): call it with no prefix — `rust-lsp <cmd> …`.
-- **From the host, or any other shell:** `exec` into the daemon container.
-  Auto-detect the engine the way `scripts/prime-cache.sh` does — prefer
-  `docker` if its daemon answers, else fall back to `podman`:
+  container/env): no engine prefix, but mind the PATH. In this repo's dev
+  container (running the daemon directly), use `uv run rust-lsp <cmd> …` —
+  the venv is not on PATH in non-interactive shells. In a shell already
+  inside the production container, use the full path
+  `/app/.venv/bin/rust-lsp <cmd> …`.
+- **From the host, or any other shell:** `exec` into the daemon container,
+  calling the binary by full path (`/app/.venv/bin` is never on the image's
+  PATH). Auto-detect the engine the way `scripts/prime-cache.sh` does —
+  prefer `docker` if its daemon answers, else fall back to `podman`; set
+  `CONTAINER_ENGINE=docker|podman` to override, as with that script:
 
   ```sh
-  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    ENGINE=docker
-  else
-    ENGINE=podman
+  ENGINE="${CONTAINER_ENGINE:-}"
+  if [ -z "$ENGINE" ]; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      ENGINE=docker
+    else
+      ENGINE=podman
+    fi
   fi
-  "$ENGINE" exec rust-lsp-mcp rust-lsp <cmd> …
+  "$ENGINE" exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd> …
   ```
 
   The container name is `rust-lsp-mcp` by default, or `rust-lsp-mcp-isolated`
@@ -87,6 +95,11 @@ rust-lsp --wait 180 status
 
 Once `status` reports readiness, later calls don't need `--wait`.
 
+Commands here and below are written in bare `rust-lsp …` form — apply
+whichever reach prefix from "Reaching the CLI" fits where your shell sits
+(e.g. `"$ENGINE" exec rust-lsp-mcp /app/.venv/bin/rust-lsp --wait 180 status`
+from the host).
+
 ### Command reference
 
 Same intents as the table above, in CLI form. Positions are still 1-indexed
@@ -103,7 +116,7 @@ with `character` counting Unicode codepoints.
 | Is the index ready?                      | `rust-lsp status`                                                                             |
 | Rebuild the index                        | `rust-lsp refresh` — **see the warning below first**                                          |
 | Does this path exist in the workspace?   | `rust-lsp validate-file-path FILE`                                                            |
-| Client/server version info               | `rust-lsp version`                                                                            |
+| Client/server version info               | `rust-lsp version` — always exits 0, even with the daemon down (daemon fields null)           |
 
 Full reference, including every flag: `docs/guide/cli.md`.
 
@@ -114,7 +127,7 @@ Full reference, including every flag: `docs/guide/cli.md`.
 | 0    | `ok` **or** `not_found`               | `not_found` is an ANSWER, not a failure (same empty≠error doctrine as above) — don't retry it. |
 | 1    | tool `error`                          | Read the JSON envelope's `message`/`recovery` field on stdout.                                |
 | 2    | daemon reachable but `not_ready`      | Retry with `--wait`. (Argparse usage errors — bad/missing arguments — also exit 2; tell them apart by stderr usage text plus empty stdout: a real envelope always prints JSON to stdout.) |
-| 3    | daemon unreachable                    | Start it: `docker compose up -d`.                                                              |
+| 3    | daemon unreachable                    | Start it from the rust-lsp-mcp repo directory: `RUST_PROJECT=/abs/path/to/project docker compose up -d rust-lsp-mcp`. |
 
 The envelope JSON always goes to stdout; diagnostics/hints go to stderr.
 
