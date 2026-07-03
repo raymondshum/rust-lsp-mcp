@@ -69,22 +69,6 @@ Check this list at these lifecycle checkpoints (see
   Reference: docs/audit/2026-07-02-usability-review.md,
   Cross-cutting findings, completeness critic (CC-2).
 
-### KI-12 — No version introspection
-- **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py)
-  · [src/rust_lsp_mcp/tools/diagnostics.py](../../src/rust_lsp_mcp/tools/diagnostics.py)
-  (`status` / `analyzer_status`).
-- **What:** `status`/`analyzer_status` surface no server, rust-analyzer, or
-  multilspy version, leaving mismatched/stale analyzer binaries undiagnosable
-  in-band.
-- **Why it matters:** A stale or mismatched rust-analyzer binary can produce
-  subtly wrong navigation results (missing features, different position
-  semantics) with no in-band signal to distinguish "healthy but old" from
-  "healthy and current," pushing diagnosis outside the MCP boundary.
-- **Status:** open. Tracked as
-  [#115](https://github.com/raymondshum/rust-lsp-mcp/issues/115).
-  Reference: docs/audit/2026-07-02-usability-review.md,
-  Cross-cutting findings, completeness critic (CC-5).
-
 ### KI-13 — ChromaDB cross-process single-writer hazard on a shared `/data` volume
 - **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
   (`PersistentClient` at `chroma_path`) · [docker-compose.yml](../../docker-compose.yml)
@@ -110,6 +94,31 @@ Check this list at these lifecycle checkpoints (see
 ---
 
 ## Resolved
+
+### KI-12 — No version introspection
+- **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py)
+  · [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py) (`AnalyzerManager`).
+- **What:** `status` surfaced no server, rust-analyzer, or multilspy version,
+  leaving mismatched/stale analyzer binaries undiagnosable in-band.
+- **Resolved:** 2026-07-03 (CLI-frontend Phase 3). `status`'s ok-envelope
+  gained three fields: `server_version` and `multilspy_version`
+  (`importlib.metadata.version("rust-lsp-mcp")` / `"multilspy"`, resolved
+  fresh per call — cheap, in-process; degrade to `null` on
+  `PackageNotFoundError`) and `rust_analyzer_version` (`<rust_analyzer_bin>
+  --version` output, verbatim trimmed string — see
+  [version-introspection-sources.md](../reference/version-introspection-sources.md)
+  for why the LSP `serverInfo` route was dead). The rust-analyzer subprocess
+  runs **once**, inside `AnalyzerManager.start()`, guarded by a
+  `_rust_analyzer_version_captured` flag so `restart()`'s own call to
+  `start()` does not re-invoke it; cached on the manager for the process
+  lifetime. Any capture failure (missing binary, non-zero exit, timeout)
+  degrades to `null`, never raises or delays startup meaningfully (5s
+  timeout, thread-offloaded like the existing git-HEAD capture). Guarded by
+  unit tests in `tests/test_status.py` (null-degradation, capture-once
+  semantics via mock) and an integration assertion in
+  `tests/test_phase34_integration.py` (`rust_analyzer_version` matches
+  `^rust-analyzer\s` against the live container binary). CLI-side surfacing
+  (`rust-lsp version`/`status`) is a separate phase of the same plan.
 
 ### KI-9 — an in-flight nav delegate can hang across a `refresh` drain of a wedged analyzer
 - **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py) (the

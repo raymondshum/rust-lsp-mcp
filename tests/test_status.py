@@ -11,14 +11,20 @@ Test coverage:
     - Git exception (subprocess raises): current_commit=None, stale=None.
     - indexed_commit=None but current_commit set: stale=None.
     - All cases return status="ok" (tool is always ungated).
+    - KI-12 version fields: server_version/multilspy_version resolved via
+      importlib.metadata (null-degradation on PackageNotFoundError);
+      rust_analyzer_version read from the manager's cached value; capture-once
+      semantics on AnalyzerManager.start().
 """
 
 import asyncio
 import contextlib
+import importlib.metadata
 import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import rust_lsp_mcp.analyzer as analyzer_mod
 from rust_lsp_mcp.analyzer import STATE_INDEXING, STATE_READY, AnalyzerManager
 from rust_lsp_mcp.envelope import STATUS_OK
 
@@ -38,6 +44,7 @@ def _make_manager(
     state: str,
     indexed_commit: str | None = None,
     repository_root: str = "/fake/repo",
+    rust_analyzer_version: str | None = None,
 ) -> AnalyzerManager:
     """Build an AnalyzerManager stub without starting a real task or process.
 
@@ -47,6 +54,10 @@ def _make_manager(
     ``_error`` is set to ``None`` so ``status()``'s ``error_message`` read
     never raises ``AttributeError`` on this stub (it does not go through
     ``__init__``).
+
+    ``_rust_analyzer_version`` (KI-12) defaults to ``None`` (as if capture
+    hadn't run / had failed); pass ``rust_analyzer_version`` to simulate a
+    successful capture.
     """
     mgr = AnalyzerManager.__new__(AnalyzerManager)
     mgr.state = state
@@ -54,6 +65,7 @@ def _make_manager(
     mgr._indexed_commit = indexed_commit
     mgr._repository_root = repository_root
     mgr._error = None
+    mgr._rust_analyzer_version = rust_analyzer_version
     return mgr
 
 
@@ -406,3 +418,172 @@ class TestStatusPreflightWarnings:
         )
         assert result["status"] == STATUS_OK
         assert result["state"] == STATE_READY
+
+
+# ---------------------------------------------------------------------------
+# Tests: KI-12 version fields (server_version, multilspy_version,
+# rust_analyzer_version)
+# ---------------------------------------------------------------------------
+
+
+class TestStatusPackageVersions:
+    """server_version / multilspy_version: importlib.metadata, null-degrade."""
+
+    def test_server_version_resolved(self) -> None:
+        with patch.object(importlib.metadata, "version", return_value="9.9.9"):
+            result = _call_status(None, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["server_version"] == "9.9.9"
+
+    def test_multilspy_version_resolved(self) -> None:
+        with patch.object(importlib.metadata, "version", return_value="9.9.9"):
+            result = _call_status(None, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["multilspy_version"] == "9.9.9"
+
+    def test_server_version_null_on_package_not_found(self) -> None:
+        def _fake_version(name: str) -> str:
+            if name == "rust-lsp-mcp":
+                raise importlib.metadata.PackageNotFoundError(name)
+            return "0.0.15"
+
+        with patch.object(importlib.metadata, "version", side_effect=_fake_version):
+            result = _call_status(None, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["server_version"] is None
+        assert result["multilspy_version"] == "0.0.15"
+
+    def test_multilspy_version_null_on_package_not_found(self) -> None:
+        def _fake_version(name: str) -> str:
+            if name == "multilspy":
+                raise importlib.metadata.PackageNotFoundError(name)
+            return "0.1.0"
+
+        with patch.object(importlib.metadata, "version", side_effect=_fake_version):
+            result = _call_status(None, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["multilspy_version"] is None
+        assert result["server_version"] == "0.1.0"
+
+    def test_status_still_ok_when_both_package_lookups_fail(self) -> None:
+        with patch.object(
+            importlib.metadata,
+            "version",
+            side_effect=importlib.metadata.PackageNotFoundError("x"),
+        ):
+            result = _call_status(None, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["status"] == STATUS_OK
+        assert result["server_version"] is None
+        assert result["multilspy_version"] is None
+
+
+class TestStatusRustAnalyzerVersion:
+    """rust_analyzer_version: read straight off the manager's cached value —
+    status() never itself invokes the version subprocess."""
+
+    def test_present_when_manager_has_captured_it(self) -> None:
+        mgr = _make_manager(
+            STATE_READY,
+            indexed_commit=_FAKE_COMMIT_A,
+            rust_analyzer_version="rust-analyzer 1.96.0 (ac68faa 2026-05-25)",
+        )
+        result = _call_status(mgr, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["rust_analyzer_version"] == "rust-analyzer 1.96.0 (ac68faa 2026-05-25)"
+
+    def test_null_when_manager_capture_failed_or_never_ran(self) -> None:
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        result = _call_status(mgr, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["rust_analyzer_version"] is None
+
+    def test_null_when_no_manager(self) -> None:
+        result = _call_status(None, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+        assert result["rust_analyzer_version"] is None
+
+    def test_capture_once_across_start_and_repeated_status_calls(self) -> None:
+        """AnalyzerManager.start() captures the version exactly once (KI-12):
+        a second start() (as restart() performs) must not re-invoke the
+        subprocess, and neither does any number of subsequent status() calls
+        (status() only ever reads the cached ``rust_analyzer_version``
+        property — it never touches the version subprocess itself)."""
+        call_count = 0
+
+        def _fake_version_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal call_count
+            call_count += 1
+            return _completed_process(0, "rust-analyzer 1.96.0 (ac68faa 2026-05-25)\n")
+
+        async def _noop_run(self: AnalyzerManager, gen: int) -> None:
+            return None
+
+        async def _scenario() -> AnalyzerManager:
+            mgr = analyzer_mod.AnalyzerManager(
+                rust_analyzer_bin="/fake/rust-analyzer", repository_root="/fake/repo"
+            )
+            await mgr.start()
+            assert mgr._task is not None
+            await mgr._task
+            # Simulate restart()'s second call to start() — must not re-capture.
+            await mgr.start()
+            assert mgr._task is not None
+            await mgr._task
+            return mgr
+
+        with (
+            patch.object(analyzer_mod.subprocess, "run", side_effect=_fake_version_run),
+            patch.object(analyzer_mod.AnalyzerManager, "_run", _noop_run),
+        ):
+            mgr = asyncio.run(_scenario())
+
+        assert call_count == 1
+        assert mgr.rust_analyzer_version == "rust-analyzer 1.96.0 (ac68faa 2026-05-25)"
+
+        # Outside the patch (subprocess.run restored): repeated status() calls
+        # must keep reading the cached value without any further capture.
+        for _ in range(3):
+            result = _call_status(mgr, subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A))
+            assert result["rust_analyzer_version"] == "rust-analyzer 1.96.0 (ac68faa 2026-05-25)"
+        assert call_count == 1
+
+    def test_null_on_missing_binary(self) -> None:
+        """A missing binary (FileNotFoundError) must degrade to None, never raise."""
+
+        async def _noop_run(self: AnalyzerManager, gen: int) -> None:
+            return None
+
+        async def _scenario() -> AnalyzerManager:
+            mgr = analyzer_mod.AnalyzerManager(
+                rust_analyzer_bin="/fake/nonexistent", repository_root="/fake/repo"
+            )
+            await mgr.start()
+            assert mgr._task is not None
+            await mgr._task
+            return mgr
+
+        with (
+            patch.object(
+                analyzer_mod.subprocess, "run", side_effect=FileNotFoundError("no such file")
+            ),
+            patch.object(analyzer_mod.AnalyzerManager, "_run", _noop_run),
+        ):
+            mgr = asyncio.run(_scenario())
+
+        assert mgr.rust_analyzer_version is None
+
+    def test_null_on_nonzero_exit(self) -> None:
+        """A non-zero exit (e.g. bad flag) must degrade to None, never raise."""
+
+        async def _noop_run(self: AnalyzerManager, gen: int) -> None:
+            return None
+
+        async def _scenario() -> AnalyzerManager:
+            mgr = analyzer_mod.AnalyzerManager(
+                rust_analyzer_bin="/fake/rust-analyzer", repository_root="/fake/repo"
+            )
+            await mgr.start()
+            assert mgr._task is not None
+            await mgr._task
+            return mgr
+
+        with (
+            patch.object(analyzer_mod.subprocess, "run", return_value=_completed_process(1, "")),
+            patch.object(analyzer_mod.AnalyzerManager, "_run", _noop_run),
+        ):
+            mgr = asyncio.run(_scenario())
+
+        assert mgr.rust_analyzer_version is None
