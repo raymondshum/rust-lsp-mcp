@@ -23,9 +23,11 @@ dependencies = [
 [project.scripts]
 # Named console script: uv run rust-lsp-mcp  /  rust-lsp-mcp (after install)
 rust-lsp-mcp = "rust_lsp_mcp:main"
+# Thin CLI client for the streamable-HTTP daemon (docs/planning/cli-frontend.md D5).
+rust-lsp = "rust_lsp_cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rust_lsp_mcp"]
+packages = ["src/rust_lsp_mcp", "src/rust_lsp_cli"]
 
 # ---------------------------------------------------------------------------
 # uv

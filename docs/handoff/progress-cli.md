@@ -25,8 +25,8 @@ the date in the log below.
 
 | Phase | Prompt | Depends on | Parallelizable? | State |
 |-------|--------|-----------|-----------------|-------|
-| C1 — Daemon transport | [cli-phase-1-daemon.md](cli-phase-1-daemon.md) | — | With C3 on the fast tier only; podman integration gates serialize | pr-open |
-| C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | not-started |
+| C1 — Daemon transport | [cli-phase-1-daemon.md](cli-phase-1-daemon.md) | — | With C3 on the fast tier only; podman integration gates serialize | done |
+| C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | pr-open |
 | C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | done |
 | C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | not-started |
 | C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | not-started |
@@ -104,3 +104,26 @@ C3 ──┘ └────> C5      (C4 ∥ C5 after C2; disjoint files)
   Record notes: import-time get_settings() blast radius (review + adversarial note 3);
   race test can pass without exercising the drain window (covered by lifecycle-races
   fake tests + adversarial double-refresh probe); FASTMCP_LOG_LEVEL pre-existing.
+- 2026-07-03 Phase C1 → **done**. PR #122 merged to `main` (bacf1fb) after green CI.
+  This flip rides in C2's PR (direct pushes to main blocked).
+- 2026-07-03 Phase C2 → **pr-open**. `rust-lsp` CLI client built, reviewed, QA'd (2
+  rounds), red-teamed — all gates green. Shipped: import-light `src/rust_lsp_cli/`
+  (stdlib module scope; `mcp` client lazy; never imports `rust_lsp_mcp` —
+  subprocess-guarded); 9 subcommands + `version`; D8 exit codes (ok/not_found→0,
+  error→1, not_ready→2, transport→3; argparse usage errors keep exit 2, documented
+  + signed off); `--wait` (finite-only, boot-riding, never-connected→3 vs stuck→2);
+  URL derived from RLM_HTTP_PORT with RLM_CLI_URL override; parity test vs
+  list_tools() (exclusions: probe, analyzer_status); packaging = packages append +
+  script entry only, lock unchanged. Gates: fast tier 766 passed; review `clean`;
+  QA round 1 FAILED — pre-existing harness bug exposed (autouse
+  `_reset_doc_store_singleton` cleared the live in-process daemon's doc store →
+  search-docs over HTTP not_ready; production path proven healthy) — fixed via
+  snapshot/clear/restore reset window + daemon-test skip + 7 guard tests
+  (falsified by reverting); QA round 2 GREEN (38 passed + 1 documented skip,
+  11m53s; **U4 recorded: warm `rust-lsp status` subprocess = 0.892s**, bound <5s);
+  adversarial MEDIUM `no-breaks` (isError→exit 1 synthesized envelope; stdout pure
+  in all failure modes incl. KeyboardInterrupt; import-light held incl. chromadb).
+  Post-adversarial hardening: `--wait` rejects non-finite values (nan/inf hung the
+  poll loop forever — note N1) + 3 regression tests. Record notes: N2 raw traceback
+  on Ctrl-C (cosmetic), N3 RLM_HTTP_PORT= (empty) yields port-less URL → clean exit
+  3, N4 uv-wrapper stderr warning (not the installed script).
