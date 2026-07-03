@@ -27,7 +27,7 @@ the date in the log below.
 |-------|--------|-----------|-----------------|-------|
 | C1 — Daemon transport | [cli-phase-1-daemon.md](cli-phase-1-daemon.md) | — | With C3 on the fast tier only; podman integration gates serialize | not-started |
 | C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | not-started |
-| C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | not-started |
+| C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | pr-open |
 | C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | not-started |
 | C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | not-started |
 
@@ -72,3 +72,16 @@ C3 ──┘ └────> C5      (C4 ∥ C5 after C2; disjoint files)
   confirmed: parity exclusions match live tool set; dispatcher still routes
   the original effort correctly. Per the standing automation directive,
   proceeding directly to C1 (∥ C3 fast-tier) this run.
+- 2026-07-03 Phase C3 → **pr-open**. KI-12 status versions built, reviewed, QA'd,
+  red-teamed — all gates green. Shipped: `status` ok-envelope gains the three pinned
+  fields `server_version`/`multilspy_version` (importlib.metadata per call, null on
+  PackageNotFoundError) + `rust_analyzer_version` (`<bin> --version` captured once in
+  `AnalyzerManager.start()`, boolean-guarded so `restart()` never re-captures; 5s
+  timeout, thread-offloaded like the git-HEAD capture; any failure → null, never
+  raises). KI-12 moved to Resolved (closes #115 — orchestrator closes the issue on
+  merge). Gates: fast tier 701 passed; podman integration gate 34 passed / 1
+  documented skip (11m41s) incl. live version-field assertions; review `minor` (2
+  fixed: TimeoutExpired degradation test, #115 backlink); adversarial `no-breaks`
+  (PermissionError/garbage-stdout/KeyboardInterrupt/capture-once-on-failure all
+  held). Record note: none — phase touched no seams. Built in parallel with C1 on
+  the fast tier; integration gate ran serially.
