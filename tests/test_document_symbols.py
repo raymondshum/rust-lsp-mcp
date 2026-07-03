@@ -50,6 +50,7 @@ def _doc_sym(
     line: int,
     character: int,
     container: str | None = None,
+    detail: str | None = None,
 ) -> dict[str, Any]:
     """Build a minimal document-symbol dict (range-only, no location sub-dict).
 
@@ -71,6 +72,8 @@ def _doc_sym(
     }
     if container is not None:
         sym["containerName"] = container
+    if detail is not None:
+        sym["detail"] = detail
     return sym
 
 
@@ -431,3 +434,104 @@ class TestDocumentSymbolsSelectionRange:
         s = result["symbols"][0]
         assert s["line"] == 11
         assert s["character"] == 2
+
+
+# ---------------------------------------------------------------------------
+# UR-18 (revised): optional `detail` field
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentSymbolsDetail:
+    """`detail` is included only when rust-analyzer supplies a non-empty value."""
+
+    def test_detail_present_when_provided(self) -> None:
+        from multilspy.multilspy_types import SymbolKind
+
+        sym = _doc_sym(
+            "parse_args", SymbolKind.Function, 0, 0, detail="fn parse_args(input: &str) -> Config"
+        )
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", [sym])
+
+        assert result["status"] == STATUS_OK
+        assert result["symbols"][0]["detail"] == "fn parse_args(input: &str) -> Config"
+
+    def test_detail_omitted_when_absent(self) -> None:
+        """No `detail` key at all in the raw symbol -> key is omitted, not null."""
+        from multilspy.multilspy_types import SymbolKind
+
+        sym = _doc_sym("no_detail_fn", SymbolKind.Function, 0, 0)
+        assert "detail" not in sym
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", [sym])
+
+        assert result["status"] == STATUS_OK
+        assert "detail" not in result["symbols"][0]
+
+    def test_detail_omitted_when_empty_string(self) -> None:
+        """An empty-string detail is treated as absent (omitted, never `""`)."""
+        from multilspy.multilspy_types import SymbolKind
+
+        sym = _doc_sym("empty_detail_fn", SymbolKind.Function, 0, 0, detail="")
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", [sym])
+
+        assert result["status"] == STATUS_OK
+        assert "detail" not in result["symbols"][0]
+
+    def test_find_symbol_never_gets_detail(self) -> None:
+        """Sanity: symbol_to_external (shared with find_symbol) never emits `detail`."""
+        from rust_lsp_mcp.core import symbol_to_external
+
+        sym = _doc_sym("parse_args", 12, 0, 0, detail="fn parse_args(input: &str) -> Config")
+        mapped = symbol_to_external(sym, "/fake/repo", default_file="src/lib.rs")
+        assert mapped is not None
+        assert "detail" not in mapped
+
+
+# ---------------------------------------------------------------------------
+# UR-11 (revised): total / truncated
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentSymbolsTotalAndTruncation:
+    """ok envelopes always carry total/truncated; cap kicks in over MAX_LIST_RESULTS."""
+
+    def test_total_zero_for_empty_file(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", [])
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 0
+        assert result["truncated"] is False
+
+    def test_total_matches_symbol_count_under_cap(self) -> None:
+        from multilspy.multilspy_types import SymbolKind
+
+        syms = [
+            _doc_sym("Alpha", SymbolKind.Struct, 0, 0),
+            _doc_sym("beta", SymbolKind.Function, 10, 4),
+        ]
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", syms)
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 2
+        assert result["truncated"] is False
+        assert len(result["symbols"]) == 2
+
+    def test_truncation_over_cap(self) -> None:
+        """More than MAX_LIST_RESULTS (200) symbols -> capped page + truncated=True."""
+        from multilspy.multilspy_types import SymbolKind
+
+        syms = [_doc_sym(f"sym_{i:03d}", SymbolKind.Function, i, 0) for i in range(250)]
+        mgr = _make_manager(STATE_READY)
+        result = _run_document_symbols(mgr, "src/lib.rs", syms)
+
+        assert result["status"] == STATUS_OK
+        assert result["total"] == 250
+        assert result["truncated"] is True
+        assert len(result["symbols"]) == 200
+        # Order preserved: first 200, in declaration order.
+        names = [s["name"] for s in result["symbols"]]
+        assert names == [f"sym_{i:03d}" for i in range(200)]

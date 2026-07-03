@@ -50,6 +50,22 @@ There is deliberately no `retriable` boolean and no separate `code` enum — see
 `docs/audit/2026-07-02-usability-review.md` (UR-6) for why those were
 considered and dropped.
 
+### List caps: `total` and `truncated`
+
+`find_symbol`, `document_symbols`, and `find_references` always add two fields
+to their `ok` envelope, alongside their list:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `total` | integer | The full result count, *before* any cap is applied. `total == 0` is how you tell "the query succeeded with zero results" apart from a bad query — no separate flag or message is needed for that case. |
+| `truncated` | boolean | `true` only when `total` exceeds `MAX_LIST_RESULTS` (200), in which case the list carries just the first 200 entries, in the same order they'd otherwise appear. `false` (list is complete) otherwise. |
+
+There is deliberately **no pagination/offset** — narrowing the query (a more
+specific position, name, or file) is the intended way to get past the cap, not
+paging through it. See `docs/audit/2026-07-02-usability-review.md` (UR-11,
+which also folds in UR-5 and UR-12) for why pagination was considered and
+dropped in favor of this single high safety cap.
+
 ---
 
 ## Navigation tools
@@ -69,7 +85,7 @@ performs a fuzzy match across the whole workspace.
 
 | Status | Fields |
 |---|---|
-| `ok` | `results`: list of symbol objects (see below). |
+| `ok` | `results`: list of symbol objects (see below); `total` and `truncated` (see [List caps](#list-caps-total-and-truncated) above). |
 | `not_found` | `message` — no symbols matched the query, or rust-analyzer returned nothing. |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
 | `error` | `message`, `recovery: "unknown"` — unexpected failure from the LSP layer. |
@@ -115,7 +131,9 @@ Each item in `results`:
       "character": 1,
       "container": null
     }
-  ]
+  ],
+  "total": 2,
+  "truncated": false
 }
 ```
 
@@ -135,7 +153,7 @@ List every symbol defined in one file, in declaration order.
 
 | Status | Fields |
 |---|---|
-| `ok` | `symbols`: list of symbol objects (see below). The list may be empty — a file with only comments or macros is a valid result with zero symbols. |
+| `ok` | `symbols`: list of symbol objects (see below); `total` and `truncated` (see [List caps](#list-caps-total-and-truncated) above). The list may be empty — a file with only comments or macros is a valid result with zero symbols (`total: 0`). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
 | `error` | `message`, `recovery` — the language server raised an exception for this request (`recovery: "unknown"`; for example, the file path does not exist in the project or cannot be read), or `file` is an absolute path or escapes the project root via `..` (`recovery: "fix_input"`; rejected before the analyzer is called). Note: a valid file with no symbols returns `ok` with an empty list, not `error`. |
 
@@ -148,12 +166,20 @@ file you passed in):
   "kind":      "Struct",
   "line":      8,
   "character": 1,
-  "container": null
+  "container": null,
+  "detail":    "struct Config"
 }
 ```
 
 `container` is almost always `null` for document symbols — rust-analyzer rarely
 populates the enclosing-scope field in this response.
+
+`detail` is **optional** — rust-analyzer's signature for the symbol (e.g. a
+function's parameter/return types), included only when rust-analyzer supplies
+a non-empty value. It is omitted entirely (never emitted as `null`) when
+absent, so an outline of a large file does not pay for a redundant key on
+every entry. `detail` is specific to `document_symbols`; `find_symbol` does not
+carry it (workspace-symbol results have no equivalent field).
 
 `line`/`character` point at the symbol's **name**, not the start of the full
 declaration — so a symbol preceded by doc comments or `#[attributes]` still
@@ -167,10 +193,12 @@ of the declaration only if a provider omits the name-position data.)
 {
   "status": "ok",
   "symbols": [
-    { "name": "Config",  "kind": "Struct",   "line": 8,  "character": 1, "container": null },
-    { "name": "new",     "kind": "Method",   "line": 15, "character": 5, "container": null },
+    { "name": "Config",  "kind": "Struct",   "line": 8,  "character": 1, "container": null, "detail": "struct Config" },
+    { "name": "new",     "kind": "Method",   "line": 15, "character": 5, "container": null, "detail": "fn new() -> Self" },
     { "name": "run",     "kind": "Function", "line": 42, "character": 1, "container": null }
-  ]
+  ],
+  "total": 3,
+  "truncated": false
 }
 ```
 
@@ -238,12 +266,13 @@ Find all uses of the item at a given position.
 | `line` | integer | required | 1-based line number. |
 | `character` | integer | required | 1-based character offset. |
 | `include_declaration` | boolean | `false` | When `true`, also include the definition site in the results (merged and deduplicated). |
+| `include_source` | boolean | `false` | When `true`, each reference gains a `source` field with the trimmed text of its source line, read from the file at response time (point-in-time snapshot; may lag the index if files changed since indexing). |
 
 **Returns**
 
 | Status | Fields |
 |---|---|
-| `ok` | `references`: list of location objects. The list may be empty — see note below. References that resolve outside the project root (e.g. into the standard library) are silently skipped. |
+| `ok` | `references`: list of location objects; `total` and `truncated` (see [List caps](#list-caps-total-and-truncated) above). The list may be empty — see note below (`total: 0`). References that resolve outside the project root (e.g. into the standard library) are silently skipped. |
 | `not_found` | `message` — no symbol at that position (whitespace, comment, or unknown token). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
 | `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or an unexpected failure (`recovery: "unknown"`). |
@@ -258,11 +287,34 @@ Each item in `references`:
 }
 ```
 
+When `include_source=true`, each item additionally carries:
+
+```json
+{
+  "file":      "src/main.rs",
+  "line":      27,
+  "character": 9,
+  "source":    "let cfg = parse_args(&raw_input)?;"
+}
+```
+
+`source` is the stripped text of that line, truncated to 300 characters, read
+directly from the file on disk **at response time** — not from the analyzer's
+index. This is a point-in-time snapshot: if the file changed since the last
+index run, `source` reflects the current on-disk content, which may disagree
+with the (possibly stale) position the analyzer reported. `source` is `null`
+for any hit whose file or line could not be read (missing file, permission
+error, out-of-range line) — this never causes the whole call to fail. The
+cap (see [List caps](#list-caps-total-and-truncated) above) is applied
+*before* enrichment, so at most 200 lines are ever read for a single call. The
+default `include_source=false` leaves the payload byte-for-byte the same
+shape as before (aside from the always-present `total`/`truncated` fields).
+
 **Important: `ok` + empty list is not the same as `not_found`.**
 
-- `ok` with an empty `references` list means the symbol is real but has no
-  callers in the indexed workspace. This is a meaningful answer (e.g. a dead
-  function or an internal item with no in-tree users).
+- `ok` with an empty `references` list (`total: 0`) means the symbol is real
+  but has no callers in the indexed workspace. This is a meaningful answer
+  (e.g. a dead function or an internal item with no in-tree users).
 - `not_found` means there is no symbol at that position at all — the cursor is
   on whitespace, a comment, or an unknown token.
 
@@ -271,7 +323,9 @@ Each item in `references`:
 ```json
 {
   "status": "ok",
-  "references": []
+  "references": [],
+  "total": 0,
+  "truncated": false
 }
 ```
 
@@ -283,7 +337,9 @@ Each item in `references`:
   "references": [
     { "file": "src/main.rs", "line": 27, "character": 9 },
     { "file": "tests/smoke.rs", "line": 14, "character": 5 }
-  ]
+  ],
+  "total": 2,
+  "truncated": false
 }
 ```
 
@@ -334,7 +390,7 @@ exact words do not appear.
 | Name | Type | Default | Meaning |
 |---|---|---|---|
 | `query` | string | required | A natural-language question or topic. |
-| `limit` | integer | `5` | Maximum number of results to return. Clamped to at least 1. |
+| `limit` | integer | `5` | Maximum number of results to return. Clamped to between 1 and 50 (`MAX_DOC_RESULTS`) inclusive — a request for more than 50 is silently reduced to 50 rather than dumping an unbounded number of chunks in one response. There is no `truncated` flag here: unlike the LSP list tools, semantic (top-k nearest-neighbour) search has no meaningful "more results exist" signal to report — narrow the query for different results rather than requesting a larger `limit`. |
 
 **Returns**
 

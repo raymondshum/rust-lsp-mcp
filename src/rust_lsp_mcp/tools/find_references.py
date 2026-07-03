@@ -4,6 +4,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 """
 
 import logging
+import pathlib
 from typing import Annotated, Any
 
 from mcp.types import ToolAnnotations
@@ -16,6 +17,7 @@ from rust_lsp_mcp.analyzer import (
     AnalyzerTornDownError,
 )
 from rust_lsp_mcp.core import (
+    cap_list_results,
     get_manager,
     location_to_external,
     mcp,
@@ -26,6 +28,52 @@ from rust_lsp_mcp.envelope import RECOVERY_FIX_INPUT, error, lsp_failure, not_fo
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
+
+# Cap on the trimmed source-line text attached per reference when
+# include_source=True — keeps a single pathological long line from blowing up
+# the response (UR-16, revised).
+_MAX_SOURCE_LEN = 300
+
+
+def _enrich_with_source(hits: list[dict[str, Any]], repo_root: str) -> None:
+    """Populate a ``source`` key on each hit in place — one read per file.
+
+    Groups hits by their (already workspace-validated) ``file`` key, reads
+    each distinct file at most once (``errors="replace"`` — never raises on
+    bad encoding), and sets ``hit["source"]`` to the stripped, length-capped
+    text of that hit's 1-indexed ``line``. Never raises: any read failure
+    (missing file, permission error, out-of-range line) sets ``source`` to
+    ``None`` for the affected hits rather than propagating.
+
+    This is a point-in-time snapshot read directly off disk at response time
+    — it can lag the index if files changed since the last analyzer index run
+    (see the ``include_source`` parameter description on ``find_references``).
+    """
+    by_file: dict[str, list[dict[str, Any]]] = {}
+    for hit in hits:
+        by_file.setdefault(hit["file"], []).append(hit)
+
+    for rel_file, file_hits in by_file.items():
+        lines: list[str] | None
+        try:
+            text = (pathlib.Path(repo_root) / rel_file).read_text(
+                encoding="utf-8", errors="replace"
+            )
+            # Split on "\n" only: rust-analyzer's line indices count "\n"
+            # newlines, while splitlines() also breaks on \f, \v, \u2028 etc.
+            # and would silently shift every line after such a character.
+            # .strip() below removes any trailing "\r" from CRLF files.
+            lines = text.split("\n")
+        except OSError:
+            lines = None
+
+        for hit in file_hits:
+            idx = hit["line"] - 1
+            if lines is not None and 0 <= idx < len(lines):
+                source = lines[idx].strip()
+                hit["source"] = source[:_MAX_SOURCE_LEN]
+            else:
+                hit["source"] = None
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -45,6 +93,17 @@ async def find_references(
         ),
     ],
     include_declaration: bool = False,
+    include_source: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, each reference gains a `source` field with the "
+                "trimmed text of its source line, read from the file at "
+                "response time (point-in-time snapshot; may lag the index if "
+                "files changed since indexing)."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Find all references to the symbol at the given position.
 
@@ -85,6 +144,19 @@ async def find_references(
     When ``include_declaration=False`` (the default), ``request_definition`` is
     never called — no extra round-trip to the analyzer.
 
+    **include_source enrichment (opt-in, default off):**
+    When ``include_source=True``, each returned reference gains a ``source``
+    field — the stripped text of that reference's 1-indexed line, read
+    directly from the file on disk at response time.  This is a point-in-time
+    snapshot: the read happens now, against whatever is currently on disk, and
+    may disagree with the (possibly stale) analyzer index if the file changed
+    since the last index run.  Reads are grouped by file (one read per
+    distinct file, not per hit) and never raise — a hit whose file or line
+    cannot be read gets ``source: null``.  The cap below is applied BEFORE
+    enrichment, so at most ``MAX_LIST_RESULTS`` (200) lines are ever read for
+    a single call.  Default ``include_source=False`` leaves the payload shape
+    unchanged (aside from the always-present ``total``/``truncated`` fields).
+
     Args:
         file:                Workspace-relative path to the file
                              (e.g. ``"src/main.rs"``).
@@ -93,16 +165,26 @@ async def find_references(
         include_declaration: If ``True``, synthesize the declaration by merging
                              the go-to-definition result into the reference list
                              (deduped).  Default ``False`` (uses-only).
+        include_source:      If ``True``, attach a ``source`` field (the
+                             trimmed source line, read at response time) to
+                             each reference.  Default ``False``.
 
     Returns a ``{status, ...}`` envelope:
 
     - ``ok`` + ``references`` list — analysis succeeded.  The list may be empty
-      (zero callers is a valid result, not an error).  Each reference::
+      (zero callers is a valid result, not an error).  Also always carries
+      ``total`` (the full reference count, before any cap) and ``truncated``
+      (``true`` only when the list exceeded ``MAX_LIST_RESULTS`` == 200, in
+      which case only the first 200 references, in existing order, are
+      returned).  Each reference::
 
           {
-            "file":      str,  # workspace-relative path (e.g. "src/lib.rs")
-            "line":      int,  # 1-indexed line number
-            "character": int,  # 1-indexed character offset
+            "file":      str,         # workspace-relative path (e.g. "src/lib.rs")
+            "line":      int,         # 1-indexed line number
+            "character": int,         # 1-indexed character offset
+            "source":    str | null,  # OPTIONAL — only present when
+                                      # include_source=True; null if the line
+                                      # could not be read
           }
 
     - ``not_found`` — the position does not resolve to any symbol (blank line,
@@ -223,7 +305,16 @@ async def find_references(
                 # Only insert if not already present (declaration already in refs list).
                 seen.setdefault(key, mapped)
 
-    # Step 7/8: return ok envelope with the (possibly empty) reference list.
+    # Step 7: cap BEFORE enrichment so at most MAX_LIST_RESULTS lines are ever
+    # read from disk for a single call (UR-11 + UR-16, revised).
+    capped, total, truncated = cap_list_results(list(seen.values()))
+
+    # Step 8: optional opt-in source-line enrichment (UR-16, revised). Mutates
+    # the capped entries in place, adding "source" to each.
+    if include_source:
+        _enrich_with_source(capped, repo_root)
+
+    # Step 9: return ok envelope with the (possibly empty) reference list.
     # Zero references is a valid "no callers" answer — not_found is only for the
     # refs-is-None case (no symbol at position), handled above.
-    return ok(references=list(seen.values()))
+    return ok(references=capped, total=total, truncated=truncated)

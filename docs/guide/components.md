@@ -344,7 +344,11 @@ result during a rebuild.
 **`search(query, n_results=5)`** queries the collection and returns up to
 `n_results` matches, each as a dict with `file`, `breadcrumb`, `text`, and
 `distance` (cosine distance: 0 = identical, lower = more similar). Results are
-ordered best-first.
+ordered best-first. The `search_docs` tool clamps the caller-supplied `limit`
+it passes in as `n_results` to `[1, MAX_DOC_RESULTS]` (currently 50) — a bare
+floor-only clamp let an oversized `limit` pull an unbounded number of chunks
+into a single response (see `docs/audit/2026-07-02-usability-review.md`,
+UR-12).
 
 **Module-level singleton.** The live `DocStore` is held in a module-level
 variable, set by `init_doc_store` and cleared by `clear_doc_store` on shutdown.

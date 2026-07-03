@@ -132,6 +132,13 @@ Collapsing these two into the same response would make it impossible to
 distinguish "I could not find that symbol" from "I found it and it has no
 callers."
 
+The three list-returning tools (`find_symbol`, `document_symbols`,
+`find_references`) also always add `total` (the full result count) and
+`truncated` (`true` only past a 200-item safety cap) to their `ok` envelope —
+`total == 0` is the same "found it, zero results" signal as an empty list,
+without a separate flag or message. See
+[Tool reference](tools.md#list-caps-total-and-truncated) for details.
+
 ---
 
 ## 5. Counting from 1, not 0

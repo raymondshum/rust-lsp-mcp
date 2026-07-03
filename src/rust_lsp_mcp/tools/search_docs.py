@@ -31,6 +31,12 @@ DOC_INDEXING_RETRY_MESSAGE = (
     "doc_index_state == 'ready'."
 )
 
+# Upper clamp on `limit` (UR-12, folded into UR-11's list-tool cap convention).
+# Bare ceiling only — deliberately NO `truncated` flag here: semantic (k-NN)
+# search has no meaningful "more results exist" signal the way a full-list
+# tool does (see docs/audit/2026-07-02-usability-review.md, UR-12 round-2).
+MAX_DOC_RESULTS = 50
+
 
 def _errored_build_envelope(reason: str | None) -> dict[str, Any]:
     """Return the ``error`` envelope for a permanently-failed doc-index build.
@@ -57,8 +63,8 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
 
     Args:
         query: Natural-language search query.
-        limit: Maximum number of results to return.  Clamped to at least 1.
-               Defaults to 5.
+        limit: Maximum number of results to return.  Clamped to
+               ``[1, MAX_DOC_RESULTS]`` (currently 50).  Defaults to 5.
 
     Returns a ``{status, ...}`` envelope:
 
@@ -109,7 +115,11 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
     if not query or not query.strip():
         return error("query must be a non-empty string", recovery=RECOVERY_FIX_INPUT)
 
-    limit = max(1, limit)
+    # Floor AND ceiling: a bare floor-only clamp let an oversized limit (or an
+    # LLM auto-filling a large number) pull an unbounded number of chunks in
+    # one response (UR-12, folded into UR-11's cap convention). No `truncated`
+    # flag: semantic top-k search has no "more results exist" signal to report.
+    limit = max(1, min(limit, MAX_DOC_RESULTS))
 
     store = get_doc_store()
 

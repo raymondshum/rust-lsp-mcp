@@ -22,6 +22,7 @@ Test coverage:
     limit / clamping:
         - limit is passed to search as n_results.
         - limit <= 0 is clamped to 1 before calling search.
+        - limit > MAX_DOC_RESULTS is clamped down to MAX_DOC_RESULTS (UR-12).
 """
 
 import asyncio
@@ -366,11 +367,28 @@ class TestLimitHandling:
         _run_search_docs(query="foo", limit=-5, store=store)
         store.search.assert_called_once_with("foo", n_results=1)
 
-    def test_limit_large_passed_through(self) -> None:
-        """Large limit values are not clamped from above."""
+    def test_limit_large_clamped_to_ceiling(self) -> None:
+        """Large limit values ARE clamped from above (UR-12, revised).
+
+        This deliberately reverses the prior behaviour (see the removed
+        ``test_limit_large_passed_through``): a bare floor-only clamp let an
+        oversized limit pull an unbounded number of chunks in one response.
+        limit=100 exceeds MAX_DOC_RESULTS (50), so it must be clamped down to
+        n_results=50, not passed through.
+        """
+        from rust_lsp_mcp.tools.search_docs import MAX_DOC_RESULTS
+
         store = _make_ready_store(search_return=[_FAKE_HIT])
         _run_search_docs(query="foo", limit=100, store=store)
-        store.search.assert_called_once_with("foo", n_results=100)
+        store.search.assert_called_once_with("foo", n_results=MAX_DOC_RESULTS)
+
+    def test_limit_at_ceiling_passed_through(self) -> None:
+        """limit exactly at MAX_DOC_RESULTS is not altered."""
+        from rust_lsp_mcp.tools.search_docs import MAX_DOC_RESULTS
+
+        store = _make_ready_store(search_return=[_FAKE_HIT])
+        _run_search_docs(query="foo", limit=MAX_DOC_RESULTS, store=store)
+        store.search.assert_called_once_with("foo", n_results=MAX_DOC_RESULTS)
 
 
 # ---------------------------------------------------------------------------
