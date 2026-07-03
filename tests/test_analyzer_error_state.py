@@ -159,6 +159,7 @@ def _errored_manager_stub() -> AnalyzerManager:
     mgr._lsp = None
     mgr._indexed_commit = None
     mgr._repository_root = "/fake/repo"
+    mgr._rust_analyzer_version = None  # KI-12: stub via __new__, never captured
     return mgr
 
 

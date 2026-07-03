@@ -7,6 +7,7 @@ This tool is UNGATED (it is the readiness check itself) and never returns
 """
 
 import asyncio
+import importlib.metadata
 import subprocess
 from typing import Any
 
@@ -62,6 +63,19 @@ async def status() -> dict[str, Any]:
                            preflight never ran — e.g. most unit tests). Never
                            fatal and never affects ``state``/``doc_index_state``
                            — see UR-21.
+    - ``server_version``  — installed ``rust-lsp-mcp`` package version
+                           (``importlib.metadata.version``, computed fresh per
+                           call), or ``null`` if the distribution metadata is
+                           not resolvable (``PackageNotFoundError``) — see KI-12.
+    - ``multilspy_version`` — installed ``multilspy`` package version, same
+                           mechanism and null-degradation as ``server_version``.
+    - ``rust_analyzer_version`` — the analyzer binary's ``--version`` output
+                           (``rust-analyzer <semver> (<sha> <date>)``),
+                           captured **once** at analyzer-manager start and
+                           cached for the process lifetime (never re-run per
+                           ``status`` call). ``null`` before a manager exists,
+                           or if the binary was missing/failed/timed out at
+                           capture time.
 
     .. caution::
 
@@ -88,6 +102,12 @@ async def status() -> dict[str, Any]:
     repo_root: str = mgr.repository_root if mgr is not None else get_settings().project_root
     doc_state, doc_err = doc_store_state()
     preflight_warnings = get_preflight_warnings()
+    rust_analyzer_version: str | None = mgr.rust_analyzer_version if mgr is not None else None
+    # KI-12: package versions are cheap to resolve (importlib.metadata reads
+    # installed distribution metadata, no I/O beyond that) — compute fresh
+    # per call rather than caching, unlike rust_analyzer_version's subprocess.
+    server_version = _package_version("rust-lsp-mcp")
+    multilspy_version = _package_version("multilspy")
 
     # DS-19: the pinned MCP SDK runs non-async tools INLINE on the event loop
     # (no thread offload), so synchronous I/O here would block every other
@@ -115,7 +135,23 @@ async def status() -> dict[str, Any]:
         doc_index_error=doc_err,
         doc_index_chunk_count=doc_chunk_count,
         preflight_warnings=preflight_warnings,
+        server_version=server_version,
+        multilspy_version=multilspy_version,
+        rust_analyzer_version=rust_analyzer_version,
     )
+
+
+def _package_version(name: str) -> str | None:
+    """Return the installed version of the *name* distribution, or ``None``.
+
+    Wraps ``importlib.metadata.version`` (KI-12); degrades to ``None`` on
+    ``PackageNotFoundError`` (e.g. an editable/unusual install where the
+    distribution metadata isn't resolvable). Never raises.
+    """
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _git_head(repo_root: str) -> str | None:

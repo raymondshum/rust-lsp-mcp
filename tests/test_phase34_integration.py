@@ -19,7 +19,9 @@ What is being proven (runtime-UNVERIFIED items are closed here):
     5. hover: ok + non-empty markdown contents string; records actual shape
        rust-analyzer emitted (MarkupContent vs MarkedString vs list).
     6. status: while ready → ok, state=="ready", real 40-char hashes,
-       indexed_commit == current_commit (ripgrep HEAD), stale==False.
+       indexed_commit == current_commit (ripgrep HEAD), stale==False; KI-12
+       version fields (server_version, multilspy_version,
+       rust_analyzer_version) present and plausible.
     7. refresh: ok + state=="indexing" immediately; re-waits for ready;
        confirms cargo-cache-preserving re-index; find_symbol still works after.
     8. Readiness gate: gated tools return not_ready before ready.
@@ -28,6 +30,7 @@ Timeout: generous — a cold ripgrep index can take several minutes.
 """
 
 import pathlib
+import re
 import time
 from typing import Any
 from unittest.mock import patch
@@ -355,6 +358,27 @@ async def _run_phase34_all(settings) -> dict[str, Any]:
         results["status_indexed_commit"] = indexed_commit
         results["status_current_commit"] = current_commit
         results["status_stale"] = status_result["stale"]
+
+        # KI-12: version fields present and plausible against the live
+        # container binary/installed packages (server-side, not CLI — see
+        # docs/reference/version-introspection-sources.md).
+        server_version = status_result["server_version"]
+        multilspy_version = status_result["multilspy_version"]
+        rust_analyzer_version = status_result["rust_analyzer_version"]
+        assert server_version is not None, "server_version should resolve in the dev container"
+        assert multilspy_version is not None, (
+            "multilspy_version should resolve in the dev container"
+        )
+        assert rust_analyzer_version is not None, (
+            "rust_analyzer_version should be captured once the manager is ready"
+        )
+        assert re.match(r"^rust-analyzer\s", rust_analyzer_version), (
+            f"rust_analyzer_version does not look like rust-analyzer --version "
+            f"output: {rust_analyzer_version!r}"
+        )
+        results["status_server_version"] = server_version
+        results["status_multilspy_version"] = multilspy_version
+        results["status_rust_analyzer_version"] = rust_analyzer_version
 
         # ------------------------------------------------------------------
         # 7. refresh: restart and re-confirm

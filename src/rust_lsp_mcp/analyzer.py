@@ -246,6 +246,13 @@ class AnalyzerManager:
         self._lsp: PatchedRustAnalyzer | None = None
         # Git commit hash of the tree being indexed; None until _run captures it.
         self._indexed_commit: str | None = None
+        # rust-analyzer `--version` output, captured once by start() (KI-12);
+        # None until captured, or if capture fails.  Never re-captured by
+        # restart() — the binary underlying rust_analyzer_bin cannot change
+        # without a process restart, so one capture covers the manager's
+        # whole lifetime.
+        self._rust_analyzer_version: str | None = None
+        self._rust_analyzer_version_captured: bool = False
         # Set (gen-guarded) when a background _run raises; cleared whenever
         # restart() resets state back to STATE_INDEXING (the recovery path).
         self._error: str | None = None
@@ -268,6 +275,18 @@ class AnalyzerManager:
     def indexed_commit(self) -> str | None:
         """Git commit hash of the tree currently indexed, or None if not yet known."""
         return self._indexed_commit
+
+    @property
+    def rust_analyzer_version(self) -> str | None:
+        """Cached ``<rust_analyzer_bin> --version`` output (KI-12).
+
+        Captured once, synchronously within ``start()``, before the first
+        background indexing task is spawned; ``restart()`` does not
+        re-capture it (same binary path for the manager's lifetime).  ``None``
+        if the binary is missing, exits non-zero, times out, or ``start()``
+        has not yet been called.
+        """
+        return self._rust_analyzer_version
 
     @property
     def error_message(self) -> str | None:
@@ -298,7 +317,18 @@ class AnalyzerManager:
         Does NOT acquire ``_lifecycle_lock`` — ``restart()`` calls this while
         already holding the lock.  Never call this directly while a restart
         or shutdown may be concurrently in flight; go through ``restart()``.
+
+        KI-12: on the FIRST call only, captures ``rust_analyzer_version``
+        before spawning the background task (a short, thread-offloaded
+        subprocess call — see ``_capture_rust_analyzer_version``).
+        ``restart()`` also calls ``start()`` (to respawn after a drain), but
+        the ``_rust_analyzer_version_captured`` guard skips re-capture there:
+        the binary can't change without a process restart, so one capture
+        covers the manager's whole lifetime.
         """
+        if not self._rust_analyzer_version_captured:
+            await self._capture_rust_analyzer_version()
+            self._rust_analyzer_version_captured = True
         self._task = asyncio.create_task(self._run(self._generation), name="analyzer-lifecycle")
 
     async def _capture_head_commit(self) -> None:
@@ -330,6 +360,44 @@ class AnalyzerManager:
         except Exception:
             _log.debug("AnalyzerManager: could not capture HEAD commit", exc_info=True)
             self._indexed_commit = None
+
+    async def _capture_rust_analyzer_version(self) -> None:
+        """Capture ``<rust_analyzer_bin> --version`` into ``_rust_analyzer_version`` (KI-12).
+
+        Run once, from ``start()``, before the background indexing task is
+        spawned.  Output format (verified,
+        docs/reference/version-introspection-sources.md): ``rust-analyzer
+        <semver> (<sha> <date>)`` — the full trimmed stdout is stored
+        verbatim, no parsing.  Mirrors ``_capture_head_commit``'s
+        thread-offload pattern (``subprocess.run`` is synchronous; running it
+        inline would block the event loop).  A short timeout bounds how long
+        a missing/hanging binary can delay startup.  On any failure (missing
+        binary, non-zero exit, timeout) leaves ``_rust_analyzer_version`` as
+        ``None`` and logs at debug — never raises.
+        """
+        try:
+
+            def _run_version() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [self._rust_analyzer_bin, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+
+            result = await asyncio.to_thread(_run_version)
+            if result.returncode == 0:
+                self._rust_analyzer_version = result.stdout.strip()
+            else:
+                _log.debug(
+                    "AnalyzerManager: rust-analyzer --version failed (rc=%d): %s",
+                    result.returncode,
+                    result.stderr.strip(),
+                )
+                self._rust_analyzer_version = None
+        except Exception:
+            _log.debug("AnalyzerManager: could not capture rust-analyzer version", exc_info=True)
+            self._rust_analyzer_version = None
 
     async def _run(self, gen: int) -> None:
         """Background task: enter start_server(), flip state, wait for shutdown.

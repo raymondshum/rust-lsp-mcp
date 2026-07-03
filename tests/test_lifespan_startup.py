@@ -113,6 +113,7 @@ class _FakeManager:
         self.error_message: str | None = None
         self.indexed_commit: str | None = "deadbeef"
         self.repository_root = "/tmp"
+        self.rust_analyzer_version: str | None = None  # KI-12
 
 
 def _fake_analyzer_lifespan_factory(manager: _FakeManager) -> Any:
