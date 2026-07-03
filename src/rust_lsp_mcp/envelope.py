@@ -69,3 +69,31 @@ def not_found(
 def error(message: str) -> dict[str, Any]:
     """Return an ``error`` envelope with a human-readable message."""
     return {"status": STATUS_ERROR, "message": message}
+
+
+def lsp_failure(exc: Exception, context: str = "") -> dict[str, Any]:
+    """Return an ``error`` envelope for a catch-all, unexpected LSP/search exception.
+
+    Shared by every tool's catch-all ``except Exception`` fallback (reached
+    only after ``require_ready()`` has already passed, i.e. the analyzer is
+    healthy). Preserves the existing ``"LSP error: ..."`` prefix — tests
+    assert on it (e.g. ``tests/test_goto_definition.py``,
+    ``tests/test_document_symbols.py``) — and appends neutral guidance: this
+    is an unexpected internal error, the analyzer is still running, retry the
+    request once.  Deliberately does NOT advise calling ``refresh`` — that is
+    an unconditional, minutes-long wholesale re-index, and this branch only
+    fires when the analyzer is already ready, so advising refresh would trade
+    a one-off glitch for needless destructive downtime.
+
+    Args:
+        exc: The caught exception.
+        context: Optional short parenthetical naming which sub-call failed
+            (e.g. ``"definition"`` for ``find_references``'s second delegate
+            call under ``include_declaration=True``), mirroring the existing
+            ``"LSP error (definition): ..."`` distinction.
+    """
+    prefix = f"LSP error ({context})" if context else "LSP error"
+    return error(
+        f"{prefix}: {exc}. This is an unexpected internal error; the analyzer "
+        "is still running. Retry the request once."
+    )

@@ -118,6 +118,14 @@ TORN_DOWN_RETRY_MESSAGE = (
     "Retry after analyzer_status reports ready."
 )
 
+# Canonical not_ready message for the everyday "still indexing" case — used by
+# require_ready() (core.py) and every gated tool's ``else: not_ready(...)``
+# fallback.  Names the exact poll tool and field/value to await, mirroring
+# TORN_DOWN_RETRY_MESSAGE's specificity.
+INDEXING_RETRY_MESSAGE = (
+    "The analyzer is still indexing. Retry after analyzer_status reports state == 'ready'."
+)
+
 
 def _is_null_response_assertion(exc: AssertionError) -> bool:
     """Whether a multilspy AssertionError signals a *null* LSP response.
