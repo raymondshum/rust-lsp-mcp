@@ -119,6 +119,7 @@ Check this list at these lifecycle checkpoints (see
   `tests/test_phase34_integration.py` (`rust_analyzer_version` matches
   `^rust-analyzer\s` against the live container binary). CLI-side surfacing
   (`rust-lsp version`/`status`) is a separate phase of the same plan.
+  Closes [#115](https://github.com/raymondshum/rust-lsp-mcp/issues/115).
 
 ### KI-9 — an in-flight nav delegate can hang across a `refresh` drain of a wedged analyzer
 - **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py) (the

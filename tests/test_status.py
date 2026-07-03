@@ -587,3 +587,30 @@ class TestStatusRustAnalyzerVersion:
             mgr = asyncio.run(_scenario())
 
         assert mgr.rust_analyzer_version is None
+
+    def test_null_on_timeout(self) -> None:
+        """A hung binary (TimeoutExpired) must degrade to None, never raise."""
+
+        async def _noop_run(self: AnalyzerManager, gen: int) -> None:
+            return None
+
+        async def _scenario() -> AnalyzerManager:
+            mgr = analyzer_mod.AnalyzerManager(
+                rust_analyzer_bin="/fake/rust-analyzer", repository_root="/fake/repo"
+            )
+            await mgr.start()
+            assert mgr._task is not None
+            await mgr._task
+            return mgr
+
+        with (
+            patch.object(
+                analyzer_mod.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(cmd="rust-analyzer --version", timeout=5),
+            ),
+            patch.object(analyzer_mod.AnalyzerManager, "_run", _noop_run),
+        ):
+            mgr = asyncio.run(_scenario())
+
+        assert mgr.rust_analyzer_version is None
