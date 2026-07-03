@@ -7,10 +7,19 @@ import logging
 from typing import Any
 
 from anyio.to_thread import run_sync
+from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import mcp
 from rust_lsp_mcp.doc_store import DOC_STATE_ERROR, DocStoreNotReady, doc_store_state, get_doc_store
-from rust_lsp_mcp.envelope import error, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import (
+    RECOVERY_FIX_INPUT,
+    RECOVERY_REFRESH,
+    RECOVERY_UNKNOWN,
+    error,
+    not_found,
+    not_ready,
+    ok,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -33,11 +42,12 @@ def _errored_build_envelope(reason: str | None) -> dict[str, Any]:
     """
     return error(
         "The documentation index failed to build and is unavailable: "
-        f"{reason or 'unknown error'}. Run the refresh tool to rebuild it."
+        f"{reason or 'unknown error'}. Run the refresh tool to rebuild it.",
+        recovery=RECOVERY_REFRESH,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
     """Search the documentation index for chunks relevant to *query*.
 
@@ -69,14 +79,17 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
       *transient* state.  The caller **must not** interpret this as "no
       matching docs"; the store may be mid-build.  Retry after ``status``
       reports ``doc_index_state == "ready"``, or after ``refresh`` returns.
+      Carries ``recovery: "poll_status"``.
 
     - ``error`` — (a) ``query`` is empty or whitespace-only (rejected before
       any readiness check or search, mirroring the position tools'
-      input-validation style), (b) the doc index failed to build
-      (``doc_index_state == "error"``) — this is a *permanent* condition until
-      ``refresh`` rebuilds it, unlike the transient ``not_ready`` case above —
-      or (c) an unexpected exception from the search layer itself.  Either way
-      the message includes the underlying reason.
+      input-validation style; carries ``recovery: "fix_input"``), (b) the doc
+      index failed to build or initialise (``doc_index_state == "error"``) —
+      this is a *permanent* condition until ``refresh`` rebuilds it, unlike
+      the transient ``not_ready`` case above (carries ``recovery:
+      "refresh"``) — or (c) an unexpected exception from the search layer
+      itself (carries ``recovery: "unknown"``).  Either way the message
+      includes the underlying reason.
 
     - ``not_found`` — the store is ready and the search returned zero results.
       This only happens when the collection is empty (semantic search over a
@@ -94,7 +107,7 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
         result is impossible: zero matches map to ``not_found``, not ``ok``.
     """
     if not query or not query.strip():
-        return error("query must be a non-empty string")
+        return error("query must be a non-empty string", recovery=RECOVERY_FIX_INPUT)
 
     limit = max(1, limit)
 
@@ -113,7 +126,8 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
         if doc_state == DOC_STATE_ERROR:
             return error(
                 "The documentation index failed to initialise and is unavailable: "
-                f"{doc_err or 'unknown error'}. Run the refresh tool to rebuild it."
+                f"{doc_err or 'unknown error'}. Run the refresh tool to rebuild it.",
+                recovery=RECOVERY_REFRESH,
             )
         return not_ready(DOC_INDEXING_RETRY_MESSAGE)
 
@@ -136,7 +150,7 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
         return not_ready(DOC_INDEXING_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("search_docs: store.search raised for query %r", query)
-        return error(f"Documentation search error: {exc}")
+        return error(f"Documentation search error: {exc}", recovery=RECOVERY_UNKNOWN)
 
     if not hits:
         return not_found(

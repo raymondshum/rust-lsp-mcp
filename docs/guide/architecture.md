@@ -112,6 +112,12 @@ four possible values, defined in [`envelope.py`](../../src/rust_lsp_mcp/envelope
 | `not_found` | The thing asked about does not exist. |
 | `error` | Bad input, an internal failure, *or* a permanently failed analyzer/doc index (see §3) — the `refresh` tool is the recovery path in that last case. A human-readable message is included. |
 
+`not_ready` and `error` envelopes also carry an additive `recovery` field — a
+single machine-readable hint (`"fix_input"` / `"refresh"` / `"poll_status"` /
+`"unknown"`) at the next action, so a caller can branch on it directly instead
+of parsing `message` text. `not_ready` always carries `"poll_status"`. See
+[Tool reference](tools.md#the-recovery-field) for the full values table.
+
 **The distinction between `ok` with an empty list and `not_found` is
 deliberate and important.**
 
@@ -181,6 +187,12 @@ and the store logic in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py).
 ---
 
 ## 7. Refreshing the index
+
+**Blast radius:** `refresh` tears down and re-indexes the single global
+analyzer shared by the whole server — every other tool returns `not_ready`
+for every caller until re-indexing completes, which can take minutes on
+large projects. It should not be called mid-task unless the index is
+actually stale or broken.
 
 The `refresh` tool rebuilds everything from scratch:
 

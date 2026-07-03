@@ -6,6 +6,8 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 from rust_lsp_mcp.analyzer import (
     INDEXING_RETRY_MESSAGE,
     TORN_DOWN_RETRY_MESSAGE,
@@ -24,7 +26,7 @@ from rust_lsp_mcp.envelope import lsp_failure, not_ready, ok
 _log = logging.getLogger(__name__)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def document_symbols(file: str) -> dict[str, Any]:
     """List all symbols declared in a single Rust source file (flat outline).
 
@@ -67,7 +69,8 @@ async def document_symbols(file: str) -> dict[str, Any]:
       the queried ``file`` argument.
 
     - ``not_ready`` — the analyzer is still indexing; retry after
-      ``analyzer_status`` reports ``"ready"``.
+      ``analyzer_status`` reports ``"ready"``.  Carries
+      ``recovery: "poll_status"``.
 
     - ``error`` — the LSP layer raised an exception.  This happens for
       non-existent or unreadable file paths (multilspy raises rather than
@@ -75,7 +78,9 @@ async def document_symbols(file: str) -> dict[str, Any]:
       from ``ok``+``symbols=[]``, which means the file is valid but has no symbols.
       ``error`` is also returned when ``file`` is not a workspace-relative path
       that stays inside the workspace root (absolute paths and ``..``-escaping
-      paths are rejected immediately, without calling the analyzer).
+      paths are rejected immediately, without calling the analyzer).  Carries
+      ``recovery: "fix_input"`` for the file-path validation failure, or
+      ``"unknown"`` for the catch-all LSP-exception fallback.
 
     Positions are 1-indexed (the helper converts from LSP 0-based internally).
     Candidates missing both a ``location`` and a top-level ``range``, or with an

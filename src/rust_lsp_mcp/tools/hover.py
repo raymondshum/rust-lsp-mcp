@@ -6,6 +6,7 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import logging
 from typing import Annotated, Any
 
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from rust_lsp_mcp.analyzer import (
@@ -15,7 +16,7 @@ from rust_lsp_mcp.analyzer import (
     AnalyzerTornDownError,
 )
 from rust_lsp_mcp.core import get_manager, mcp, require_ready, validate_workspace_file
-from rust_lsp_mcp.envelope import error, lsp_failure, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import RECOVERY_FIX_INPUT, error, lsp_failure, not_found, not_ready, ok
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ def _contents_to_str(contents: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def hover(
     file: str,
     line: Annotated[
@@ -105,13 +106,16 @@ async def hover(
       This is NOT the same as ``ok``+empty.
 
     - ``not_ready`` — the analyzer is still indexing; retry after
-      ``analyzer_status`` reports ``"ready"``.
+      ``analyzer_status`` reports ``"ready"``.  Carries
+      ``recovery: "poll_status"``.
 
     - ``error`` — invalid input (line/character < 1) or an unexpected
       exception from the LSP layer; includes a message.  ``file`` must be a
       workspace-relative path that does not resolve outside the workspace
       root (absolute paths and ``..``-escaping paths are rejected
-      immediately, without calling the analyzer).
+      immediately, without calling the analyzer).  Carries
+      ``recovery: "fix_input"`` for the position/path validation failures
+      above, or ``"unknown"`` for the catch-all LSP-exception fallback.
 
     Positions are 1-indexed (same convention as ``find_symbol`` output).
     Nothing to hover → ``not_found``; rust-analyzer returns the info as
@@ -129,7 +133,10 @@ async def hover(
     """
     # 1. Input validation.
     if line < 1 or character < 1:
-        return error(f"line and character must be >= 1 (got line={line}, character={character})")
+        return error(
+            f"line and character must be >= 1 (got line={line}, character={character})",
+            recovery=RECOVERY_FIX_INPUT,
+        )
 
     # 2. Validate the file path (reject absolute/escaping paths before the
     # analyzer ever sees them).  The normalized form is forwarded so a

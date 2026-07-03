@@ -10,13 +10,15 @@ import asyncio
 import subprocess
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 from rust_lsp_mcp.core import get_manager, mcp
 from rust_lsp_mcp.doc_store import doc_store_state
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def status() -> dict[str, Any]:
     """Return the full status of the rust-analyzer backend and the doc index.
 

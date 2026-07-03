@@ -9,12 +9,14 @@ rust-analyzer index, so it never returns ``not_ready``.
 import pathlib
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 from rust_lsp_mcp.core import get_manager, mcp, validate_workspace_file
 from rust_lsp_mcp.envelope import error, ok
 from rust_lsp_mcp.settings import get_settings
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def validate_file_path(file: str) -> dict[str, Any]:
     """Check whether a workspace path exists and report its absolute path and size.
 
@@ -40,8 +42,10 @@ def validate_file_path(file: str) -> dict[str, Any]:
 
       ``exists: false`` is a valid answer, not an error.
 
-    - ``error`` — a genuine failure: the workspace root is unconfigured, or
-      ``file`` fails the workspace containment rule.
+    - ``error`` — a genuine failure: the workspace root is unconfigured
+      (carries the default ``recovery: "unknown"`` — this is a server-side
+      misconfiguration, not a client input mistake), or ``file`` fails the
+      workspace containment rule (carries ``recovery: "fix_input"``).
 
     Containment rule: identical to the position tools
     (``core.validate_workspace_file``) so this tool's verdict never

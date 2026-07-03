@@ -21,6 +21,8 @@ so it passes on both branches.
 
 import asyncio
 
+from mcp.types import Tool
+
 # Triggers rust_lsp_mcp.tools._register_all(), which imports every
 # tools/<name>.py submodule and registers its @mcp.tool()-decorated function.
 import rust_lsp_mcp.tools  # noqa: F401
@@ -90,3 +92,52 @@ def test_no_registered_tool_name_is_private() -> None:
     assert not private_leaks, (
         f"Private-looking tool names leaked onto the MCP app: {private_leaks!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CC-1 — ToolAnnotations (readOnlyHint / destructiveHint) on registered tools.
+# ---------------------------------------------------------------------------
+
+# Nav/read-only tools that must carry readOnlyHint=True. A subset of
+# _CORE_TOOL_NAMES minus `refresh` (the one mutating tool) — deliberately not
+# `validate_file_path` (branch-specific, per the module docstring above).
+_READ_ONLY_CORE_TOOL_NAMES = _CORE_TOOL_NAMES - {"refresh"}
+
+
+def _list_tools_by_name() -> dict[str, Tool]:
+    async def _scenario() -> list[Tool]:
+        return await mcp.list_tools()
+
+    tools = asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
+    return {tool.name: tool for tool in tools}
+
+
+def test_core_read_only_tools_have_read_only_hint() -> None:
+    """Every core read-only tool must advertise annotations.readOnlyHint=True.
+
+    CC-1 (2026-07-02 usability review): clients need a machine-readable signal
+    that these tools never mutate server state, without parsing descriptions.
+    """
+    by_name = _list_tools_by_name()
+    for name in sorted(_READ_ONLY_CORE_TOOL_NAMES):
+        tool = by_name[name]
+        assert tool.annotations is not None, f"{name}: no annotations at all"
+        assert tool.annotations.readOnlyHint is True, (
+            f"{name}: expected annotations.readOnlyHint=True, got {tool.annotations!r}"
+        )
+
+
+def test_refresh_has_destructive_hint() -> None:
+    """`refresh` is the one mutating/destructive tool — its annotations must say so.
+
+    CC-1 (2026-07-02 usability review): refresh tears down and re-indexes the
+    global analyzer, so it must be flagged readOnlyHint=False,
+    destructiveHint=True, idempotentHint=False (repeated calls each restart a
+    fresh in-flight re-index — not a no-op after the first call).
+    """
+    by_name = _list_tools_by_name()
+    tool = by_name["refresh"]
+    assert tool.annotations is not None
+    assert tool.annotations.readOnlyHint is False
+    assert tool.annotations.destructiveHint is True
+    assert tool.annotations.idempotentHint is False
