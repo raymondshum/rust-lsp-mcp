@@ -125,7 +125,7 @@ Full reference, including every flag: `docs/guide/cli.md`.
 | Code | Meaning                              | What to do                                                                                   |
 |------|---------------------------------------|-----------------------------------------------------------------------------------------------|
 | 0    | `ok` **or** `not_found`               | `not_found` is an ANSWER, not a failure (same empty≠error doctrine as above) — don't retry it. |
-| 1    | tool `error`                          | Read the JSON envelope's `message`/`recovery` field on stdout.                                |
+| 1    | tool `error`                          | Read the JSON envelope's `message`/`recovery` field on stdout. If EVERY nav call errors with a generic "File read failed"-style message (or `status` is `ready` with `doc_index_chunk_count: 0`), don't retry — that's a mount-permission/SELinux issue; see docs/guide/cli.md Troubleshooting. |
 | 2    | daemon reachable but `not_ready`      | Retry with `--wait`. (Argparse usage errors — bad/missing arguments — also exit 2; tell them apart by stderr usage text plus empty stdout: a real envelope always prints JSON to stdout.) |
 | 3    | daemon unreachable                    | Start it from the rust-lsp-mcp repo directory: `RUST_PROJECT=/abs/path/to/project docker compose up -d rust-lsp-mcp`. |
 
