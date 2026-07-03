@@ -29,6 +29,57 @@ Check this list at these lifecycle checkpoints (see
 
 ## Open
 
+### KI-10 — Call-hierarchy tool needs a design session before implementation
+- **Where:** prospective `incoming_calls` tool (not yet implemented) — LSP
+  `textDocument/prepareCallHierarchy` + `callHierarchy/incomingCalls`,
+  composed through [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)'s
+  `_race_teardown` (KI-9).
+- **What:** `incoming_calls` via LSP callHierarchy is the right primitive, but the
+  design must resolve: `selectionRange` (not `range.start`) mapping so positions
+  round-trip, prepare-null → `not_found` vs incomingCalls-`[]` → ok+empty semantics,
+  `fromRanges` retention, `CallHierarchyItem.data` threading, and KI-9
+  single-coroutine composition through `_race_teardown`.
+- **Why it matters:** A two-request (`prepareCallHierarchy` then
+  `incomingCalls`) delegate must still race teardown as a single coroutine per
+  KI-9's rule ("every `self._lsp` await must go through `_race_teardown`"), and
+  the position/null-vs-empty ambiguities mirror the exact class of bugs UR-10
+  and UR-11 already found in the existing tools — building this without a
+  grill/plan session risks repeating both.
+- **Status:** open — needs a grill/plan session before implementation.
+  Reference: [docs/audit/2026-07-02-usability-review.md](../audit/2026-07-02-usability-review.md) UR-17.
+
+### KI-11 — Out-of-workspace navigation degrades to a misleading `not_found`
+- **Where:** [src/rust_lsp_mcp/core.py](../../src/rust_lsp_mcp/core.py)
+  `location_to_external` (~line 364) · [src/rust_lsp_mcp/tools/goto_definition.py](../../src/rust_lsp_mcp/tools/goto_definition.py)
+  (the `mapped is None` skip at line 143, falling through to the same
+  `not_found` at line 150 as a genuine zero-result answer).
+- **What:** `location_to_external` drops std/dependency locations (they resolve
+  outside `repo_root`), so `goto_definition` on e.g. `Vec` silently skips the
+  location and reports "No definition found" — the identical message it uses
+  when there really is no definition — teaching agents the symbol doesn't
+  exist. `find_symbol`'s Batch-A message (PR #108) now explains the workspace
+  boundary for that tool, but `goto_definition`'s `not_found` path does not.
+- **Why it matters:** An agent asking "where is `Vec` defined?" gets a
+  false-negative indistinguishable from "you misspelled this / it doesn't
+  exist," which is worse than an honest "outside workspace" answer and can
+  send the agent down an unproductive debugging path.
+- **Status:** open. Reference: docs/audit/2026-07-02-usability-review.md,
+  Cross-cutting findings, completeness critic (CC-2).
+
+### KI-12 — No version introspection
+- **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py)
+  · [src/rust_lsp_mcp/tools/diagnostics.py](../../src/rust_lsp_mcp/tools/diagnostics.py)
+  (`status` / `analyzer_status`).
+- **What:** `status`/`analyzer_status` surface no server, rust-analyzer, or
+  multilspy version, leaving mismatched/stale analyzer binaries undiagnosable
+  in-band.
+- **Why it matters:** A stale or mismatched rust-analyzer binary can produce
+  subtly wrong navigation results (missing features, different position
+  semantics) with no in-band signal to distinguish "healthy but old" from
+  "healthy and current," pushing diagnosis outside the MCP boundary.
+- **Status:** open. Reference: docs/audit/2026-07-02-usability-review.md,
+  Cross-cutting findings, completeness critic (CC-5).
+
 ---
 
 ## Resolved
