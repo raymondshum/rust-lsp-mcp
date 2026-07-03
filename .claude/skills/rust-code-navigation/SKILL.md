@@ -41,6 +41,92 @@ Reach for this MCP server when ALL of these hold:
 3. Feed that position into `goto_definition` / `find_references` / `hover`.
    **Positions are 1-based; `character` counts Unicode codepoints.**
 
+## How to invoke
+
+Two ways to reach these tools — check your own tool list first.
+
+- **MCP tools available** (`find_symbol`, `goto_definition`, etc. appear in
+  your tool list): use them exactly as described above.
+- **MCP tools NOT available** (e.g. a Bash-only subagent): use the `rust-lsp`
+  CLI over a shell instead. Same server, same semantics, same position
+  protocol — just a different transport.
+
+### Reaching the CLI
+
+The CLI is a thin client for a warm daemon that must already be running.
+Where your shell sits relative to that daemon decides the prefix:
+
+- **Inside the daemon's own environment** (a shell sharing its
+  container/env — e.g. this repo's dev container running the daemon
+  directly): call it with no prefix — `rust-lsp <cmd> …`.
+- **From the host, or any other shell:** `exec` into the daemon container.
+  Auto-detect the engine the way `scripts/prime-cache.sh` does — prefer
+  `docker` if its daemon answers, else fall back to `podman`:
+
+  ```sh
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    ENGINE=docker
+  else
+    ENGINE=podman
+  fi
+  "$ENGINE" exec rust-lsp-mcp rust-lsp <cmd> …
+  ```
+
+  The container name is `rust-lsp-mcp` by default, or `rust-lsp-mcp-isolated`
+  for the network-isolated compose variant — substitute accordingly.
+
+### First call after the daemon starts
+
+rust-analyzer indexing takes seconds to a couple of minutes after container
+start. Make your first call in a session ride that out with `--wait`, given
+**before** the subcommand:
+
+```
+rust-lsp --wait 180 status
+```
+
+Once `status` reports readiness, later calls don't need `--wait`.
+
+### Command reference
+
+Same intents as the table above, in CLI form. Positions are still 1-indexed
+with `character` counting Unicode codepoints.
+
+| Intent                                  | CLI command                                                                                |
+|------------------------------------------|---------------------------------------------------------------------------------------------|
+| Locate a symbol by (partial) name        | `rust-lsp find-symbol NAME`                                                                  |
+| "Where is this defined?"                 | `rust-lsp goto-definition FILE LINE CHARACTER`                                               |
+| "Who uses / calls this?"                 | `rust-lsp find-references FILE LINE CHARACTER [--include-declaration] [--include-source]`    |
+| Type + doc for the thing at a position   | `rust-lsp hover FILE LINE CHARACTER`                                                          |
+| Everything defined in one file           | `rust-lsp document-symbols FILE`                                                              |
+| NL question over the project's docs      | `rust-lsp search-docs QUERY [--limit N]`                                                      |
+| Is the index ready?                      | `rust-lsp status`                                                                             |
+| Rebuild the index                        | `rust-lsp refresh` — **see the warning below first**                                          |
+| Does this path exist in the workspace?   | `rust-lsp validate-file-path FILE`                                                            |
+| Client/server version info               | `rust-lsp version`                                                                            |
+
+Full reference, including every flag: `docs/guide/cli.md`.
+
+### Exit codes
+
+| Code | Meaning                              | What to do                                                                                   |
+|------|---------------------------------------|-----------------------------------------------------------------------------------------------|
+| 0    | `ok` **or** `not_found`               | `not_found` is an ANSWER, not a failure (same empty≠error doctrine as above) — don't retry it. |
+| 1    | tool `error`                          | Read the JSON envelope's `message`/`recovery` field on stdout.                                |
+| 2    | daemon reachable but `not_ready`      | Retry with `--wait`. (Argparse usage errors — bad/missing arguments — also exit 2; tell them apart by stderr usage text plus empty stdout: a real envelope always prints JSON to stdout.) |
+| 3    | daemon unreachable                    | Start it: `docker compose up -d`.                                                              |
+
+The envelope JSON always goes to stdout; diagnostics/hints go to stderr.
+
+### `refresh` is shared — use it carefully
+
+The daemon is one process shared by every caller of this project's tools.
+`refresh` tears down and rebuilds the whole index — every other caller's
+navigation calls will see `not_ready` until it finishes. Only run it when
+you have a specific reason to believe the index is stale (e.g. the project's
+source changed underneath it); don't call it speculatively or to "fix" an
+unrelated error.
+
 ## When NOT to use it
 - **Not a Rust project** → the server can't help; use normal search.
 - **You need to edit code** → it's strictly read-only; navigate here, edit
