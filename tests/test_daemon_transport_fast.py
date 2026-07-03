@@ -228,3 +228,15 @@ def test_compose_daemon_lifespan_propagates_body_exception(
     anyio.run(_scenario)
 
     assert events == ["core_enter", "original_enter", "original_exit", "core_exit"]
+
+
+def test_http_port_out_of_range_rejected() -> None:
+    """RLM_HTTP_PORT outside 1..65535 must fail settings validation loudly
+    (clean pydantic error at startup, not an OverflowError at the uvicorn
+    bind) — C1 adversarial hardening."""
+    import pydantic
+    import pytest
+
+    for bad in (0, -5, 99999):
+        with pytest.raises(pydantic.ValidationError):
+            Settings(http_port=bad, _env_file=None)  # ty: ignore[unknown-argument]

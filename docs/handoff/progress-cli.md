@@ -25,9 +25,9 @@ the date in the log below.
 
 | Phase | Prompt | Depends on | Parallelizable? | State |
 |-------|--------|-----------|-----------------|-------|
-| C1 — Daemon transport | [cli-phase-1-daemon.md](cli-phase-1-daemon.md) | — | With C3 on the fast tier only; podman integration gates serialize | not-started |
+| C1 — Daemon transport | [cli-phase-1-daemon.md](cli-phase-1-daemon.md) | — | With C3 on the fast tier only; podman integration gates serialize | pr-open |
 | C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | not-started |
-| C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | pr-open |
+| C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | done |
 | C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | not-started |
 | C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | not-started |
 
@@ -85,3 +85,22 @@ C3 ──┘ └────> C5      (C4 ∥ C5 after C2; disjoint files)
   (PermissionError/garbage-stdout/KeyboardInterrupt/capture-once-on-failure all
   held). Record note: none — phase touched no seams. Built in parallel with C1 on
   the fast tier; integration gate ran serially.
+- 2026-07-03 Phase C3 → **done**. PR #121 merged to `main` (71656e8) after green CI;
+  #115 auto-closed. This flip rides in C1's PR (direct pushes to main blocked).
+- 2026-07-03 Phase C1 → **pr-open**. Daemon transport built, reviewed, QA'd (2 rounds),
+  red-teamed — all gates green. Shipped: `Settings.transport`/`http_port` (range-
+  validated); conditional FastMCP construction via `_build_mcp()` (stdio byte-identical
+  bar a recorded import-time `get_settings()`; HTTP: no lifespan, loopback hard-coded,
+  stateless+json); `compose_daemon_lifespan()` nesting `_lifespan` wholesale + owned
+  `uvicorn.run()`; reusable in-process daemon fixture (self-cleaning reload-back) +
+  warm-across-connections and refresh/nav teardown-race integration tests (fail_after-
+  bounded). Gates: fast tier 720 passed; review `minor` (timeout bounds + fixture
+  reload-back applied); QA round 1 FAILED (daemon_app fixture never registered —
+  conftest re-export + fast-tier setup-plan guard added); QA round 2 GREEN (36 passed
+  + 1 documented skip, 10m19s, both daemon criteria proven live); adversarial HIGH
+  `no-breaks` (once-per-process proven at source+live; loopback unreachable by any
+  env; double-refresh clean; typo'd RLM_TRANSPORT fails loud). Post-adversarial
+  hardening applied: http_port Field(ge=1, le=65535) + regression test (record note 1).
+  Record notes: import-time get_settings() blast radius (review + adversarial note 3);
+  race test can pass without exercising the drain window (covered by lifecycle-races
+  fake tests + adversarial double-refresh probe); FASTMCP_LOG_LEVEL pre-existing.

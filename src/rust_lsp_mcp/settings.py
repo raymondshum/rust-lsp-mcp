@@ -96,8 +96,10 @@ class Settings(BaseSettings):
     # no configuration path can bind a non-loopback address (D3/D4).
     transport: Literal["stdio", "streamable-http"] = "stdio"
 
-    # TCP port for streamable-http mode; ignored in stdio mode.
-    http_port: int = 8000
+    # TCP port for streamable-http mode; ignored in stdio mode. Range-validated
+    # so a bad RLM_HTTP_PORT fails with a clean pydantic error at startup
+    # instead of an OverflowError at the uvicorn bind (adversarial note, C1).
+    http_port: int = Field(default=8000, ge=1, le=65535)
 
     @model_validator(mode="after")
     def _warn_deprecated_ripgrep_src(self) -> "Settings":
