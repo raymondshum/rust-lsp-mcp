@@ -1,5 +1,9 @@
 # CLI-frontend effort — session handoff
 
+> **COMPLETE (2026-07-03):** all five phases shipped (PRs #121–#125); see
+> [progress-cli.md](progress-cli.md). This seed is retained as the historical
+> record of the effort's preferences and gotchas.
+
 Seed for resuming the **CLI-frontend build** (warm loopback streamable-HTTP
 daemon + import-light `rust-lsp` CLI + capability-branched skill) in a fresh
 session. Written 2026-07-02, immediately after the planning close-out merged

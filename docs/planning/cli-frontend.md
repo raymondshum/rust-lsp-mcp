@@ -10,7 +10,8 @@ while keeping the MCP-over-stdio server unchanged. Analogy: use it like the
 adversarial plan review (2 independent reviewers) DONE 2026-07-02 — amendments
 applied below.** U1–U3 and U5–U8 are `VERIFIED` (cached in `docs/reference/` —
 see inventory); U4 is `UNVERIFIED — runtime-only` (measured in the podman
-integration gate). **Frozen for the implementation cycle** — executed via the
+integration gate). **EXECUTED — all five phases done on `main` 2026-07-03** (PRs #121-#125;
+see the tracker's log for per-phase gate evidence). Was executed via the
 standard dispatcher with tracker
 [progress-cli.md](../handoff/progress-cli.md) and the per-phase prompts under
 `docs/handoff/` (see "Execution" at the end).

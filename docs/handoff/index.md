@@ -34,8 +34,8 @@ plan and `docs/reference/`; these files only orchestrate.
 
 - [cli-frontend-effort-handoff.md](cli-frontend-effort-handoff.md) — seed for executing the
   **CLI-frontend build** (phases C1–C5: daemon transport → `rust-lsp` CLI → KI-12 versions →
-  deploy/docs → skill). Planning merged in PR #118; tracker [progress-cli.md](progress-cli.md)
-  (gate-zero `not-run`); standing directive: fully-automated phases, orchestrator merges.
+  deploy/docs → skill). **Effort COMPLETE 2026-07-03** (PRs #121–#125); tracker
+  [progress-cli.md](progress-cli.md) holds the full per-phase gate record.
 
 Next-session seeds produced by the [session-handoff skill](../../.claude/skills/session-handoff/SKILL.md), which
 lives on `main` at `.claude/skills/session-handoff/SKILL.md` (its Bob adaptation lives on

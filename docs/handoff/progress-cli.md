@@ -29,7 +29,7 @@ the date in the log below.
 | C2 — `rust-lsp` CLI client | [cli-phase-2-cli.md](cli-phase-2-cli.md) | C1, C3 | No (single package build; needs C1's daemon fixture + C3's pinned version fields) | done |
 | C3 — KI-12 status versions | [cli-phase-3-versions.md](cli-phase-3-versions.md) | — | With C1 on the fast tier only; integration gates serialize | done |
 | C4 — Deployment + docs | [cli-phase-4-deploy-docs.md](cli-phase-4-deploy-docs.md) | C1, C2 | With C5 (disjoint files) | done |
-| C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | pr-open |
+| C5 — Skill revision | [cli-phase-5-skill.md](cli-phase-5-skill.md) | C2 | With C4 (disjoint files) | done |
 
 ## Dependency graph (what the orchestrator may fan out)
 
@@ -172,3 +172,8 @@ C3 ──┘ └────> C5      (C4 ∥ C5 after C2; disjoint files)
   byte-identical; skill↔docs consistency confirmed; optional KI-16 routing note
   applied). QA transcript recorded by orchestrator (sole writer), per the
   gate-zero-corrected DoD.
+- 2026-07-03 Phase C5 → **done**. PR #125 merged to `main` (667d981); post-merge CI
+  green. **C5 was the final phase — the CLI-frontend effort is COMPLETE: C1-C5 all
+  `done` on `main`** (PRs #121 #122 #123 #124 #125; planning PRs #118 #119 #120).
+  Runtime residue closed: U4 = 0.892s warm (recorded in C2's log + README). This
+  done-flip rides in its own close-out PR (no next phase to carry it).
