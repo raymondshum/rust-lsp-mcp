@@ -2,7 +2,7 @@
 
 # Documentation guide
 
-This is the documentation guide for the Rust code-navigation and documentation-search service. The README covers the quick start; these pages go deeper into how the system works and how to extend it. Each page is self-contained and links back here.
+The README covers the quick start; these pages go deeper into how the system works and how to extend it. Each page is self-contained and links back here.
 
 ## Pages
 
@@ -17,8 +17,21 @@ This is the documentation guide for the Rust code-navigation and documentation-s
 
 ## Where to start
 
-- **New users** — begin with the README quick start.
-- **Wiring the server into a client** — go to [Tools / API reference](tools.md) and [Configuration](configuration.md).
-- **An agent without MCP tool access** — go to [CLI reference](cli.md).
-- **Contributors** — go to [Development setup](development.md) and [Components](components.md).
-- **Understanding how the project is built (agentic workflow)** — go to [Agentic coding](agentic-coding.md).
+The guide has two tracks. Pick the one that matches what you want to do.
+
+**Operators — you want to *use* the server.** Start with the README quick start, then:
+
+- **Wiring the server into an AI assistant** — [Tools / API reference](tools.md) and [Configuration](configuration.md).
+- **Driving it from a shell-only agent (no MCP tools)** — [CLI reference](cli.md).
+
+**Contributors and engineers — you want to work *on* the server.**
+
+- **The design and request flow** — [Architecture](architecture.md).
+- **The code, module by module** — [Components](components.md).
+- **Setting up to build and test** — [Development setup](development.md).
+- **The libraries and tools it relies on** — [Dependencies](dependencies.md).
+- **How the project itself is built with Claude Code** — [Agentic coding](agentic-coding.md).
+
+Each guide page (not the README) carries `source_pins` frontmatter naming the source files it
+describes, checked by `scripts/check_doc_freshness.py` so the prose stays honest against the code — a
+convention that matters when you edit these pages.

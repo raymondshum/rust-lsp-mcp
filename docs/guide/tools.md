@@ -1,3 +1,35 @@
+---
+okf_version: "0.1"
+type: Guide
+title: Tool reference
+description: Every MCP tool the server exposes, with its inputs and exact envelope responses.
+tags: [guide, tier-a, tools]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: src/rust_lsp_mcp/tools/find_symbol.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/goto_definition.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/find_references.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/hover.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/document_symbols.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/search_docs.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/status.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/refresh.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/diagnostics.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/validate_file_path.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/envelope.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+---
+
 [← Back to the README](../../README.md) · [Documentation index](index.md)
 
 # Tool reference
@@ -470,6 +502,9 @@ Always `ok`, with these fields:
 | `doc_index_error` | string or `null` | Diagnostic message when `doc_index_state` is `"error"`, else `null`. |
 | `doc_index_chunk_count` | integer or `null` | Number of indexed Markdown chunks (a live `collection.count()`), or `null` when `doc_index_state != "ready"`. `0` is a valid, meaningful reading — a completed index over zero matching Markdown files (e.g. wrong `RLM_DOC_GLOB_PATTERNS`, empty/un-mounted project, or a project that genuinely ships no docs) — and is distinct from `null` ("not ready yet / no store"). Works whether the index was just rebuilt or adopted from a prior run. |
 | `preflight_warnings` | array of strings | Advisory-only diagnostics computed once at server startup: whether the configured `rust_analyzer_bin` resolves to an existing executable, and whether `project_root` exists and is a directory. An empty array means either "both checks passed" or "the preflight has not run yet" (e.g. some test contexts) — these are intentionally indistinguishable. Warnings here never affect `state`, `doc_index_state`, or the envelope `status` — they are a hint, not a failure signal. |
+| `server_version` | string or `null` | Installed `rust-lsp-mcp` package version, resolved fresh on every call. `null` if the distribution metadata isn't resolvable. |
+| `multilspy_version` | string or `null` | Installed `multilspy` package version, same resolution and `null`-degradation as `server_version`. |
+| `rust_analyzer_version` | string or `null` | The analyzer binary's `--version` output (e.g. `"rust-analyzer 0.3.x (<sha> <date>)"`), captured once when the analyzer manager starts and cached for the process lifetime — not re-run on every `status` call. `null` before a manager exists, or if the binary was missing, failed, or timed out at capture time. |
 
 **Caution on `stale`:** the comparison looks at committed versions only. If you
 have uncommitted edits in your working tree, `stale` will still be `false`. It
@@ -488,7 +523,10 @@ means "no committed changes since indexing began," not a freshness guarantee.
   "doc_index_state": "ready",
   "doc_index_error": null,
   "doc_index_chunk_count": 42,
-  "preflight_warnings": []
+  "preflight_warnings": [],
+  "server_version": "0.4.0",
+  "multilspy_version": "0.0.15",
+  "rust_analyzer_version": "rust-analyzer 0.3.2145-standalone (a1b2c3d 2026-06-01)"
 }
 ```
 
@@ -580,6 +618,43 @@ is therefore fast — rust-analyzer reuses its prior work.
 (`state == "error"`), and `ok` with a short message once it is ready. This
 tool has no everyday use; it exists to verify the gating mechanism during
 development and testing.
+
+---
+
+### `validate_file_path`
+
+Check whether a workspace-relative path exists, and report its absolute path
+and size. A lightweight filesystem probe that never touches rust-analyzer, so
+it is **ungated**: it works even while the analyzer is still indexing.
+
+**Inputs**
+
+| Name | Type | Required | Meaning |
+|---|---|---|---|
+| `file` | string | yes | Workspace-relative path to probe, e.g. `"src/main.rs"`. |
+
+**Returns**
+
+| Status | Fields |
+|---|---|
+| `ok` | `exists` (bool), `absolute_path` (str), `size_bytes` (int or `null`, populated only for a regular file). `exists: false` is a valid answer, not an error. |
+| `error` | `message`, `recovery` — the workspace root is unconfigured (`recovery: "unknown"`, a server-side misconfiguration), or `file` fails the workspace containment rule (`recovery: "fix_input"`). |
+
+Containment rule: identical to the position tools (absolute paths, even ones
+pointing inside the workspace, and `..`-escaping paths are rejected). The
+check is purely lexical, and the *normalized* path is what gets probed, so a
+symlink combined with `..` cannot resolve outside the workspace.
+
+**Example response**
+
+```json
+{
+  "status": "ok",
+  "exists": true,
+  "absolute_path": "/project/src/main.rs",
+  "size_bytes": 1423
+}
+```
 
 ---
 

@@ -1,26 +1,84 @@
+---
+okf_version: "0.1"
+type: Guide
+title: Components — source code tour
+description: Module-by-module tour of the rust-lsp-mcp server and the rust-lsp CLI client source.
+tags: [guide, tier-b, components]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: src/rust_lsp_mcp/core.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/analyzer.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/server.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/envelope.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/positions.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/settings.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/doc_store.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/doc_chunking.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/_main.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/__main__.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/__init__.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/find_symbol.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/goto_definition.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/find_references.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/hover.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/document_symbols.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/search_docs.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/status.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/refresh.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/diagnostics.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/validate_file_path.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_cli/cli.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_cli/client.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+---
+
 [← Back to the README](../../README.md) · [Documentation index](index.md)
 
 # Components — source code tour
 
-The code lives under `src/rust_lsp_mcp/`. The server is small and organized so
-that each tool is its own file and the shared machinery lives in a few core
-modules. A request enters through a tool, passes a readiness check, reaches
-either rust-analyzer or the documentation search, and comes back as a small
-status-tagged result.
+The server lives under `src/rust_lsp_mcp/`; the CLI client that talks to it
+lives in the sibling package `src/rust_lsp_cli/`. The server is small and
+organized so that each tool is its own file and the shared machinery lives in
+a few core modules. A request enters through a tool, passes a readiness
+check, reaches either rust-analyzer or the documentation search, and comes
+back as a small status-tagged result.
 
 ## Module responsibilities at a glance
 
 | Module | One-line responsibility |
 |---|---|
-| `__init__.py`, `_main.py`, `__main__.py`, `server.py` | Entry points — two equivalent launch paths lead here |
-| `core.py` | App instance, readiness gate, shared translation helpers |
-| `analyzer.py` | rust-analyzer lifecycle: start, state tracking, LSP delegate methods, restart |
+| `__init__.py`, `_main.py`, `__main__.py`, `server.py` | Entry points — two equivalent launch paths lead here, into a server that runs either stdio (default) or the streamable-HTTP daemon |
+| `core.py` | App instance, readiness gate, shared translation and path-containment helpers |
+| `analyzer.py` | rust-analyzer lifecycle: start, state tracking (including the `error` state), LSP delegate methods, restart |
 | `positions.py` | Converts 1-indexed (human) ↔ 0-indexed (protocol) positions |
 | `envelope.py` | Builds the `ok` / `not_ready` / `not_found` / `error` response objects |
 | `settings.py` | All configuration options with defaults, loaded from `.env` or environment |
 | `doc_chunking.py` | Splits Markdown into embeddable pieces for documentation search |
 | `doc_store.py` | ChromaDB-backed documentation search store |
 | `tools/` | One file per MCP tool; importing the package registers them all |
+| `rust_lsp_cli/cli.py`, `rust_lsp_cli/client.py` | The `rust-lsp` CLI client: argparse surface + dispatch, and the streamable-HTTP MCP client it talks to the daemon with |
 
 ---
 
@@ -38,8 +96,15 @@ There are two equivalent ways to start the server:
 Both paths end at `_main.py`, which re-exports `main` from `server.py`.
 `server.py` does two things at import time: it imports `rust_lsp_mcp.tools`
 (which triggers auto-discovery of every tool file) and imports the `mcp` app
-object from `core.py`. The `main()` function simply calls `mcp.run()`, which
-starts the FastMCP server over stdio.
+object from `core.py`. `main()` branches on `settings.transport`: the default
+`"stdio"` calls `mcp.run()`, which starts the FastMCP server over stdio (one
+process per client). `"streamable-http"` instead runs `_run_streamable_http()`,
+which starts a warm HTTP daemon on `127.0.0.1` (host is hard-coded, never
+settings-derived) that the `rust-lsp` CLI client talks to — see
+[CLI reference](cli.md). This daemon+client shape replaced an earlier
+warm-start pattern of running a second stdio server inside the same
+container; two servers against one Chroma store was a cross-process
+single-writer hazard. There is exactly one server process per container.
 
 `server.py` also re-exports `find_symbol` to support a legacy import path used
 by integration tests; new code should import tools from `rust_lsp_mcp.tools.*`
@@ -66,10 +131,11 @@ the error is logged and swallowed — navigation tools continue to work normally
 On shutdown both are cleaned up in reverse order.
 
 **The readiness gate.** `require_ready()` is a single check that every
-navigation tool calls before doing anything. If rust-analyzer is still indexing
-(or hasn't started), it returns a `not_ready` envelope immediately. If the
-analyzer is ready it returns `None` and the tool proceeds. The pattern in every
-tool file looks like:
+navigation tool calls before doing anything. If rust-analyzer's background run
+has permanently failed (`state == "error"`), it returns an `error` envelope
+with `recovery="refresh"`. If it is still indexing (or hasn't started), it
+returns a `not_ready` envelope. If the analyzer is ready it returns `None` and
+the tool proceeds. The pattern in every tool file looks like:
 
 ```python
 if (guard := require_ready()) is not None:
@@ -97,6 +163,12 @@ tool files, `core.py` provides three helpers that all navigation tools reuse:
 - `symbol_to_external(sym, repo_root, default_file)` — converts a full symbol
   info dict (from either a workspace-symbol or document-symbol query) into the
   external representation, handling both shapes multilspy can return.
+
+**Path containment.** `validate_workspace_file(file)` rejects a client-supplied
+`file` argument that is empty, absolute, or `..`-escapes the workspace root
+before the analyzer delegate is ever called, and returns the normalized path
+tools must forward. Every position-taking tool and `validate_file_path` call
+it first.
 
 **Tools auto-discovery.** Each file in `tools/` registers itself by calling
 `@mcp.tool()` at import time. No central list is maintained; adding a new tool
@@ -129,6 +201,11 @@ from `"indexing"` to `"ready"` and set the `_lsp` reference. This means the
 "ready"` and `_lsp` is set. The two-condition check closes the teardown window
 where the background task has already cleared `_lsp` but `state` hasn't been
 reset yet.
+
+If the background task raises before reaching quiescence, `state` becomes
+`"error"` and `error_message` carries a diagnostic string; `state` stays
+`"error"` until `restart()` is called (the `refresh` tool's recovery path),
+which clears the error and resets `state` to `"indexing"`.
 
 The manager exposes five **delegate methods** that tools call instead of
 accessing multilspy directly:
@@ -383,9 +460,44 @@ dropping a new file in `tools/` — no central registry edit is needed.
 | [`status.py`](../../src/rust_lsp_mcp/tools/status.py) | `status` — full status report: analyzer state/staleness (indexed vs. current commit), doc-index state/chunk count, and advisory startup preflight warnings |
 | [`diagnostics.py`](../../src/rust_lsp_mcp/tools/diagnostics.py) | `analyzer_status` (minimal one-field readiness check) and `probe` (gated no-op for testing the readiness gate) |
 | [`refresh.py`](../../src/rust_lsp_mcp/tools/refresh.py) | `refresh` — tear down the analyzer and doc store and rebuild both from scratch |
+| [`validate_file_path.py`](../../src/rust_lsp_mcp/tools/validate_file_path.py) | `validate_file_path` — check whether a workspace path exists and report its absolute path and size; an analyzer-free filesystem probe, ungated |
 
 See the [Tools / API reference](tools.md) for inputs, outputs, and examples for
 each tool.
+
+---
+
+## rust_lsp_cli/ — the CLI client
+
+**Files:** [`cli.py`](../../src/rust_lsp_cli/cli.py) · [`client.py`](../../src/rust_lsp_cli/client.py)
+
+`rust-lsp` is the command-line client that talks to a warm streamable-HTTP
+daemon (a `server.py` process started with `RLM_TRANSPORT=streamable-http`).
+It runs no server of its own.
+
+**`cli.py`** builds the argparse surface: one subcommand per navigation tool,
+plus `search-docs`, `status`, `refresh`, `validate-file-path`, and `version`. A `COMMANDS`
+table maps each kebab-case subcommand to an MCP tool name and an
+argument-builder function; the same table backs a parity test that checks it
+against `mcp.list_tools()`. Only stdlib imports (`argparse`/`json`/`os`/`sys`)
+run at module level — `rust_lsp_cli.client` is imported lazily inside `main()`
+so `--help` and argparse-only invocations stay fast, and this package never
+imports `rust_lsp_mcp` at all (that would pull in the full server, including a
+second Chroma client). Exit codes are exact: `0` ok/not_found, `1` error, `2`
+not_ready, `3` daemon unreachable (`EXIT_OK` / `EXIT_ERROR` /
+`EXIT_NOT_READY` / `EXIT_UNREACHABLE`). `--wait SECS` polls `status` every 2s
+until the daemon reports `state == "ready"`, riding through daemon boot
+(connection-refused → not_ready → ready).
+
+**`client.py`** is the streamable-HTTP MCP client half: `call_tool_sync` opens
+one connection per call, calls a tool, and parses the envelope from
+`content[0].text` (falling back to `structuredContent`), returning
+`(envelope, None)` on success or `(None, exc)` for any transport-level failure
+(connection refused, handshake failure, timeout) — never raises. `wait_for_ready`
+implements the `--wait` polling loop.
+
+See the [CLI reference](cli.md) for every subcommand, its arguments, and exit-code
+examples.
 
 ---
 
@@ -395,5 +507,6 @@ each tool.
   the system, key design ideas, and the readiness model.
 - [Tools / API reference](tools.md) — every tool, its inputs, and the exact
   responses it returns.
+- [CLI reference](cli.md) — every `rust-lsp` subcommand, its arguments, and exit codes.
 - [Dependencies](dependencies.md) — the main libraries and external tools the
   project relies on, and why.

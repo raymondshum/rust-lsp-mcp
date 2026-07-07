@@ -1,3 +1,19 @@
+---
+okf_version: "0.1"
+type: Guide
+title: Agentic coding — how this project is built with Claude Code
+description: Maps the delivery lifecycle, orchestration model, and Claude Code configuration that build this project.
+tags: [guide, tier-b, agentic-coding]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: CLAUDE.md
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: docs/conventions/lifecycle.md
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: docs/conventions/index.md
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+---
+
 [← Back to the README](../../README.md) · [Documentation index](index.md)
 
 # Agentic coding — how this project is built with Claude Code
@@ -100,9 +116,14 @@ mounts).
   convention ([claude-md-layout.md](../conventions/claude-md-layout.md)).
 - **`.claude/skills/`** — project-local [Claude Code skills](https://docs.claude.com/en/docs/claude-code/skills)
   checked into the repo: `grill-me` (drives the grilling interview, reading
-  [grill-me.md](../conventions/grill-me.md) for project style) and `mcp-builder`
-  (a guide for building MCP servers). Other skills used during development (e.g.
-  `code-review`) come from the Claude Code harness, not the repo.
+  [grill-me.md](../conventions/grill-me.md) for project style), `doc-sweep` (the
+  verification-backed sweep that authors and refreshes the `docs/guide/` pages),
+  `mcp-builder` (a guide for building MCP servers), `rust-code-navigation` (drives
+  this server's own tools for semantic navigation instead of grep), `session-handoff`
+  (writes a next-session handoff doc under `docs/handoff/`), and `resolve-defect-sweep`
+  (a one-off effort skill for driving a specific defect-sweep to completion). Other
+  skills used during development (e.g. `code-review`) come from the Claude Code
+  harness, not the repo.
 - **`.claude/settings.local.json`** — a developer's local, **un-committed**
   permission allowlist (e.g. pre-approving Context7 lookups to cut prompts).
   Claude Code manages it; you don't need to recreate it. There is no committed

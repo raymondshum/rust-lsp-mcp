@@ -1,8 +1,34 @@
+---
+okf_version: "0.1"
+type: Guide
+title: Architecture
+description: How rust-lsp-mcp's server, analyzer, and doc-search pieces fit together and why.
+tags: [guide, tier-b, architecture]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: src/rust_lsp_mcp/server.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/core.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/analyzer.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/doc_store.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/doc_chunking.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/envelope.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/positions.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+cite:
+  - src/rust_lsp_mcp/positions.py:external_to_lsp
+---
+
 [← Back to the README](../../README.md) · [Documentation index](index.md)
 
 # Architecture
 
-This page explains how the rust-lsp-mcp service is put together — what the
+This page explains how the rust-lsp-mcp service is put together: what the
 pieces are, how they talk to each other, and why a few design choices were
 made. No prior knowledge of language servers or AI tooling is required.
 
@@ -12,9 +38,9 @@ made. No prior knowledge of language servers or AI tooling is required.
 
 The service sits between an AI assistant and two information sources:
 
-- **rust-analyzer** — a code-intelligence engine for Rust that can answer
+- **rust-analyzer**: a code-intelligence engine for Rust that can answer
   questions like "where is this function defined?" or "who calls this struct?"
-- **A local documentation search** — finds relevant passages in the project's
+- **A local documentation search**: finds relevant passages in the project's
   Markdown files based on the meaning of a question, not just keywords.
 
 ```
@@ -26,7 +52,7 @@ AI assistant (MCP client)
      └── documentation search ── meaning-based search over the project's Markdown
 ```
 
-**MCP** stands for Model Context Protocol — it is a standard way for AI
+**MCP** stands for Model Context Protocol: a standard way for AI
 assistants to call external tools, the same way a web browser calls web APIs.
 The server speaks MCP over standard input/output: the AI assistant launches
 the server as a subprocess and writes requests to it; the server writes
@@ -39,23 +65,23 @@ answers back. No network port is needed.
 Here is what happens when an AI assistant asks "find all references to this
 function":
 
-1. **The client calls the tool** — it sends a request naming the file, line,
+1. **The client calls the tool**: it sends a request naming the file, line,
    and column of the function.
-2. **Input validation** — the server checks that the file path and position
+2. **Input validation**: the server checks that the file path and position
    make sense before doing any real work.
-3. **Readiness check** — the server confirms that rust-analyzer has finished
+3. **Readiness check**: the server confirms that rust-analyzer has finished
    indexing the codebase (see section 3). If it has not, the server returns
    a `not_ready` status immediately instead of asking the analyzer.
-4. **Position conversion** — line and column numbers are converted from the
+4. **Position conversion**: line and column numbers are converted from the
    1-based counting humans use to the 0-based counting the protocol expects
    (see section 5).
-5. **Ask rust-analyzer** — the server passes the request to rust-analyzer
+5. **Ask rust-analyzer**: the server passes the request to rust-analyzer
    through a library called **multilspy** (version 0.0.15). multilspy speaks
    the Language Server Protocol (LSP), the standard way editors talk to
    code-intelligence engines like rust-analyzer.
-6. **Translate the answer** — the raw LSP response (0-based positions, URI
+6. **Translate the answer**: the raw LSP response (0-based positions, URI
    paths) is converted back into a clean, 1-based, human-readable result.
-7. **Return a status envelope** — the server wraps the result in a small
+7. **Return a status envelope**: the server wraps the result in a small
    object with a `status` field (see section 4) and returns it to the client.
 
 ---
@@ -64,10 +90,10 @@ function":
 
 This is the single most important design rule in the service.
 
-When the server starts, rust-analyzer must first **index** the codebase —
+When the server starts, rust-analyzer must first **index** the codebase:
 read and understand all the Rust source files. This can take several seconds
 to a few minutes depending on the project size. A naive system asked "find
-all callers of `foo`" during this window would answer "none found" — which
+all callers of `foo`" during this window would answer "none found," which
 is wrong and looks identical to a real "no callers" result. There is no way
 for the caller to tell the difference.
 
@@ -88,7 +114,7 @@ To avoid this trap, the server tracks an explicit readiness state:
   analyzer is still indexing, `require_ready()` returns a `not_ready`
   envelope immediately and the tool returns that without touching the
   analyzer. If the analyzer is in the `"error"` state, `require_ready()`
-  instead returns an `error` envelope (never `not_ready` — a permanent
+  instead returns an `error` envelope (never `not_ready`, since a permanent
   failure is not "try again in a moment") naming the failure and pointing at
   the `refresh` tool as the recovery path.
 
@@ -110,9 +136,9 @@ four possible values, defined in [`envelope.py`](../../src/rust_lsp_mcp/envelope
 | `ok` | The query ran successfully. The result may be empty, and that empty result is meaningful. |
 | `not_ready` | The index is still being built. Try again in a moment. |
 | `not_found` | The thing asked about does not exist. |
-| `error` | Bad input, an internal failure, *or* a permanently failed analyzer/doc index (see §3) — the `refresh` tool is the recovery path in that last case. A human-readable message is included. |
+| `error` | Bad input, an internal failure, *or* a permanently failed analyzer/doc index (see §3); the `refresh` tool is the recovery path in that last case. A human-readable message is included. |
 
-`not_ready` and `error` envelopes also carry an additive `recovery` field — a
+`not_ready` and `error` envelopes also carry an additive `recovery` field: a
 single machine-readable hint (`"fix_input"` / `"refresh"` / `"poll_status"` /
 `"unknown"`) at the next action, so a caller can branch on it directly instead
 of parsing `message` text. `not_ready` always carries `"poll_status"`. See
@@ -121,11 +147,11 @@ of parsing `message` text. `not_ready` always carries `"poll_status"`. See
 **The distinction between `ok` with an empty list and `not_found` is
 deliberate and important.**
 
-- `not_found` means the resolution step itself failed — there is no symbol
+- `not_found` means the resolution step itself failed: there is no symbol
   at that position, or no symbol with that name exists. It is a dead end.
 - `ok` with an empty list means the query ran successfully and rust-analyzer
-  confirmed the symbol exists, but it genuinely has zero results — for
-  example, a function that is defined but never called anywhere in the
+  confirmed the symbol exists, but it has zero results, for example, a
+  function that is defined but never called anywhere in the
   codebase. That zero is meaningful information.
 
 Collapsing these two into the same response would make it impossible to
@@ -134,7 +160,7 @@ callers."
 
 The three list-returning tools (`find_symbol`, `document_symbols`,
 `find_references`) also always add `total` (the full result count) and
-`truncated` (`true` only past a 200-item safety cap) to their `ok` envelope —
+`truncated` (`true` only past a 200-item safety cap) to their `ok` envelope:
 `total == 0` is the same "found it, zero results" signal as an empty list,
 without a separate flag or message. See
 [Tool reference](tools.md#list-caps-total-and-truncated) for details.
@@ -149,9 +175,11 @@ is "line 4, character 2."
 
 The server always presents 1-based positions to the outside world and always
 sends 0-based positions to rust-analyzer internally. The conversion happens
-in one small module — [`positions.py`](../../src/rust_lsp_mcp/positions.py) — so
-there is a single place to audit and a single place to fix if anything ever
-goes wrong. No tool module does its own arithmetic on positions.
+in one small module, [`positions.py`](../../src/rust_lsp_mcp/positions.py):
+`external_to_lsp` converts an inbound (1-indexed) position to LSP's 0-indexed
+form, and `lsp_to_external` converts an outbound one back. That gives a
+single place to audit and a single place to fix if anything ever goes wrong.
+No tool module does its own arithmetic on positions.
 
 ---
 
@@ -163,19 +191,20 @@ step by step:
 
 **(a) Chunking.** The project's Markdown files are split into small,
 self-contained pieces called "chunks." Each chunk is short enough to be
-processed in one go (kept under 200 tokens — a deliberate, conservative cap
+processed in one go (kept under 200 tokens, a deliberate, conservative cap
 that stays well within the embedding model's 256-token input limit, so no text
 is ever silently cut off). Each chunk is labeled with a
-breadcrumb that records its position in the document hierarchy — for example,
+breadcrumb that records its position in the document hierarchy, for example,
 `GUIDE.md > Configuration > Ignoring files`.
 
 **(b) Embedding.** Each chunk is converted into a list of numbers called an
 "embedding." The numbers capture the meaning of the text in a way that can
 be compared mathematically. This is done by a small model called
 **all-MiniLM-L6-v2**, which runs entirely on the local CPU using the ONNX
-(Open Neural Network Exchange) runtime — a standard format for running
-machine-learning models efficiently. No external service or internet
-connection is needed.
+(Open Neural Network Exchange) runtime, a standard format for running
+machine-learning models efficiently. The model is baked into the server
+image at build time, so no external service or internet connection is
+needed at runtime.
 
 **(c) Storage.** The chunks and their embeddings are stored in a local
 database called **ChromaDB**, configured to use cosine distance as its
@@ -186,7 +215,7 @@ closest to any given query.
 
 **(d) Search.** When a search query arrives, it is embedded the same way.
 The database returns the chunks with the smallest cosine distance to the
-query — the closest in meaning — ranked best-first.
+query, the closest in meaning, ranked best-first.
 
 The chunking logic lives in [`doc_chunking.py`](../../src/rust_lsp_mcp/doc_chunking.py)
 and the store logic in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py).
@@ -196,7 +225,7 @@ and the store logic in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py).
 ## 7. Refreshing the index
 
 **Blast radius:** `refresh` tears down and re-indexes the single global
-analyzer shared by the whole server — every other tool returns `not_ready`
+analyzer shared by the whole server: every other tool returns `not_ready`
 for every caller until re-indexing completes, which can take minutes on
 large projects. It should not be called mid-task unless the index is
 actually stale or broken.
@@ -206,36 +235,36 @@ The `refresh` tool rebuilds everything from scratch:
 1. It restarts the code analyzer. The state is set back to `"indexing"`
    *before* the old analyzer is shut down, so there is never a window where
    a caller sees `"ready"` but the old index is being torn down. The restart
-   runs in the background — the tool returns immediately with an `"indexing"`
+   runs in the background: the tool returns immediately with an `"indexing"`
    status, and callers should poll the `status` tool until it shows `"ready"`.
 2. It rebuilds the documentation search index. This runs synchronously and
    finishes before the tool returns, so the documentation search is not in a
    partial state after the refresh tool completes. If the doc index was never
    initialised, or is currently in the `"error"` state, `refresh` re-runs the
    full startup sequence for it (construct + adopt-or-build) rather than
-   calling rebuild on a store that may not exist or is known-broken —
+   calling rebuild on a store that may not exist or is known-broken.
    `refresh` is therefore also the recovery path for a permanently-failed doc
    index, the same way it is for the analyzer's `"error"` state (§3).
 
 One deliberate omission: the refresh does **not** delete rust-analyzer's
 saved on-disk work (its incremental analysis cache). This means re-indexing
-is much faster than a cold start — rust-analyzer can reuse prior work.
+is much faster than a cold start: rust-analyzer can reuse prior work.
 
 ---
 
 ## 8. Startup and shutdown (lifespan)
 
-When the server starts, it is available immediately — startup never blocks on
+When the server starts, it is available immediately. Startup never blocks on
 either index finishing:
 
 - The analyzer is launched in the background. The server becomes available to
   clients immediately, answering `not_ready` until indexing completes (or
-  `error` if the background run itself fails — see §3).
+  `error` if the background run itself fails, see §3).
 - The documentation index follows the same non-blocking shape, split into a
   cheap synchronous part and a potentially-slow background part:
     - If an already-completed, same-project collection exists on disk (a warm
-      restart), it is **adopted synchronously** — a metadata check only, no
-      re-embedding — and the index is `"ready"` before the lifespan even
+      restart), it is **adopted synchronously** (a metadata check only, no
+      re-embedding) and the index is `"ready"` before the lifespan even
       yields.
     - Otherwise the index is built from scratch in a **background thread**:
       the lifespan yields immediately (`status`/navigation tools are usable
@@ -243,9 +272,9 @@ either index finishing:
       `"ready"` when the background build finishes.
     - A failure in either the cheap or the background half is recorded (not
       swallowed silently) and surfaced via `status` as `doc_index_state ==
-      "error"` with a diagnostic message — the code-navigation tools are
+      "error"` with a diagnostic message. The code-navigation tools are
       unaffected either way, and `refresh` is the recovery path (§7).
-    - `status` also exposes `doc_index_chunk_count` — a live `collection.count()`
+    - `status` also exposes `doc_index_chunk_count`, a live `collection.count()`
       read (works whether the index was rebuilt or adopted), so a completed
       index over zero matching Markdown files (a common misconfiguration: wrong
       glob, empty/un-mounted project) is observable as `0` rather than reading
@@ -254,8 +283,8 @@ either index finishing:
 Once, at the very start of the lifespan, a non-fatal advisory preflight also
 runs: it checks whether the configured `rust_analyzer_bin` resolves to an
 existing executable and whether `project_root` exists and is a directory.
-Neither check can fail startup or set `state`/`doc_index_state` to `"error"`
-— the results are collected into a list and surfaced as `status`'s
+Neither check can fail startup or set `state`/`doc_index_state` to `"error"`.
+The results are collected into a list and surfaced as `status`'s
 `preflight_warnings` (empty when both checks pass). This is deliberately
 narrower than a full readiness gate: no `Cargo.toml` check, since
 `project_root` is repo-agnostic by design and a Cargo.toml-at-root requirement

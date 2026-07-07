@@ -1,3 +1,17 @@
+---
+okf_version: "0.1"
+type: Guide
+title: Dependencies
+description: Every library and external tool the project depends on, what each does, and version-sensitivity to know before upgrading.
+tags: [guide, tier-b, dependencies]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: pyproject.toml
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: Dockerfile
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+---
+
 [← Back to the README](../../README.md) · [Documentation index](index.md)
 
 # Dependencies
@@ -13,7 +27,7 @@ This page lists every library and external tool the project depends on, what eac
 | **mcp** | 1.12.4 | The official Python toolkit for the Model Context Protocol — provides the FastMCP server and the standard-input/output connection the AI assistant uses to call tools. |
 | **multilspy** | 0.0.15 | Talks to rust-analyzer using the Language Server Protocol so the server can answer code-navigation questions. |
 | **chromadb** | 1.5.9 | A local database for meaning-based search — stores documentation pieces and retrieves the ones closest in meaning to a question. |
-| **pydantic-settings** | 2.x | The configuration layer — reads settings from defaults, a `.env` file, and environment variables. |
+| **pydantic-settings** | >=2.0 | The configuration layer — reads settings from defaults, a `.env` file, and environment variables. |
 
 ### mcp
 
@@ -29,7 +43,7 @@ The project pins this exact version and uses a small custom subclass so it runs 
 
 ChromaDB is a small local vector database — a database that finds documents by meaning rather than by exact keywords. The server splits documentation files into pieces, encodes each piece as a meaning-vector, and stores those vectors in ChromaDB. When a question arrives, ChromaDB finds the pieces whose meaning is closest to the question's meaning.
 
-The **full** package (not the slimmed-down client-only build) is required because it bundles `all-MiniLM-L6-v2`, the sentence-embedding model that does the encoding. That model runs locally on the CPU and needs no account or API key. It downloads once (about 80 MB) to a cached folder on first use and is reused on every subsequent run.
+The **full** package (not the slimmed-down client-only build) is required because it bundles `all-MiniLM-L6-v2`, the sentence-embedding model that does the encoding. That model runs locally on the CPU and needs no account or API key. The production image warms and bakes the model in at build time (see the [`Dockerfile`](../../Dockerfile)), so runtime needs zero network for embeddings; the only runtime network use is cargo fetching the scanned project's crates.io dependencies.
 
 ### pydantic-settings
 
@@ -63,7 +77,7 @@ These are programs the server relies on at runtime. They are not installed by `p
 
 ## A note on versions
 
-The main runtime libraries are pinned to exact versions for predictable behavior. This matters most for `multilspy`, whose version-specific quirks the code actively depends on, but applies to the others too: exact pins prevent unexpected breakage when packages release updates. The full resolved dependency tree — including transitive dependencies — lives in `uv.lock`.
+Three of the four main runtime libraries — `mcp`, `multilspy`, and `chromadb` — are pinned to exact versions for predictable behavior. This matters most for `multilspy`, whose version-specific quirks the code actively depends on; exact pins prevent unexpected breakage when packages release updates. `pydantic-settings` instead uses a minimum-version constraint (`>=2.0`). The full resolved dependency tree — including transitive dependencies — lives in `uv.lock`.
 
 ---
 
