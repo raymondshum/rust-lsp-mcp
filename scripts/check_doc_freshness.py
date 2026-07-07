@@ -107,7 +107,7 @@ def parse_frontmatter(text: str) -> dict:
             item = stripped[1:].strip()
             if item.startswith("path:"):
                 # start of a {path, commit} dict row (the source_pins shape)
-                entry = {"path": _strip_scalar(item[len("path:"):])}
+                entry = {"path": _strip_scalar(item[len("path:") :])}
                 result[current_key].append(entry)
             else:
                 # a scalar list item — kept verbatim. cite entries are scalars
@@ -129,7 +129,7 @@ def parse_frontmatter(text: str) -> dict:
             key, _, value = stripped.partition(":")
             key = key.strip()
             value = value.strip()
-            if value == "" :
+            if value == "":
                 result[key] = []
                 current_key = key
             elif value == "[]":
@@ -137,9 +137,7 @@ def parse_frontmatter(text: str) -> dict:
                 current_key = None
             elif value.startswith("[") and value.endswith("]"):
                 inner = value[1:-1].strip()
-                result[key] = (
-                    [_strip_scalar(p) for p in inner.split(",")] if inner else []
-                )
+                result[key] = [_strip_scalar(p) for p in inner.split(",")] if inner else []
                 current_key = None
             else:
                 result[key] = _strip_scalar(value)
@@ -206,9 +204,7 @@ def check_doc(root: Path, doc: Path) -> tuple[list[str], list[str], bool]:
         if symbol:
             try:
                 if symbol not in target.read_text(errors="replace"):
-                    hard.append(
-                        f"FAIL {rel}: cite symbol '{symbol}' not found in {path_part}"
-                    )
+                    hard.append(f"FAIL {rel}: cite symbol '{symbol}' not found in {path_part}")
             except OSError as exc:
                 hard.append(f"FAIL {rel}: cannot read cite path {path_part}: {exc}")
 
