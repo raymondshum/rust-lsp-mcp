@@ -1,3 +1,27 @@
+---
+okf_version: "0.1"
+type: Guide
+title: Development setup
+description: How to set up the dev container, run the server locally, and run the test tiers.
+tags: [guide, tier-b, development]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: Dockerfile
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: docker-compose.yml
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: .devcontainer/devcontainer.json
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: .devcontainer/Dockerfile
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: scripts/setup.sh
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: scripts/clone-ripgrep.sh
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: pyproject.toml
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+---
+
 [← Back to the README](../../README.md) · [Documentation index](index.md)
 
 # Development setup

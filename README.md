@@ -87,6 +87,9 @@ you build a self-contained image once and have the client launch it with
 `docker run`. This keeps your host clean and works for host-side clients like
 Claude Desktop.
 
+**Prerequisite:** [Docker](https://www.docker.com/get-started/) on your host —
+this path needs no VS Code or dev container.
+
 **1. Build the image** (once, from this repository):
 
 ```
@@ -231,8 +234,8 @@ the scanned project's crates.io dependencies — which you warm **once** up fron
   arbitrary hosts) rather than opening the network wholesale.
 
 **Help your agent know when to use the server.** Wiring in the tools is not
-enough — an agent will often grep a Rust repo and never think to reach for the
-LSP. This repo ships a drop-in skill,
+enough — an agent will often grep a Rust repo and never think to reach for
+semantic code navigation. This repo ships a drop-in skill,
 [`rust-code-navigation`](.claude/skills/rust-code-navigation/SKILL.md), that
 routes an agent toward semantic navigation (definitions, references, types)
 instead of text search, with a per-tool intent map and the common gotchas
@@ -335,6 +338,8 @@ Never add a `ports:` mapping to `docker-compose.yml` for either service.
 | [Dependencies](docs/guide/dependencies.md) | The main libraries and tools and what each is for. |
 | [Agentic coding](docs/guide/agentic-coding.md) | How the project is built with Claude Code — the delivery lifecycle, build conventions, and Claude configuration. |
 | [Agent skill: `rust-code-navigation`](.claude/skills/rust-code-navigation/SKILL.md) | A skill that helps an AI agent decide *when* to reach for this server — routing it toward semantic navigation instead of grep, with a per-tool intent map and gotchas. |
+| [Privacy & egress audit](docs/security/privacy-egress-audit.md) | What code runs during indexing, what it can reach, and how to isolate it. |
+| [Known issues](docs/impl/known-issues.md) | Open design/doc issues and troubleshooting notes (SELinux mounts, `refresh` scope, benign log noise). |
 
 ## Status / scope
 

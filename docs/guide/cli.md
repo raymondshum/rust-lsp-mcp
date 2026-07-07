@@ -1,9 +1,25 @@
+---
+okf_version: "0.1"
+type: Guide
+title: CLI reference (rust-lsp)
+description: Command-line client reference for rust-lsp -- subcommands, exit codes, and --wait semantics for agents without MCP tool access.
+tags: [guide, tier-a, cli]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: src/rust_lsp_cli/cli.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_cli/client.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+cite:
+  - src/rust_lsp_cli/cli.py:EXIT_NOT_READY
+---
+
 [← Back to the README](../../README.md) · [Documentation index](index.md)
 
 # CLI reference (`rust-lsp`)
 
 This page documents `rust-lsp`, a command-line client for the same read-only
-navigation and documentation-search tools the MCP server exposes. It exists
+tools the MCP server exposes. It exists
 for agents that can run shell commands but can't call MCP tools directly —
 for example a subagent that doesn't inherit its parent's MCP tool access. If
 your assistant already has MCP tool access, use that instead; `rust-lsp` is a
@@ -154,7 +170,7 @@ branch on `$?` without parsing JSON:
 |---|---|
 | `0` | Envelope `status` was `ok` **or** `not_found`. Both are answers, not failures — `not_found` means "the thing you asked about doesn't exist," which is a fact, not an error, matching the same "empty is not an error" doctrine as the MCP tools (see the [Tools / API reference](tools.md#response-format)). |
 | `1` | Envelope `status` was `error`. Check the `message` field in the printed JSON, and `recovery` for a machine-readable hint at the next action. |
-| `2` | `not_ready` — the daemon answered but the analyzer or doc index is still (re)building. Also used when a `--wait SECS` window expired while the daemon *was* reachable but never reported `ready`. |
+| `2` | `not_ready` (`EXIT_NOT_READY`) — the daemon answered but the analyzer or doc index is still (re)building. Also used when a `--wait SECS` window expired while the daemon *was* reachable but never reported `ready`. |
 | `3` | The daemon could not be reached at all — connection refused, handshake failure, or timeout. Also used when a `--wait SECS` window expired without the daemon ever answering. Stderr prints a hint to start the daemon. |
 | `2` (argparse) | A command-line usage error (bad or missing arguments, unknown subcommand) also exits `2`, from argparse's own default — this numerically collides with `not_ready` above but is never ambiguous in practice: a usage error happens *before* any network call and prints its own distinct usage message on stderr, whereas `not_ready` always comes with a printed JSON envelope on stdout. |
 
