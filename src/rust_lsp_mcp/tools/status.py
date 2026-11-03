@@ -66,7 +66,7 @@ async def status() -> dict[str, Any]:
     - ``server_version``  — installed ``rust-lsp-mcp`` package version
                            (``importlib.metadata.version``, computed fresh per
                            call), or ``null`` if the distribution metadata is
-                           not resolvable (``PackageNotFoundError``) — see KI-12.
+                           not resolvable (``PackageNotFoundError``).
     - ``multilspy_version`` — installed ``multilspy`` package version, same
                            mechanism and null-degradation as ``server_version``.
     - ``rust_analyzer_version`` — the analyzer binary's ``--version`` output
@@ -103,7 +103,7 @@ async def status() -> dict[str, Any]:
     doc_state, doc_err = doc_store_state()
     preflight_warnings = get_preflight_warnings()
     rust_analyzer_version: str | None = mgr.rust_analyzer_version if mgr is not None else None
-    # KI-12: package versions are cheap to resolve (importlib.metadata reads
+    # Package versions are cheap to resolve (importlib.metadata reads
     # installed distribution metadata, no I/O beyond that) — compute fresh
     # per call rather than caching, unlike rust_analyzer_version's subprocess.
     server_version = _package_version("rust-lsp-mcp")
@@ -144,7 +144,7 @@ async def status() -> dict[str, Any]:
 def _package_version(name: str) -> str | None:
     """Return the installed version of the *name* distribution, or ``None``.
 
-    Wraps ``importlib.metadata.version`` (KI-12); degrades to ``None`` on
+    Wraps ``importlib.metadata.version``; degrades to ``None`` on
     ``PackageNotFoundError`` (e.g. an editable/unusual install where the
     distribution metadata isn't resolvable). Never raises.
     """

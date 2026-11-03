@@ -84,7 +84,7 @@ Certain folders are stored *outside* the container, under `.devcontainer/cache/`
 | `chroma-model-cache/` | `~/.cache/chroma` | The ~80 MB ONNX embedding model, downloaded once |
 | `chroma/` | `/workspaces/chroma` | The documentation-search vector database |
 
-> **Production image:** the same categories of persistent data live on a single named Docker volume mounted at `/data`, rather than these `.devcontainer/cache/` bind mounts. You choose the volume name in the `docker run` command (the examples below use `rust-lsp-mcp-data`) — and note that `docker-compose.yml`'s volume, though keyed `rlm-data` in the file, is pinned to the **same physical name** (`name: rust-lsp-mcp-data`). The two launch methods therefore share one `/data` store, so the single-writer rule ([KI-13](../impl/known-issues.md#ki-13--chromadb-cross-process-single-writer-hazard-on-a-shared-data-volume)) applies across them: don't run the compose daemon and a `docker run` MCP session against that volume at the same time.
+> **Production image:** The same persistent data categories live on a single named Docker volume mounted at `/data` (e.g. `rust-lsp-mcp-data`). Because ChromaDB enforces single-process access, do not run a Compose daemon and a separate `docker run` session against the same volume simultaneously.
 
 ### Automatic first-time setup
 
@@ -172,15 +172,15 @@ docker run -i --rm \
   rust-lsp-mcp
 ```
 
-- `-v /abs/path/to/your/rust/project:/project:ro` — bind-mounts your Rust project read-only at `/project`. The server navigates whatever project you mount here; it is not tied to ripgrep or any other specific codebase.
-- `-v rust-lsp-mcp-data:/data` — a named volume that persists the Chroma vector store, cargo registry, and build cache across `--rm` runs.
-- `-i` — keeps stdin open so the MCP client can communicate over stdio.
+- `-v /abs/path/to/your/rust/project:/project:ro` — bind-mounts your Rust project read-only at `/project`.
+- `-v rust-lsp-mcp-data:/data` — persists the Chroma vector store, cargo registry, and build cache across runs.
+- `-i` — keeps stdin open so the MCP client communicates over stdio.
 
-> **SELinux note:** Under SELinux-enforcing rootless Podman, append `,z` to the bind mount: `-v /abs/path/to/your/project:/project:ro,z`. Use the lowercase, **shared** label `z` — never the private `Z`, which relabels the source tree for one container only and then denies every other container or tool that mounts the same directory (including `scripts/prime-cache.sh`, which uses `:z`); see the README's mount notes for the full explanation. Plain `:ro` is correct for a standard Docker daemon.
+> **SELinux note:** On SELinux-enforcing hosts (such as rootless Podman), append `,z` to the bind mount: `-v /abs/path/to/your/project:/project:ro,z`. Use lowercase `z` for shared access.
 
-The env-var defaults baked into the image (`RLM_PROJECT_ROOT=/project`, `RLM_CHROMA_PATH=/data/chroma`, `RLM_DOC_COLLECTION=project_docs`, and the cargo-cache paths) work out of the box for this invocation. See [Configuration](configuration.md) to override them.
+Environment defaults (`RLM_PROJECT_ROOT=/project`, `RLM_CHROMA_PATH=/data/chroma`) work out of the box. See [Configuration](configuration.md) to override them.
 
-**Staying hot across many calls (the CLI daemon):** MCP clients stay on the ephemeral `docker run -i --rm` invocation above — that is the supported MCP path. If you want rust-analyzer to stay warm across many calls, the answer is the **CLI daemon**: [`../../docker-compose.yml`](../../docker-compose.yml) runs one long-lived server in streamable-HTTP mode, and the `rust-lsp` command-line client talks to it. Start the daemon naming the service explicitly (`RUST_PROJECT=/abs/path docker compose up -d rust-lsp-mcp` — a bare `up -d` would also start the isolated variant, putting two servers on one volume), then run client commands with the full path: `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd>`. See the [CLI reference](cli.md) and the README ["CLI access"](../../README.md#cli-access-for-agents-without-mcp) section. An earlier revision of this page taught pointing an MCP client at `docker exec -i rust-lsp-mcp /app/.venv/bin/rust-lsp-mcp` — that pattern is retired: it starts a second stdio *server* inside the daemon's container, an unguarded cross-process writer against the shared Chroma store (see [known issue KI-13](../impl/known-issues.md#ki-13--chromadb-cross-process-single-writer-hazard-on-a-shared-data-volume)).
+**Persistent daemon mode:** For agents without MCP tool access or when keeping rust-analyzer hot across many calls, use the CLI daemon: `docker compose up -d rust-lsp-mcp`. Commands run via `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd>`. See the [CLI reference](cli.md). Do not launch multiple server processes against the same Chroma data volume.
 
 ---
 

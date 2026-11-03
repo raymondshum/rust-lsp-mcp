@@ -185,7 +185,7 @@ class PatchedRustAnalyzer(RustAnalyzer):
         return self._rust_analyzer_bin
 
     def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
-        """Advertise UTF-32 position encoding (KI-5).
+        """Advertise UTF-32 position encoding to ensure Unicode codepoint offsets.
 
         multilspy's bundled init params request ``positionEncodings: ["utf-16"]``,
         so rust-analyzer reports character offsets as UTF-16 code units — wrong on
@@ -246,7 +246,7 @@ class AnalyzerManager:
         self._lsp: PatchedRustAnalyzer | None = None
         # Git commit hash of the tree being indexed; None until _run captures it.
         self._indexed_commit: str | None = None
-        # rust-analyzer `--version` output, captured once by start() (KI-12);
+        # rust-analyzer `--version` output, captured once by start();
         # None until captured, or if capture fails.  Never re-captured by
         # restart() — the binary underlying rust_analyzer_bin cannot change
         # without a process restart, so one capture covers the manager's
@@ -278,7 +278,7 @@ class AnalyzerManager:
 
     @property
     def rust_analyzer_version(self) -> str | None:
-        """Cached ``<rust_analyzer_bin> --version`` output (KI-12).
+        """Cached ``<rust_analyzer_bin> --version`` output.
 
         Captured once, synchronously within ``start()``, before the first
         background indexing task is spawned; ``restart()`` does not
@@ -318,7 +318,7 @@ class AnalyzerManager:
         already holding the lock.  Never call this directly while a restart
         or shutdown may be concurrently in flight; go through ``restart()``.
 
-        KI-12: on the FIRST call only, captures ``rust_analyzer_version``
+        On the FIRST call only, captures ``rust_analyzer_version``
         before spawning the background task (a short, thread-offloaded
         subprocess call — see ``_capture_rust_analyzer_version``).
         ``restart()`` also calls ``start()`` (to respawn after a drain), but
@@ -362,7 +362,7 @@ class AnalyzerManager:
             self._indexed_commit = None
 
     async def _capture_rust_analyzer_version(self) -> None:
-        """Capture ``<rust_analyzer_bin> --version`` into ``_rust_analyzer_version`` (KI-12).
+        """Capture ``<rust_analyzer_bin> --version`` into ``_rust_analyzer_version``.
 
         Run once, from ``start()``, before the background indexing task is
         spawned.  Output format (verified,
@@ -509,7 +509,7 @@ class AnalyzerManager:
         INVARIANT: reached synchronously (no await) from the delegate's guard, so the
         event read here pairs with the _lsp the caller snapshotted.  multilspy's stop()
         never fails pending _response_handlers (verified, 0.0.15), so without this race
-        an in-flight request awaits request.cv forever across a drain (KI-9 / #87).
+        an in-flight request awaits request.cv forever across a drain (issue #87).
         """
         event = self._shutdown_event
         if event.is_set():
@@ -796,7 +796,7 @@ class AnalyzerManager:
         race (timeout firing while this coroutine is between suspension points).
         The ``done()``-checked re-raise in that branch guards exactly that race,
         preserving the event/``_lsp`` pairing invariant ``_race_teardown``
-        (KI-9 / #87) depends on.
+        (issue #87) depends on.
         """
         self._generation += 1
         self._shutdown_event.set()

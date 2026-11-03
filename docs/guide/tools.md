@@ -94,6 +94,18 @@ Tools enforce a flat safety cap without pagination. To inspect results beyond th
 
 ---
 
+## Tool directory
+
+The server exposes 9 tools categorized into three functional domains:
+
+| Category | Tools | Focus | Detailed Guide |
+|---|---|---|---|
+| **Code Navigation** | `find_symbol`, `goto_definition`, `find_references`, `hover`, `document_symbols` | LSP-backed semantic code intelligence | [Navigation Reference](tools/navigation.md) |
+| **Documentation Search** | `search_docs` | Local ChromaDB vector search over Markdown | [Search Reference](tools/search.md) |
+| **Administration** | `status`, `refresh`, `validate_file_path` | Server health, cache invalidation, input checks | [Admin Reference](tools/admin.md) |
+
+---
+
 ## Navigation tools
 
 ### `find_symbol`
