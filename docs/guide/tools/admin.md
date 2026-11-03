@@ -1,0 +1,83 @@
+---
+okf_version: "0.1"
+type: Guide
+title: Administrative & Diagnostic Tools
+description: Detailed reference for status, refresh, and validate_file_path tools.
+tags: [guide, tier-a, tools, admin]
+timestamp: 2026-07-07T00:00:00Z
+source_pins:
+  - path: src/rust_lsp_mcp/tools/status.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/refresh.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+  - path: src/rust_lsp_mcp/tools/validate_file_path.py
+    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+---
+
+[← Back to Tool Reference](../tools.md) · [Documentation index](../index.md)
+
+# Administrative & Diagnostic Tools
+
+These operational tools inspect server health, manage index lifecycles, and validate inputs.
+
+---
+
+## `status`
+
+Inspects analyzer and documentation store readiness, commit freshness, and system versions.
+`status` is always callable regardless of current indexing state and never returns `not_ready`.
+
+### Inputs
+None.
+
+### Returns
+Always returns `status: "ok"` with a health envelope:
+
+| Field | Type | Values / Description |
+|---|---|---|
+| `state` | string | `"indexing"`, `"ready"`, or `"error"`. |
+| `analyzer_error` | string \| null | Diagnostic error string if `state` is `"error"`. |
+| `indexed_commit` | string \| null | Git HEAD commit captured when analyzer started. |
+| `current_commit` | string \| null | Live git HEAD commit on disk. |
+| `stale` | boolean \| null | `true` if `indexed_commit != current_commit`. `null` if git is unavailable. |
+| `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. |
+| `doc_index_error` | string \| null | Error message if documentation store build failed. |
+| `doc_index_chunk_count` | integer \| null | Total stored document chunks (`0` indicates unmounted or empty doc path). |
+| `preflight_warnings` | list[string] | Advisory warnings detected during startup. |
+| `server_version` | string \| null | Installed package version of `rust-lsp-mcp`. |
+| `multilspy_version` | string \| null | Installed version of `multilspy`. |
+| `rust_analyzer_version` | string \| null | Captured version string from `rust-analyzer --version`. |
+
+---
+
+## `refresh`
+
+Restarts the language server and rebuilds the documentation index.
+
+> **Blast radius warning**: `refresh` resets the shared language server. Concurrent requests return `not_ready` until re-indexing completes. Avoid calling `refresh` during active query workflows unless the index is stale or in an `"error"` state.
+
+### Inputs
+None.
+
+### Returns
+- `not_ready`: Analyzer restart has been triggered in the background. Poll `status` until `state` transitions to `"ready"`.
+- `error`: Failed to rebuild doc store or restart analyzer process.
+
+---
+
+## `validate_file_path`
+
+Checks whether a target file path is contained within the project workspace before dispatching operations.
+
+### Inputs
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `file` | string | yes | Project-relative path to validate. |
+
+### Returns
+
+| Status | Fields |
+|---|---|
+| `ok` | `file`: string path, `valid`: boolean (`true` if inside workspace, `false` otherwise). |
+| `error` | `message`, `recovery: "fix_input"` if argument format is invalid. |

@@ -65,20 +65,16 @@ a few core modules. A request enters through a tool, passes a readiness
 check, reaches either rust-analyzer or the documentation search, and comes
 back as a small status-tagged result.
 
-## Module responsibilities at a glance
+## Subsystems at a glance
 
-| Module | One-line responsibility |
-|---|---|
-| `__init__.py`, `_main.py`, `__main__.py`, `server.py` | Entry points — two equivalent launch paths lead here, into a server that runs either stdio (default) or the streamable-HTTP daemon |
-| `core.py` | App instance, readiness gate, shared translation and path-containment helpers |
-| `analyzer.py` | rust-analyzer lifecycle: start, state tracking (including the `error` state), LSP delegate methods, restart |
-| `positions.py` | Converts 1-indexed (human) ↔ 0-indexed (protocol) positions |
-| `envelope.py` | Builds the `ok` / `not_ready` / `not_found` / `error` response objects |
-| `settings.py` | All configuration options with defaults, loaded from `.env` or environment |
-| `doc_chunking.py` | Splits Markdown into embeddable pieces for documentation search |
-| `doc_store.py` | ChromaDB-backed documentation search store |
-| `tools/` | One file per MCP tool; importing the package registers them all |
-| `rust_lsp_cli/cli.py`, `rust_lsp_cli/client.py` | The `rust-lsp` CLI client: argparse surface + dispatch, and the streamable-HTTP MCP client it talks to the daemon with |
+The codebase is organized into four core subsystems:
+
+| Subsystem | Modules | Primary Responsibility |
+|---|---|---|
+| **Server Core & Lifecycle** | `server.py`, `core.py`, `envelope.py`, `settings.py` | FastMCP app setup, stdio/HTTP transport, lifespan management, response envelopes, configuration. |
+| **Language Server Integration** | `analyzer.py`, `positions.py` | rust-analyzer subprocess lifecycle, background indexing, error recovery, 1-based coordinate translation. |
+| **Documentation Intelligence** | `doc_store.py`, `doc_chunking.py` | ChromaDB vector store lifecycle, Markdown chunking with heading breadcrumbs, semantic search. |
+| **Tool & CLI Surface** | `tools/`, `rust_lsp_cli/` | Self-registering MCP tool endpoints and the companion `rust-lsp` CLI client for shell environments. |
 
 ---
 

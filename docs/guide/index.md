@@ -7,7 +7,7 @@ The README covers the quick start; these pages go deeper into how the system wor
 ## Pages
 
 - [Architecture](architecture.md) — the big picture: how a request flows through the system, and the key design ideas (readiness, the response format, how documentation search works).
-- [Tools / API reference](tools.md) — every tool the server offers, its inputs, and the exact responses it returns.
+- [Tools / API reference](tools.md) — complete tool reference and protocol, with modular guides for [Navigation](tools/navigation.md), [Documentation Search](tools/search.md), and [Administration](tools/admin.md).
 - [Configuration](configuration.md) — every setting and environment variable, with defaults and what each one does.
 - [CLI reference](cli.md) — the `rust-lsp` command-line client for agents without MCP tool access: subcommands, exit codes, `--wait`, and troubleshooting.
 - [Development setup](development.md) — how to set up the development container, run the server, and run the two kinds of tests.

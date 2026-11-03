@@ -15,7 +15,7 @@ Design:
 Only line AND character are converted — the helper does not touch file paths
 or any other fields.
 
-Character encoding (KI-5):
+Character encoding:
     The ``character`` axis is a **Unicode codepoint** offset.  ``AnalyzerManager``
     negotiates ``positionEncoding: utf-32`` with rust-analyzer (see
     ``PatchedRustAnalyzer._get_initialize_params`` in analyzer.py), so the LSP

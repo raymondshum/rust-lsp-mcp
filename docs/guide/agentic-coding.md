@@ -84,7 +84,7 @@ Builds advance one phase at a time:
   documentation issues, reviewed at the start of a grill/plan session and at each
   phase's record step, so a discrepancy found once isn't rediscovered later.
 
-Three standing project **constraints** (from [CLAUDE.md](../../CLAUDE.md)) bound
+Three standing project **constraints** (from [AGENTS.md](../../AGENTS.md)) bound
 every change: **CI stays light** (lint, type-check, and fast tests only — heavy
 integration tests are a local gate), **the host stays clean** (all toolchains
 live in the container), and **download once** (heavy artifacts live on persistent
@@ -92,7 +92,7 @@ mounts).
 
 ## Claude configuration
 
-- **[CLAUDE.md](../../CLAUDE.md)**: Session entry point. Contains pointers and triggers without implementation details (per [claude-md-layout.md](../conventions/claude-md-layout.md)).
+- **[AGENTS.md](../../AGENTS.md)** (with [CLAUDE.md](../../CLAUDE.md) pointer): Session entry point. Contains pointers and triggers without implementation details (per [claude-md-layout.md](../conventions/claude-md-layout.md)).
 - **`.claude/skills/`**: Checked-in project skills:
   - `grill-me`: Conducts architectural interview sessions.
   - `doc-sweep`: Audits and refreshes `docs/guide/` pages.
@@ -105,7 +105,7 @@ mounts).
 
 ## Where to start
 
-1. Read [CLAUDE.md](../../CLAUDE.md) — the thin index of everything below.
+1. Read [AGENTS.md](../../AGENTS.md) — the thin index of everything below.
 2. Read the [lifecycle](../conventions/lifecycle.md) — the spine that connects the
    conventions.
 3. Open the specific convention for the stage you're in (grill, plan, verify,
