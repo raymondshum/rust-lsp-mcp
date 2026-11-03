@@ -18,55 +18,25 @@ cite:
 
 # CLI reference (`rust-lsp`)
 
-This page documents `rust-lsp`, a command-line client for the same read-only
-tools the MCP server exposes. It exists
-for agents that can run shell commands but can't call MCP tools directly —
-for example a subagent that doesn't inherit its parent's MCP tool access. If
-your assistant already has MCP tool access, use that instead; `rust-lsp` is a
-second entry point to the same functionality, not a replacement for it. See
-the README's [CLI access](../../README.md#cli-access-for-agents-without-mcp)
-section for how to start the daemon this client talks to.
+This page documents `rust-lsp`, a command-line client for the read-only navigation tools.
 
-`rust-lsp` is intentionally thin: it never opens rust-analyzer or the
-documentation store itself. It connects over HTTP to a long-lived
-**daemon** — a `rust-lsp-mcp` server started with
-`RLM_TRANSPORT=streamable-http` (see [Configuration](configuration.md)) —
-and every call is one round trip to that already-warm process. All the
-actual analysis logic, response shapes, and status vocabulary are shared with
-the MCP tools and documented in the [Tools / API reference](tools.md); this
-page covers the parts that are specific to invoking them from a shell.
+Use `rust-lsp` when agents run shell commands but cannot call MCP tools directly. If your assistant already supports MCP, use MCP tool calls instead. For daemon startup instructions, see [CLI access](../../README.md#cli-access-for-agents-without-mcp).
 
-## How it connects
+`rust-lsp` is a lightweight client. It does not run rust-analyzer or ChromaDB directly. Instead, it sends HTTP requests to a long-lived **daemon** (`rust-lsp-mcp` with `RLM_TRANSPORT=streamable-http`). Response schemas and status codes match the MCP server exactly (see [Tools / API reference](tools.md)).
 
-By default, `rust-lsp` talks to `http://127.0.0.1:${RLM_HTTP_PORT:-8000}/mcp`
-— the same port the daemon reads from `RLM_HTTP_PORT`, so the two can't
-silently disagree. Set `RLM_CLI_URL` to a non-empty value to override the
-target URL outright (e.g. to point at a non-default port; an
-exported-but-empty value is treated as unset); see
-[Configuration](configuration.md#a-cli-only-variable-rlm_cli_url) for why
-this variable is CLI-only and not in `env.sample`.
+## Connection details
 
-In the shipped Docker setup you don't run `rust-lsp` on your host — you run
-it *inside* the daemon's container, where the loopback address it connects to
-actually exists, via `docker exec` (or `podman exec` — identical usage):
+By default, `rust-lsp` connects to `http://127.0.0.1:${RLM_HTTP_PORT:-8000}/mcp`. To override the destination URL, set `RLM_CLI_URL`. See [Configuration](configuration.md#a-cli-only-variable-rlm_cli_url).
 
-```
+When using the provided Docker compose environment, execute `rust-lsp` inside the daemon container:
+
+```bash
 docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp status
 ```
 
-**Use the full path, `/app/.venv/bin/rust-lsp`.** The production image's
-`PATH` only adds `/usr/local/cargo/bin` (for rust-analyzer); it does not add
-`/app/.venv/bin`, so a bare `rust-lsp` under `docker exec`/`podman exec` fails
-with "command not found." Every example on this page that runs inside that
-container uses the full path for this reason.
+> **Executable path**: Specify the full path `/app/.venv/bin/rust-lsp`. The container image's default `PATH` does not include the virtual environment directory.
 
-If you're already in a shell where `rust-lsp` resolves on `PATH` some other
-way — for example, `uv run rust-lsp` from this project's own dev container,
-or a shell with the daemon's venv activated — you can drop both the `docker
-exec rust-lsp-mcp` prefix and the `/app/.venv/bin/` path, and just run
-`rust-lsp <cmd>` directly. The [Subcommands](#subcommands) table below uses
-the short `rust-lsp <cmd>` form throughout to document the command's own
-syntax; substitute whichever prefix your shell actually needs.
+If running inside the development container or an activated virtual environment, you can invoke `rust-lsp` directly without `docker exec`.
 
 ## Subcommands
 
@@ -220,42 +190,28 @@ be ready and just want the current state.
 
 ## Daemon logs
 
-The daemon's stderr goes wherever the container's stdout/stderr are captured
-— `docker logs rust-lsp-mcp` (or `podman logs`). You may see a per-request
-`ClosedResourceError` traceback in there during normal operation: this is
-**benign log noise**, not a failure. It comes from how the pinned MCP SDK
-(1.12.4) tears down each stateless HTTP request's transport internally, and
-it does not affect the response the CLI actually receives. See
-[known issue KI-15](../impl/known-issues.md#ki-15--benign-closedresourceerror-log-noise-in-stateless-http-mode)
-for the tracking detail; it's expected to be revisited on a future SDK
-upgrade, not something to act on today.
+View daemon logs via `docker logs rust-lsp-mcp` (or `podman logs`).
+
+During normal operation, logs may display a per-request `ClosedResourceError` traceback. This is benign log noise caused by how the MCP Python SDK tears down stateless HTTP transports. It does not affect command execution or response validity.
 
 ## `refresh`: shared-daemon blast radius
 
-`refresh` (see the [Tools / API reference](tools.md#refresh) for the full
-tool semantics) tears down and rebuilds the **one** analyzer and doc index
-the daemon runs — there is only one daemon per project, and every CLI call
-and every other MCP client hitting the same daemon shares it. Calling
-`rust-lsp refresh` while other callers are mid-task means every one of their
-next navigation calls returns `not_ready` until re-indexing finishes. Check
-`rust-lsp status` first; only call `refresh` when the index is actually stale
-or `state`/`doc_index_state` reports `"error"`. This caveat is inherent to
-the shared-daemon design (documented as
-[known issue KI-14](../impl/known-issues.md#ki-14--refresh-blast-radius-on-a-shared-daemon)),
-not a bug — there is no per-caller isolation to lose.
+`refresh` restarts and rebuilds the single analyzer and documentation index inside the container. Because all CLI calls and MCP clients share this instance, running `refresh` causes all concurrent queries to return `not_ready` until indexing finishes.
+
+Check `rust-lsp status` before refreshing. Only trigger `refresh` when code changes warrant an index rebuild or when `state` reports `"error"`.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | What to do |
+| Symptom | Cause | Resolution |
 |---|---|---|
-| Exit `3`, stderr says "daemon not reachable" | The daemon container isn't running, or `RLM_HTTP_PORT`/`RLM_CLI_URL` points at the wrong place. | From this repo's directory: `RUST_PROJECT=/abs/path docker compose up -d rust-lsp-mcp` (or `-isolated`), then retry — ideally with `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp --wait 180 status` on the first call. |
-| Exit `2` (envelope `not_ready`) | The daemon is up but the analyzer or doc index is still building, or `--wait` expired before it finished. | Re-run `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp status` to see `state`/`doc_index_state`, or retry with a larger `--wait`. |
-| Exit `2` (from a `--wait` window) and `status` shows `state: "error"` | The background indexing run failed permanently — waiting longer won't help. | `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp refresh` (mind the [blast radius](#refresh-shared-daemon-blast-radius) above), then `--wait` again. |
-| Exit `1` (envelope `error`) | Bad input (see `message`/`recovery` in the printed JSON) or an unexpected internal/LSP failure. | Fix the argument per `recovery: "fix_input"`, or treat `recovery: "unknown"` as a report-worthy failure. |
-| `docker exec: no such container` | The daemon service was never started, or was started under a different container name. | Check `docker ps`; start it with `RUST_PROJECT=/abs/path docker compose up -d rust-lsp-mcp` from this repo's directory (default container name `rust-lsp-mcp`). |
-| `docker exec`/`podman exec` fails immediately with an "executable file not found in $PATH" error (exit `127`; exact wording differs by engine — e.g. podman's crun reports `` executable file `rust-lsp` not found in $PATH ``) | Ran a bare `rust-lsp` — the image's `PATH` doesn't include `/app/.venv/bin`. | Use the full path: `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd>`. |
-| `status` says `state: "ready"` but `doc_index_chunk_count: 0`, and/or every navigation call returns an `error` envelope like "LSP error: File read failed …" (`recovery: "unknown"`) — retrying never helps | The container cannot **read** the mounted project — classically SELinux on an enforcing host (e.g. rootless podman on Fedora): the bind mount succeeds but `container_t` is denied read on the host files, which is masked as a "healthy" empty doc index plus generic per-call read errors (see [known issue KI-16](../impl/known-issues.md#ki-16--unreadable-project-mount-eg-selinux-is-masked-as-ready-with-zero-docs--generic-errors)). | Make sure the project mount carries the shared SELinux label — the shipped `docker-compose.yml` already mounts `/project` with `:ro,z` — or relabel host-side: `chcon -Rt container_file_t /abs/path/to/project`. Do **not** just retry; the error is access, not transience. |
-| Two containers seem to be fighting over the doc index | A second server process (not `rust-lsp` itself — the CLI never opens the doc store) is running against the same `/data` volume. | Run exactly one server per Chroma path — see [known issue KI-13](../impl/known-issues.md#ki-13--chromadb-cross-process-single-writer-hazard-on-a-shared-data-volume). |
+| Exit `3`, "daemon not reachable" | The container is stopped or ports are misconfigured. | Run `RUST_PROJECT=/abs/path docker compose up -d rust-lsp-mcp`. Verify `RLM_HTTP_PORT`. |
+| Exit `2` (`not_ready`) | Analyzer or documentation store is still indexing. | Check `rust-lsp status` or use `--wait 180` to poll until ready. |
+| Exit `2` with `state: "error"` | Background indexing failed permanently. | Run `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp refresh`. |
+| Exit `1` (`error`) | Malformed arguments or internal tool failure. | Check `message` and `recovery` in JSON output. Correct inputs if `recovery: "fix_input"`. |
+| `docker exec: no such container` | Container was not started or has a different name. | Run `docker ps` to verify container name. |
+| Exit `127`: `rust-lsp not found` | Command was invoked without full path. | Invoke `/app/.venv/bin/rust-lsp` directly. |
+| `state: "ready"` with `chunk_count: 0` | SELinux denied container read access to the project mount. | Ensure mount includes `:ro,z` suffix, or run `chcon -Rt container_file_t /path/to/project`. |
+| Multiple containers conflicting on `/data` | Concurrent processes writing to the same ChromaDB volume. | Ensure only one active server container mounts each data directory. |
 
 ## Related pages
 

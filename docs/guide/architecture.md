@@ -100,70 +100,37 @@ for the caller to tell the difference.
 To avoid this trap, the server tracks an explicit readiness state:
 
 - The analyzer starts in the `"indexing"` state.
-- It flips to `"ready"` only after rust-analyzer signals that it has finished
-  and the live connection is confirmed. In [`analyzer.py`](../../src/rust_lsp_mcp/analyzer.py),
-  the `is_ready` property requires both conditions: `state == "ready"` *and*
-  a live internal connection object.
-- If the background indexing run itself fails (for example, the configured
-  rust-analyzer binary does not exist or crashes during startup), the state
-  becomes `"error"` instead — a third, permanent-until-recovered state,
-  distinct from the transient `"indexing"` window. The diagnostic message is
-  captured and exposed as `analyzer_error` on the `status` tool.
-- Every tool that needs the index calls `require_ready()` (defined in
-  [`core.py`](../../src/rust_lsp_mcp/core.py)) before doing any work. If the
-  analyzer is still indexing, `require_ready()` returns a `not_ready`
-  envelope immediately and the tool returns that without touching the
-  analyzer. If the analyzer is in the `"error"` state, `require_ready()`
-  instead returns an `error` envelope (never `not_ready`, since a permanent
-  failure is not "try again in a moment") naming the failure and pointing at
-  the `refresh` tool as the recovery path.
+- It flips to `"ready"` when rust-analyzer signals completion and the connection is active. In [`analyzer.py`](../../src/rust_lsp_mcp/analyzer.py), the `is_ready` property requires both conditions: `state == "ready"` and an active connection.
+- If background indexing fails, the state transitions to `"error"`. This is a permanent state until resolved. The `status` tool exposes the error message via `analyzer_error`.
+- Tools requiring the index call `require_ready()` in [`core.py`](../../src/rust_lsp_mcp/core.py).
+  - While indexing, `require_ready()` returns a `not_ready` envelope immediately.
+  - If the analyzer is in an `"error"` state, `require_ready()` returns an `error` envelope. This envelope prompts the caller to invoke `refresh`.
 
-The documentation search has its own separate readiness tri-state (`state` on
-`DocStore` in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py):
-`"building"` / `"ready"` / `"error"`) for the same reason: `search_docs` never
-returns partial results while a rebuild is in progress, and surfaces a
-permanent build failure as `error` rather than a misleading `not_ready`.
+The documentation store uses an identical tri-state model (`"building"`, `"ready"`, `"error"`). `search_docs` never returns partial results during rebuilds. It reports build failures as `error` rather than `not_ready`.
 
 ---
 
-## 4. The response format (the "status envelope")
+## 4. Response format (status envelope)
 
-Every tool returns a small object with a `status` field. There are exactly
-four possible values, defined in [`envelope.py`](../../src/rust_lsp_mcp/envelope.py):
+Every tool returns a response object containing a `status` field, defined in [`envelope.py`](../../src/rust_lsp_mcp/envelope.py):
 
 | Status | Meaning |
 |---|---|
-| `ok` | The query ran successfully. The result may be empty, and that empty result is meaningful. |
-| `not_ready` | The index is still being built. Try again in a moment. |
-| `not_found` | The thing asked about does not exist. |
-| `error` | Bad input, an internal failure, *or* a permanently failed analyzer/doc index (see §3); the `refresh` tool is the recovery path in that last case. A human-readable message is included. |
+| `ok` | The query ran successfully. Empty result sets are valid answers. |
+| `not_ready` | The index is currently building. Retry shortly. |
+| `not_found` | The requested symbol or file does not exist. |
+| `error` | Invalid input, internal failure, or failed indexing. Invoke `refresh` to recover from failed states. |
 
-`not_ready` and `error` envelopes also carry an additive `recovery` field: a
-single machine-readable hint (`"fix_input"` / `"refresh"` / `"poll_status"` /
-`"unknown"`) at the next action, so a caller can branch on it directly instead
-of parsing `message` text. `not_ready` always carries `"poll_status"`. See
-[Tool reference](tools.md#the-recovery-field) for the full values table.
+`not_ready` and `error` envelopes include a machine-readable `recovery` hint (`"fix_input"`, `"refresh"`, `"poll_status"`, or `"unknown"`). Callers can branch on this field directly. `not_ready` always sets `recovery: "poll_status"`. See [Tool reference](tools.md#the-recovery-field) for the full matrix.
 
-**The distinction between `ok` with an empty list and `not_found` is
-deliberate and important.**
+### Distinguishing empty results from missing symbols
+The difference between `ok` with an empty list and `not_found` conveys specific information:
+- `not_found` indicates the target symbol does not exist at that position or name.
+- `ok` with an empty list indicates the symbol exists, but contains zero references or children.
 
-- `not_found` means the resolution step itself failed: there is no symbol
-  at that position, or no symbol with that name exists. It is a dead end.
-- `ok` with an empty list means the query ran successfully and rust-analyzer
-  confirmed the symbol exists, but it has zero results, for example, a
-  function that is defined but never called anywhere in the
-  codebase. That zero is meaningful information.
-
-Collapsing these two into the same response would make it impossible to
-distinguish "I could not find that symbol" from "I found it and it has no
-callers."
-
-The three list-returning tools (`find_symbol`, `document_symbols`,
-`find_references`) also always add `total` (the full result count) and
-`truncated` (`true` only past a 200-item safety cap) to their `ok` envelope:
-`total == 0` is the same "found it, zero results" signal as an empty list,
-without a separate flag or message. See
-[Tool reference](tools.md#list-caps-total-and-truncated) for details.
+List-returning tools (`find_symbol`, `document_symbols`, `find_references`) include `total` and `truncated` fields:
+- `total: 0` signals a verified symbol with zero results.
+- `truncated: true` indicates results exceeded the 200-item safety cap. See [Tool reference](tools.md#list-caps-total-and-truncated) for details.
 
 ---
 
@@ -224,77 +191,32 @@ and the store logic in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py).
 
 ## 7. Refreshing the index
 
-**Blast radius:** `refresh` tears down and re-indexes the single global
-analyzer shared by the whole server: every other tool returns `not_ready`
-for every caller until re-indexing completes, which can take minutes on
-large projects. It should not be called mid-task unless the index is
-actually stale or broken.
+> **Blast radius**: `refresh` restarts the single shared analyzer. All tools return `not_ready` to all clients until re-indexing completes. Avoid calling `refresh` mid-task unless the index is stale or failed.
 
-The `refresh` tool rebuilds everything from scratch:
+The `refresh` tool executes two recovery steps:
 
-1. It restarts the code analyzer. The state is set back to `"indexing"`
-   *before* the old analyzer is shut down, so there is never a window where
-   a caller sees `"ready"` but the old index is being torn down. The restart
-   runs in the background: the tool returns immediately with an `"indexing"`
-   status, and callers should poll the `status` tool until it shows `"ready"`.
-2. It rebuilds the documentation search index. This runs synchronously and
-   finishes before the tool returns, so the documentation search is not in a
-   partial state after the refresh tool completes. If the doc index was never
-   initialised, or is currently in the `"error"` state, `refresh` re-runs the
-   full startup sequence for it (construct + adopt-or-build) rather than
-   calling rebuild on a store that may not exist or is known-broken.
-   `refresh` is therefore also the recovery path for a permanently-failed doc
-   index, the same way it is for the analyzer's `"error"` state (§3).
+1. **Restarts rust-analyzer**: The server sets state to `"indexing"` before shutting down the old instance. This prevents race conditions where callers observe `"ready"` during shutdown. The restart runs in the background. Callers should poll `status` until it returns `"ready"`.
+2. **Rebuilds documentation search**: The server rebuilds the ChromaDB documentation index synchronously. If the index never initialized or is in an `"error"` state, `refresh` executes the full startup sequence.
 
-One deliberate omission: the refresh does **not** delete rust-analyzer's
-saved on-disk work (its incremental analysis cache). This means re-indexing
-is much faster than a cold start: rust-analyzer can reuse prior work.
+`refresh` preserves rust-analyzer's on-disk cache. Re-indexing is significantly faster than a cold start because the analyzer reuses prior build artifacts.
 
 ---
 
-## 8. Startup and shutdown (lifespan)
+## 8. Server lifespan and initialization
 
-When the server starts, it is available immediately. Startup never blocks on
-either index finishing:
+The server starts immediately without blocking on background indexing:
 
-- The analyzer is launched in the background. The server becomes available to
-  clients immediately, answering `not_ready` until indexing completes (or
-  `error` if the background run itself fails, see §3).
-- The documentation index follows the same non-blocking shape, split into a
-  cheap synchronous part and a potentially-slow background part:
-    - If an already-completed, same-project collection exists on disk (a warm
-      restart), it is **adopted synchronously** (a metadata check only, no
-      re-embedding) and the index is `"ready"` before the lifespan even
-      yields.
-    - Otherwise the index is built from scratch in a **background thread**:
-      the lifespan yields immediately (`status`/navigation tools are usable
-      right away) while `doc_index_state` reports `"building"`; it flips to
-      `"ready"` when the background build finishes.
-    - A failure in either the cheap or the background half is recorded (not
-      swallowed silently) and surfaced via `status` as `doc_index_state ==
-      "error"` with a diagnostic message. The code-navigation tools are
-      unaffected either way, and `refresh` is the recovery path (§7).
-    - `status` also exposes `doc_index_chunk_count`, a live `collection.count()`
-      read (works whether the index was rebuilt or adopted), so a completed
-      index over zero matching Markdown files (a common misconfiguration: wrong
-      glob, empty/un-mounted project) is observable as `0` rather than reading
-      indistinguishably "healthy" from a populated index.
+- **Code analyzer**: Starts in a background task. The server accepts MCP connections immediately and returns `not_ready` until indexing finishes.
+- **Documentation index**:
+  - **Warm restart**: If a valid collection exists on disk, the server adopts it synchronously without re-embedding text.
+  - **Cold start**: The server builds the index in a background thread. `doc_index_state` reports `"building"` until complete.
+  - **Error handling**: Failures are captured and exposed via `status` as `doc_index_state == "error"`. Code navigation tools remain usable.
+  - **Chunk count verification**: `status` exposes `doc_index_chunk_count`. A count of `0` helps identify misconfigured Markdown paths or unmounted project directories.
 
-Once, at the very start of the lifespan, a non-fatal advisory preflight also
-runs: it checks whether the configured `rust_analyzer_bin` resolves to an
-existing executable and whether `project_root` exists and is a directory.
-Neither check can fail startup or set `state`/`doc_index_state` to `"error"`.
-The results are collected into a list and surfaced as `status`'s
-`preflight_warnings` (empty when both checks pass). This is deliberately
-narrower than a full readiness gate: no `Cargo.toml` check, since
-`project_root` is repo-agnostic by design and a Cargo.toml-at-root requirement
-would misfire on valid `rust-project.json` / subdirectory-Cargo.toml
-configurations.
+### Startup preflight
+On startup, an advisory preflight checks that `rust_analyzer_bin` exists and `project_root` is a valid directory. Preflight issues are recorded in `preflight_warnings` on the `status` tool. Preflight warnings never halt server startup.
 
-When the server stops, both the code analyzer and the documentation store are
-shut down cleanly. The lifespan wiring lives in
-[`core.py`](../../src/rust_lsp_mcp/core.py) and
-[`analyzer.py`](../../src/rust_lsp_mcp/analyzer.py).
+When the server stops, it shuts down both rust-analyzer and ChromaDB cleanly. Lifespan logic is implemented in [`core.py`](../../src/rust_lsp_mcp/core.py) and [`analyzer.py`](../../src/rust_lsp_mcp/analyzer.py).
 
 ---
 

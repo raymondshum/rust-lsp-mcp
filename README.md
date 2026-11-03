@@ -36,68 +36,54 @@ A full per-tool reference is in the [Tools / API reference](docs/guide/tools.md)
 
 ## Quick start
 
-> **Just want to wire the server into an AI assistant?** Skip to
-> [Connect it to an AI assistant](#connect-it-to-an-ai-assistant) — that path
+> **Just connecting to an AI assistant?** Skip to
+> [Connect it to an AI assistant](#connect-it-to-an-ai-assistant). That path
 > uses a pre-built Docker image and does not require VS Code or the dev
 > container.
 
-This path is for **contributors and developers** who want to work on the server
-itself inside a fully configured environment.
+This path is for **contributors and developers** modifying the server itself.
 
-**Prerequisites:** [Docker](https://www.docker.com/get-started/),
-[VS Code](https://code.visualstudio.com/), and the
-[Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers).
+### Prerequisites
+- [Docker](https://www.docker.com/get-started/)
+- [VS Code](https://code.visualstudio.com/)
+- [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
 
-**Steps:**
+### Step 1: Clone the repository
+```bash
+git clone https://github.com/raymondshum/rust-lsp-mcp.git
+cd rust-lsp-mcp
+```
 
-1. Clone this repository:
-   ```
-   git clone https://github.com/raymondshum/rust-lsp-mcp.git
-   ```
+### Step 2: Open in Dev Container
+1. Open the repository folder in VS Code.
+2. Select **Reopen in Container** when prompted (or open the Command Palette and run `Dev Containers: Reopen in Container`).
 
-2. Open the cloned folder in VS Code and choose **"Reopen in Container"** when
-   prompted (or run it from the command palette). The dev container — a
-   preconfigured environment built with Docker — builds automatically. After
-   the container is created, a setup script clones **ripgrep** version 14.1.1
-   (a popular command-line search tool) as a sample Rust project — so you have
-   something to explore out of the box — and installs all Python dependencies
-   using the `uv` package manager.
+> **Automated setup**: The container automatically builds, installs dependencies via `uv`, and clones a sample Rust repository (**ripgrep** 14.1.1) for immediate testing.
 
-3. Once inside the container, start the server:
-   ```
-   uv run rust-lsp-mcp
-   ```
-   An equivalent form is:
-   ```
-   python -m rust_lsp_mcp
-   ```
+### Step 3: Start the server
+Run the server in the integrated VS Code terminal:
+```bash
+uv run rust-lsp-mcp
+```
+*(Equivalent command: `python -m rust_lsp_mcp`)*
 
-**First-run indexing:** when the server starts, rust-analyzer indexes the Rust
-project. This takes anywhere from a few seconds to a couple of minutes. Tools
-that require the index reply with a `not_ready` status until indexing finishes.
-Call the `status` tool to check progress.
+> **Indexing note**: rust-analyzer indexes the sample project on startup. This takes a few seconds to two minutes. Tools return a `not_ready` envelope until indexing finishes. Call the `status` tool to check readiness.
 
 ## Connect it to an AI assistant
 
-An MCP client launches this server as a subprocess over stdio. The server needs
-rust-analyzer, the Python dependencies, and the full Rust toolchain — all of
-which live **inside a container**, not on your host. So rather than asking the
-client to run `uv` directly (which only works from *inside* the dev container),
-you build a self-contained image once and have the client launch it with
-`docker run`. This keeps your host clean and works for host-side clients like
-Claude Desktop.
+MCP clients launch this server as a subprocess over standard I/O (stdio). The server requires rust-analyzer, Python dependencies, and the Rust toolchain. Running the server inside Docker keeps your host system clean.
 
-**Prerequisite:** [Docker](https://www.docker.com/get-started/) on your host —
-this path needs no VS Code or dev container.
+### Prerequisites
+- [Docker](https://www.docker.com/get-started/) on your host machine.
 
-**1. Build the image** (once, from this repository):
-
-```
+### Step 1: Build the image
+Build the container image from the repository root:
+```bash
 docker build -t rust-lsp-mcp .
 ```
 
-**2. Point your MCP client at the image.** Most clients accept a JSON
-configuration block similar to this:
+### Step 2: Configure your MCP client
+Add the server to your client configuration (such as Claude Desktop):
 
 ```json
 {
@@ -115,89 +101,24 @@ configuration block similar to this:
 }
 ```
 
-What the pieces do:
+#### Configuration details
+- `run -i --rm`: Creates a temporary container per session connected via stdio. The container removes itself on exit.
+- `-v /absolute/path/to/your/rust/project:/project:ro`: Mounts your target Rust project read-only. Replace `/absolute/path/...` with your project's local path.
+  - **SELinux hosts**: On systems enforcing SELinux (such as Fedora with rootless Podman), append `,z` to share the mount across containers: `-v /path:/project:ro,z`. Use lowercase `z` for shared access, not uppercase `Z`.
+- `-v rust-lsp-mcp-data:/data`: Persists the ChromaDB documentation index and Cargo caches across restarts. The text embedding model is pre-baked into the image.
 
-- `run -i --rm` — start a fresh container per session, attached over stdio
-  (`-i`), and remove it when the session ends (`--rm`). No long-running
-  container to manage.
-- `-v /absolute/path/to/your/rust/project:/project:ro` — **bind-mount the Rust
-  project you want to explore**, read-only, at the path the server expects
-  (`/project`). Replace the left side with your project's absolute path. The
-  server is repo-agnostic — point it at any Rust project.
-  - **SELinux (rootless Podman):** if your host enforces SELinux with rootless
-    Podman, add a relabel suffix so the container can read the mount:
-    `-v /absolute/path/to/your/rust/project:/project:ro,z`. Plain `:ro` is
-    correct for a standard Docker daemon.
-    - **Shared (`z`) vs. private (`Z`):** use the lowercase, SHARED label `z`,
-      not the uppercase, private `Z` — this matches `scripts/prime-cache.sh`,
-      which mounts the same project tree with `:z`. The private `Z` relabels
-      the source tree with a category scoped to one container, which then
-      denies access to any OTHER container or tool (including a later
-      `prime-cache.sh` run, or `docker`/`podman` used interchangeably) that
-      mounts the same directory — the exact cross-container relabel conflict
-      `prime-cache.sh` warns about. The shared `z` label is compatible across
-      every container that mounts the same source tree, which is the case
-      here.
-- `-v rust-lsp-mcp-data:/data` — a **named volume** for the documentation index
-  and the Rust build/dependency cache, so they are built once and reused across
-  sessions ("download once"). The embedding model is **baked into the image** at
-  build time, so it needs no download at runtime.
+> **Process lifecycle**: Each client session launches a fresh rust-analyzer process. While the `/data` volume preserves Cargo's build cache, the in-memory index rebuilds on each start. For a long-lived process across calls, see [CLI access (daemon mode)](#cli-access-for-agents-without-mcp).
 
-The exact location of the config file depends on the client you are using; this
-shape is typical for clients such as Claude Desktop.
+### Network isolation (for untrusted code)
 
-**Note on startup:** each session starts a fresh rust-analyzer process, which
-re-indexes the project (seconds to a couple of minutes — the build cache on the
-`/data` volume keeps the underlying `cargo check` incremental, but the in-memory
-index is rebuilt each time). If you want rust-analyzer to stay hot across many
-calls, see [CLI access](#cli-access-for-agents-without-mcp) below — that's a
-different launch shape (a long-lived daemon), not another MCP-client config.
+Rust build scripts (`build.rs`) and procedural macros run host code during indexing. When analyzing untrusted code, run the container without network access.
 
-### Network isolation (recommended for untrusted code)
-
-Indexing a Rust project runs **untrusted code from that project on your host**:
-rust-analyzer compiles and executes the project's `build.rs` build scripts and
-proc-macros (this is how rust-analyzer works, not a flaw here). Combined with an
-un-isolated container, that code has read access to everything under `/project`
-and unrestricted outbound network — so a malicious project (or a malicious
-transitive crate) could exfiltrate your source. See
-[`docs/security/privacy-egress-audit.md`](docs/security/privacy-egress-audit.md)
-for the full analysis; no dependency of this server transmits your code on its
-own, but this build-script vector is real.
-
-The fix is to run the server with **no network**. Because the embedding model is
-baked into the image, the only remaining runtime network use is cargo fetching
-the scanned project's crates.io dependencies — which you warm **once** up front:
-
-**Default: warm the cache once, then run isolated (zero degradation).**
-
-1. **Prime** the dependency cache. `cargo fetch` downloads dependency *sources*
-   only — it runs no build scripts and expands no proc-macros, so unlike the
-   isolated run it executes no *compiled* project code:
-
-   ```
+1. **Prime the cache once** (fetches dependencies without running build scripts):
+   ```bash
    scripts/prime-cache.sh /absolute/path/to/your/rust/project
    ```
 
-   (equivalently: `docker run --rm -v /abs/project:/project -v rust-lsp-mcp-data:/data
-   --entrypoint cargo rust-lsp-mcp fetch --manifest-path /project/Cargo.toml`.
-   The project is mounted **read-write** here so `cargo` can write `Cargo.lock`
-   if the project doesn't commit one. `scripts/prime-cache.sh` auto-detects
-   `docker` or `podman`; override with `CONTAINER_ENGINE=…`.)
-
-   > **Caveat — priming still makes network calls the project controls.** This
-   > step is network-*on*, and `cargo fetch` resolves and downloads every
-   > registry **and git** dependency the project declares — so a malicious
-   > `Cargo.toml` can cause outbound connections to attacker-chosen hosts (e.g. a
-   > `git = "https://attacker/…"` dependency) and check out untrusted repos into
-   > the cache. It does not *execute build scripts*, but it is not a hermetic
-   > step. Only prime projects whose dependency set you would already let cargo
-   > resolve; for fully untrusted code, prime behind the allowlist proxy below or
-   > skip priming and accept the degraded first-index (see alternatives).
-
-2. **Point your MCP client at the isolated config** — `--network none` plus
-   `CARGO_NET_OFFLINE=true`, with the project back to `:ro`:
-
+2. **Run in isolated mode** (`--network none`):
    ```json
    {
      "mcpServers": {
@@ -215,114 +136,53 @@ the scanned project's crates.io dependencies — which you warm **once** up fron
    }
    ```
 
-   With the cache warmed, rust-analyzer compiles proc-macros and runs build
-   scripts **from the cached sources, offline** — full analysis, and the executed
-   code has no network to exfiltrate through.
+For detailed security threat models and proxy configurations, see [Privacy & egress audit](docs/security/privacy-egress-audit.md).
 
-**Alternatives:**
+### Guiding AI agents
 
-- **Maximum caution (skip priming):** run the isolated config from the very first
-  index. rust-analyzer still resolves the standard library and all first-party
-  code, but resolution *into un-cached external crates* is degraded (missing
-  hover/goto for dependency types, and proc-macro-generated items won't appear)
-  until the cache is warmed. `search_docs` and `document_symbols` are unaffected.
-- **Convenience over isolation:** use the plain config above (no `--network none`)
-  — full analysis with no priming step, but no egress protection. Only appropriate
-  for projects you trust.
-- **Allowlist proxy:** if you must let cargo reach the network during analysis,
-  route egress through a proxy that permits only `static.crates.io` (and denies
-  arbitrary hosts) rather than opening the network wholesale.
+AI assistants often default to file grep rather than semantic navigation. This repository includes a drop-in skill: [`rust-code-navigation`](.claude/skills/rust-code-navigation/SKILL.md).
 
-**Help your agent know when to use the server.** Wiring in the tools is not
-enough — an agent will often grep a Rust repo and never think to reach for
-semantic code navigation. This repo ships a drop-in skill,
-[`rust-code-navigation`](.claude/skills/rust-code-navigation/SKILL.md), that
-routes an agent toward semantic navigation (definitions, references, types)
-instead of text search, with a per-tool intent map and the common gotchas
-(`not_ready` while indexing, 1-based positions, empty-result-is-not-an-error).
-For a client that loads skills — such as Claude Code — copy that `SKILL.md`
-into your own project's `.claude/skills/rust-code-navigation/` so it travels
-with the repo you are exploring.
+For clients supporting skills (such as Claude Code), copy that file into your project's `.claude/skills/rust-code-navigation/SKILL.md`. It teaches the agent when to use definitions, references, and hover tools.
 
 ## CLI access (for agents without MCP)
 
-The two paths above assume your AI assistant can call MCP tools directly. Some
-agents — or subagents that don't inherit their parent's MCP tool access — can
-only run shell commands. For those, this repo ships a third launch shape: a
-long-lived **daemon** container plus a `rust-lsp` command-line client that
-talks to it, so a shell-only agent gets the same read-only navigation and doc
-search as an MCP client, just invoked as a subprocess instead of a tool call.
+Some agents can only run shell commands. For those environments, run the server as a persistent **daemon** and use the companion `rust-lsp` CLI client.
 
-This replaces the old "warm-start" `docker exec -i … /app/.venv/bin/rust-lsp-mcp`
-pattern some earlier versions of this README described. That pattern started a
-second **stdio server** inside a long-lived container; it's gone because
-running two servers against one Chroma store is an unguarded cross-process
-write hazard (see [known issue KI-13](docs/impl/known-issues.md#ki-13--chromadb-cross-process-single-writer-hazard-on-a-shared-data-volume)).
-The daemon replaces it with exactly **one** server process per container,
-reached through a client (`rust-lsp`), not a second server.
+### Step 1: Start the daemon
+Run this command from the repository root, pointing `RUST_PROJECT` to your Rust project:
 
-**1. Start the daemon** (once; it stays warm across calls). Run this from
-this repository's own directory — `docker compose` reads `docker-compose.yml`
-relative to the current directory — with `RUST_PROJECT` set to the absolute
-host path of the Rust project you want to analyze:
-
-```
+```bash
 RUST_PROJECT=/absolute/path/to/your/rust/project docker compose up -d rust-lsp-mcp
 ```
+*(For the network-isolated variant, use service `rust-lsp-mcp-isolated`)*
 
-This builds the image if needed and starts `rust-lsp-mcp` in streamable-HTTP
-mode, listening on `127.0.0.1` **inside the container only** — see the
-security note below. Use `rust-lsp-mcp-isolated` instead for the no-network
-variant (same cache-priming caveats as [Network isolation](#network-isolation-recommended-for-untrusted-code)
-above).
+The daemon listens on `127.0.0.1` inside the container. It does not publish host ports. This loopback constraint protects the service from unauthorized network access.
 
-**2. Run commands against it** with `docker exec` (or `podman exec` —
-identical usage). Use the **full path** `/app/.venv/bin/rust-lsp` — the
-image's `PATH` only adds `/usr/local/cargo/bin`, not `/app/.venv/bin`, so a
-bare `rust-lsp` is "command not found" here:
+### Step 2: Run CLI commands
+Execute commands via `docker exec` (or `podman exec`). Specify the full executable path `/app/.venv/bin/rust-lsp`:
 
-```
-# First call after starting the daemon: ride out indexing (up to 180s).
-# --wait must come BEFORE the subcommand.
+```bash
+# Check daemon status and wait for indexing (up to 180 seconds)
 docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp --wait 180 status
 
-# Look up a symbol
+# Search for a symbol
 docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp find-symbol MyStruct
 
-# Client (and, if reachable, daemon) version info
+# Inspect client and daemon versions
 docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp version
 ```
 
-Every command prints a JSON envelope to stdout (`{"status": ..., ...}`,
-matching the [Tools / API reference](docs/guide/tools.md)) and exits with a
-code that tells a shell script or agent what happened, without needing to
-parse the JSON to decide:
+### Exit codes
+Subcommands output JSON to stdout and return explicit exit codes:
 
-| Exit code | Meaning |
-|---|---|
-| `0` | `ok` or `not_found` — the daemon answered (an empty/negative result is still an answer, not a failure). |
-| `1` | `error` envelope — bad input or an internal failure; see `message` in the JSON. |
-| `2` | `not_ready` — the daemon is reachable but still indexing (or a `--wait` window expired while it was still not ready). |
-| `3` | The daemon could not be reached at all (not started yet, wrong port, or a `--wait` window expired without ever connecting). |
+| Exit code | Meaning | Action |
+|---|---|---|
+| `0` | Success (`ok` or `not_found`) | Result received. Empty results are valid answers. |
+| `1` | Error (`error` envelope) | Bad input or server error. Check JSON `message`. |
+| `2` | Not ready (`not_ready`) | Indexing in progress. Retry or pass `--wait`. |
+| `3` | Connection failure | Daemon unreachable. Check if the container is running. |
 
-Each subprocess call is fast once the daemon is warm — a `status` call
-measured well under a second (about 0.9s wall-clock, including process
-startup) in local testing — plus a one-time indexing wait the first time the
-project is analyzed (`--wait` rides through that automatically). Full
-subcommand reference, `--wait` semantics, and troubleshooting:
-[docs/guide/cli.md](docs/guide/cli.md).
-
-**Security note (loopback-only, not authentication):** the daemon's HTTP
-listener binds to `127.0.0.1` and is hard-coded that way — it is not
-configurable and this compose file never publishes it with a `ports:` mapping.
-That listener has no authentication of its own; loopback-only is the entire
-protection. This matters because the same container also executes **untrusted
-code from the Rust project it's pointed at** — rust-analyzer runs that
-project's `build.rs` build scripts and proc-macros to produce its index (see
-[Network isolation](#network-isolation-recommended-for-untrusted-code) above).
-Keeping the listener off any published port means that code (or anything else
-on the network) cannot reach the MCP tools, which are read-only regardless.
-Never add a `ports:` mapping to `docker-compose.yml` for either service.
+For complete subcommands, options, and troubleshooting, see the [CLI reference](docs/guide/cli.md).
 
 ## Documentation
 

@@ -78,9 +78,7 @@ it directly instead of parsing `message` text. Exactly four values:
 | `poll_status` | The server is transiently not ready (still indexing/building). This is the *only* value `not_ready` ever carries. | Poll `status` or `analyzer_status` and retry once ready. |
 | `unknown` | An unexpected/unclassified failure (e.g. the catch-all LSP-exception fallback), or a rare server-side condition that isn't a client input mistake. The default for `error()` when no more specific hint applies. | Surface the message; retrying once is reasonable, but there is no guaranteed fix. |
 
-There is deliberately no `retriable` boolean and no separate `code` enum — see
-`docs/audit/2026-07-02-usability-review.md` (UR-6) for why those were
-considered and dropped.
+The envelope provides the single `recovery` field rather than separate boolean flags or nested error codes. Callers can branch directly on the recovery hint.
 
 ### List caps: `total` and `truncated`
 
@@ -89,14 +87,10 @@ to their `ok` envelope, alongside their list:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `total` | integer | The full result count, *before* any cap is applied. `total == 0` is how you tell "the query succeeded with zero results" apart from a bad query — no separate flag or message is needed for that case. |
-| `truncated` | boolean | `true` only when `total` exceeds `MAX_LIST_RESULTS` (200), in which case the list carries just the first 200 entries, in the same order they'd otherwise appear. `false` (list is complete) otherwise. |
+| `total` | integer | Total matching results before capping. `total: 0` confirms a successful search with zero matches. |
+| `truncated` | boolean | `true` when results exceed the 200-item safety cap (`MAX_LIST_RESULTS`). `false` when the list contains all matches. |
 
-There is deliberately **no pagination/offset** — narrowing the query (a more
-specific position, name, or file) is the intended way to get past the cap, not
-paging through it. See `docs/audit/2026-07-02-usability-review.md` (UR-11,
-which also folds in UR-5 and UR-12) for why pagination was considered and
-dropped in favor of this single high safety cap.
+Tools enforce a flat safety cap without pagination. To inspect results beyond the 200-item cap, refine your query with a narrower symbol prefix, specific filename, or declaration filter.
 
 ---
 
@@ -179,15 +173,15 @@ List every symbol defined in one file, in declaration order.
 
 | Name | Type | Required | Meaning |
 |---|---|---|---|
-| `file` | string | yes | Path relative to the project root, e.g. `"src/main.rs"`. Checked lexically before the analyzer is called — absolute paths and `..`-escaping paths are rejected. The check is purely textual (it does not resolve symlinks), so a symlink *inside* the workspace that points outside it is not caught. |
+| `file` | string | yes | Project-relative path (e.g. `"src/main.rs"`). Absolute paths or paths with `..` are rejected immediately. |
 
 **Returns**
 
 | Status | Fields |
 |---|---|
-| `ok` | `symbols`: list of symbol objects (see below); `total` and `truncated` (see [List caps](#list-caps-total-and-truncated) above). The list may be empty — a file with only comments or macros is a valid result with zero symbols (`total: 0`). |
+| `ok` | `symbols`: list of symbol objects; `total` and `truncated`. Valid files with zero declarations return an empty list (`total: 0`). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — the language server raised an exception for this request (`recovery: "unknown"`; for example, the file path does not exist in the project or cannot be read), or `file` is an absolute path or escapes the project root via `..` (`recovery: "fix_input"`; rejected before the analyzer is called). Note: a valid file with no symbols returns `ok` with an empty list, not `error`. |
+| `error` | `message`, `recovery` — returns `recovery: "fix_input"` for invalid paths, or `recovery: "unknown"` for LSP read failures. |
 
 Each item in `symbols` (there is no `file` field — all entries belong to the
 file you passed in):
