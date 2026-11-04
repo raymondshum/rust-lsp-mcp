@@ -17,6 +17,7 @@ The ``rust_lsp_mcp.tools`` package auto-imports all submodules, so each new tool
 file self-registers with zero edits to a central registry.
 """
 
+import importlib.metadata
 import logging
 import os
 import pathlib
@@ -199,8 +200,9 @@ def _build_mcp(settings: Settings) -> FastMCP[dict[str, Any]]:  # type: ignore[t
     ``importlib.reload`` dance: call this directly with a constructed
     ``Settings`` and inspect the resulting ``FastMCP.settings``.
     """
+    app: FastMCP[dict[str, Any]]  # type: ignore[type-arg]
     if settings.transport == "streamable-http":
-        return FastMCP(  # type: ignore[type-arg]
+        app = FastMCP(  # type: ignore[type-arg]
             "rust-lsp-mcp",
             host="127.0.0.1",
             port=settings.http_port,
@@ -208,11 +210,28 @@ def _build_mcp(settings: Settings) -> FastMCP[dict[str, Any]]:  # type: ignore[t
             json_response=True,
             instructions=_INSTRUCTIONS,
         )
-    return FastMCP(  # type: ignore[type-arg]
-        "rust-lsp-mcp",
-        lifespan=_lifespan,
-        instructions=_INSTRUCTIONS,
-    )
+    else:
+        app = FastMCP(  # type: ignore[type-arg]
+            "rust-lsp-mcp",
+            lifespan=_lifespan,
+            instructions=_INSTRUCTIONS,
+        )
+    # MCP serverInfo.version (backlog line 82).  FastMCP 1.12.4 takes no
+    # version argument (mcp/server/fastmcp/server.py lines 122 to 147) and
+    # builds its low-level server without one (line 169), so the low-level
+    # create_initialization_options() falls back to pkg_version("mcp")
+    # (mcp/server/lowlevel/server.py line 174) and serverInfo named the SDK
+    # version.  The private _mcp_server attribute is the only way to set it.
+    app._mcp_server.version = _server_version()
+    return app
+
+
+def _server_version() -> str:
+    """Return the installed ``rust-lsp-mcp`` version, or ``"unknown"``."""
+    try:
+        return importlib.metadata.version("rust-lsp-mcp")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 # Transport is read once at import time — the module-level ``mcp`` app is

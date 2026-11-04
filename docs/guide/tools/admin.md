@@ -37,14 +37,16 @@ Always returns `status: "ok"` with a health envelope:
 |---|---|---|
 | `state` | string | `"indexing"`, `"ready"`, or `"error"`. |
 | `analyzer_error` | string \| null | Diagnostic error string if `state` is `"error"`. After a rust-analyzer crash: `rust-analyzer exited with code <n>; last stderr: <up to 20 lines>`. |
-| `analyzer_health` | string \| null | rust-analyzer's own health report: `"ok"`, `"warning"` or `"error"` (for example a failed workspace load). `"error"` can appear while `state` is `"ready"`. `null` before the first report and after `refresh`. |
+| `analyzer_health` | string \| null | rust-analyzer's own health report: `"ok"`, `"warning"` or `"error"` (for example a failed workspace load). `"error"` can appear while `state` is `"ready"`. `null` before the first report, after `refresh` and after rust-analyzer exits. |
 | `analyzer_health_message` | string \| null | The message of that health report. |
+| `watcher_health` | string \| null | Health of rust-analyzer's file watcher: `"error"` once its stderr reports a watch failure in this run (for example the host inotify limit, `notify error: OS file watch limit reached.`), `"ok"` once `state` is `"ready"` without one, `null` before the run is ready, after `refresh` and after rust-analyzer exits. |
+| `watcher_message` | string \| null | The stderr line of the run's first watch failure. |
 | `analyzer_exit_code` | integer \| null | Exit code of a rust-analyzer process that exited without a shutdown request; `state` is then `"error"` and gated tools return `rust-analyzer is not running (exited with code <n>); call refresh`. Cleared by `refresh`. |
 | `indexed_commit` | string \| null | Git HEAD commit captured at analyzer start and re-captured when a re-index completes. |
 | `current_commit` | string \| null | Live git HEAD commit on disk. |
-| `stale` | boolean \| null | `true` if `indexed_commit != current_commit`. `null` if git is unavailable. `indexed_commit` is re-captured when a watcher-driven re-index ends, so a branch switch that changes Rust or Cargo files returns this to `false` without `refresh`. |
+| `stale` | boolean \| null | `true` if `indexed_commit != current_commit`. `null` if git is unavailable. `indexed_commit` is re-captured once rust-analyzer reports itself quiescent after a watcher-driven re-index, and by `status` itself when HEAD moved over a tree the index already reflects: rust-analyzer is quiescent, and every Rust or Cargo file that differs between the two commits matches HEAD on disk and was last modified more than 2 seconds ago. So after a commit or a branch switch, a switch that changes no Rust or Cargo file included, this returns to `false` on the next `status` call once rust-analyzer is quiescent, without `refresh`. |
 | `indexing_started_at` | string \| null | ISO 8601 UTC time the current indexing run began (reset by `refresh`). |
-| `analyzer_progress` | string \| null | Latest rust-analyzer progress title and message. |
+| `analyzer_progress` | string \| null | Latest rust-analyzer progress title and message; `"<title> done"` (for example `"Indexing done"`) after that work ends. |
 | `analyzer_progress_at` | string \| null | ISO 8601 UTC time of the latest progress report. |
 | `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. Stays `"ready"` during a rebuild over an existing index (the old index keeps answering); `"building"` only for the first build on an empty store. |
 | `doc_index_error` | string \| null | Error message if the documentation index build failed; also set with `doc_index_state` `"ready"` when the last rebuild failed and the old index is still served. |

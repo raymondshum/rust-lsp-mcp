@@ -14,6 +14,8 @@ Coverage:
       instead of ``indexing``, and the message carries the process's stderr
       (a real subprocess read by the replacement stderr reader).
     - A normal shutdown is not a death.
+    - The death clears ``analyzer_health``, ``analyzer_health_message`` and
+      the watcher fields (backlog line 84).
     - ``restart()`` clears ``analyzer_exit_code``, ``analyzer_health`` and
       ``analyzer_health_message``, so a new run that fails before its process
       starts reports "failed to start", not the old exit code.
@@ -181,12 +183,20 @@ class TestDeathAfterReady:
                 lsp = await _await_first_instance(instances)
                 await _wait_until(lambda: mgr.state == STATE_READY)
                 assert mgr.analyzer_exit_code is None
+                await mgr._make_status_handler(mgr._generation)("ok", None, True)
+                assert mgr.analyzer_health == "ok"
+                assert mgr.watcher_health == "ok"
 
                 lsp.process.die(137)
                 await _settle(mgr)
 
                 assert mgr.state == STATE_ERROR
                 assert mgr.analyzer_exit_code == 137
+                # Backlog line 84: a dead process has no health report.
+                assert mgr.analyzer_health is None
+                assert mgr.analyzer_health_message is None
+                assert mgr.watcher_health is None
+                assert mgr.watcher_message is None
                 assert mgr.error_message is not None
                 assert mgr.error_message.startswith("rust-analyzer exited with code 137")
                 assert "last stderr:" in mgr.error_message
@@ -434,12 +444,16 @@ class TestRestartClearsDeathFields:
                 await mgr.start()
                 lsp = await _await_first_instance(dying)
                 await _wait_until(lambda: mgr.state == STATE_READY)
-                await mgr._make_status_handler(mgr._generation)("error", "workspace load failed")
+                await mgr._make_status_handler(mgr._generation)(
+                    "error", "workspace load failed", True
+                )
+                assert mgr.analyzer_health == "error"
                 lsp.process.die(137)
                 await _settle(mgr)
                 assert mgr.analyzer_exit_code == 137
-                assert mgr.analyzer_health == "error"
-                assert mgr.analyzer_health_message == "workspace load failed"
+                # The death clears the health of the dead process.
+                assert mgr.analyzer_health is None
+                assert mgr.analyzer_health_message is None
 
                 mp.setattr(
                     analyzer_module, "PatchedRustAnalyzer", _factory(StartFailureLsp, failing)
@@ -543,7 +557,7 @@ class TestStderrReader:
             mgr = AnalyzerManager(rust_analyzer_bin="/fake", repository_root="/fake")
             lines: collections.deque[str] = collections.deque(maxlen=200)
             started, done = asyncio.Event(), asyncio.Event()
-            reader = mgr._make_stderr_reader(lsp, lines, started, done)  # ty: ignore[invalid-argument-type]
+            reader = mgr._make_stderr_reader(mgr._generation, lsp, lines, started, done)  # ty: ignore[invalid-argument-type]
             task = asyncio.create_task(reader())
             await proc.wait()
             await asyncio.wait_for(done.wait(), 5)

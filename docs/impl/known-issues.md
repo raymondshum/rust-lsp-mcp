@@ -215,6 +215,24 @@ Check this list at these lifecycle checkpoints (see
   readability check** on `/project` (surfaced via `preflight_warnings`, or
   failing louder) — future work, out of the C4 phase's docs-only scope.
 
+### KI-17 — The host inotify watch limit stops rust-analyzer's file watcher
+- **Where:** the rust-analyzer stderr reader in
+  [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`_make_stderr_reader`, which matches `notify error:` lines) · the host's
+  `fs.inotify.max_user_watches` and `fs.inotify.max_user_instances`.
+- **What:** once the host limit is reached, rust-analyzer stops receiving
+  change events for the paths it could not watch (it logs `notify error: OS
+  file watch limit reached.`, or an I/O error when no inotify instance is
+  left). `status` now reports this as `watcher_health: "error"`, with the
+  stderr line in `watcher_message`.
+- **Why it matters:** a branch switch or an edit no longer reaches the code
+  index until `refresh`, so `stale` and query answers can describe an older
+  tree.
+- **Status:** decided: the operator raises the limit on the host. No project
+  file sets it from a container, because rootless podman containers share one
+  user namespace, so a container write to the sysctl would change it for
+  every container of that user.
+
 ---
 
 ## Resolved

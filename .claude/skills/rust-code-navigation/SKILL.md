@@ -149,10 +149,10 @@ project's source changed underneath it); don't call it speculatively or to
 - **`status` reports both indexes.** `stale` covers committed code changes
   (the indexed commit against the current `HEAD`); `doc_stale` covers the doc
   index (its stamped commit and its Markdown files against the tree now).
-- **After a branch switch,** poll `status` until `stale` is `false`. If
-  `stale` still reads `true` after 60 seconds, call `refresh` once: a switch
-  that changes no Rust or Cargo file starts no re-index, so `stale` stays
-  `true` until `refresh`.
+- **After a commit or a branch switch,** poll `status` until `stale` is
+  `false`. It returns to `false` on the next `status` call once rust-analyzer
+  is quiescent, a switch that changes no Rust or Cargo file included. Call
+  `refresh` once only if `stale` still reads `true` after 60 seconds.
 - **`search_docs` answers from the doc index, which no running server
   rebuilds on its own.** After a change, `doc_stale` reads `true` until the
   next `refresh` or server restart. During a rebuild over an existing index,
