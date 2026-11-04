@@ -67,8 +67,9 @@ import asyncio
 import contextlib
 import logging
 import subprocess
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 
 from multilspy.language_servers.rust_analyzer.rust_analyzer import RustAnalyzer
@@ -91,6 +92,28 @@ DRAIN_TIMEOUT_SECONDS: float = 10.0
 _log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# Signature of the ``$/progress`` notification handler a manager hands to
+# ``PatchedRustAnalyzer``: multilspy awaits notification handlers with the
+# notification's ``params`` (``lsp_protocol_handler/server.py`` line 557).
+ProgressHandler = Callable[[Any], Coroutine[Any, Any, None]]
+
+
+# rust-analyzer work-done progress tokens whose ``end`` means the index now
+# reflects the tree on disk: cache priming, the workspace fetch and the VFS
+# roots scan.  Only these trigger the ``indexed_commit`` re-capture; any other
+# token (flycheck's ``rust-analyzer/flycheck/<n>`` included) says nothing
+# about which tree the index holds (R-gate falsification, 2026-11-04: with
+# the watcher dead, a flycheck ``end`` set ``stale: false`` while the index
+# held the old branch).
+REINDEX_PROGRESS_TOKENS: frozenset[str] = frozenset(
+    {"rustAnalyzer/cachePriming", "rustAnalyzer/Fetching", "rustAnalyzer/Roots Scanned"}
+)
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string (seconds precision)."""
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 class AnalyzerTornDownError(RuntimeError):
@@ -171,10 +194,13 @@ class PatchedRustAnalyzer(RustAnalyzer):
         logger: MultilspyLogger,
         repository_root_path: str,
         rust_analyzer_bin: str,
+        progress_handler: ProgressHandler | None = None,
     ) -> None:
         # Store binary path before super().__init__ so the override can see it.
         # RustAnalyzer.__init__ calls setup_runtime_dependencies immediately.
         self._rust_analyzer_bin = rust_analyzer_bin
+        # Registered for ``$/progress`` by _get_initialize_params (see there).
+        self._progress_handler = progress_handler
         super().__init__(config, logger, repository_root_path)
 
     def setup_runtime_dependencies(  # type: ignore[override]
@@ -185,7 +211,9 @@ class PatchedRustAnalyzer(RustAnalyzer):
         return self._rust_analyzer_bin
 
     def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
-        """Advertise UTF-32 position encoding to ensure Unicode codepoint offsets.
+        """Override three things in multilspy's initialize parameters.
+
+        **Position encoding.** Advertise UTF-32 to ensure Unicode codepoint offsets.
 
         multilspy's bundled init params request ``positionEncodings: ["utf-16"]``,
         so rust-analyzer reports character offsets as UTF-16 code units — wrong on
@@ -198,12 +226,36 @@ class PatchedRustAnalyzer(RustAnalyzer):
         All offset handling downstream (positions.py, the tool layer) is
         encoding-agnostic — it forwards whatever the negotiated encoding yields —
         so changing the negotiation is sufficient; no per-line transcoding.
+
+        **File watching (SW-03).** Set ``initializationOptions.files.watcher``
+        to ``"server"``.  multilspy's bundled ``"client"`` makes rust-analyzer
+        register a file-watch with the client, and multilspy accepts that
+        registration but never sends a ``workspace/didChangeWatchedFiles``
+        event, so a new file after a branch switch, a pull or an agent's edit
+        never reached the index without ``refresh``.  With ``"server"``,
+        rust-analyzer watches the project tree itself.
+
+        **Progress capture (SW-12).** Bind ``$/progress`` to the manager's
+        ``progress_handler``.  multilspy's ``start_server()`` binds
+        ``$/progress`` to ``do_nothing`` (``rust_analyzer.py`` line 152) and
+        then calls this method (line 160), before ``initialize`` is sent and
+        before the ready wait (line 177).  ``on_notification`` stores the
+        callback in a dict keyed by method (``lsp_protocol_handler/server.py``
+        line 508), so this later binding replaces ``do_nothing`` and every
+        indexing progress event reaches the handler.  Rebinding after
+        ``start_server()`` yields would be too late: the yield comes after the
+        ready wait, so all indexing progress would already be lost.
         """
         params = super()._get_initialize_params(repository_absolute_path)
-        # The bundled JSON always carries capabilities.general; assert-fail loudly
-        # rather than silently no-op if multilspy ever restructures it.
-        general = cast(dict[str, Any], params)["capabilities"]["general"]
+        # The bundled JSON always carries capabilities.general and
+        # initializationOptions.files; assert-fail loudly rather than silently
+        # no-op if multilspy ever restructures them.
+        raw = cast(dict[str, Any], params)
+        general = raw["capabilities"]["general"]
         general["positionEncodings"] = ["utf-32", "utf-16"]
+        raw["initializationOptions"]["files"]["watcher"] = "server"
+        if self._progress_handler is not None:
+            self.server.on_notification("$/progress", self._progress_handler)
         return params
 
 
@@ -234,6 +286,14 @@ class AnalyzerManager:
     ``manager.state`` directly.
     """
 
+    # Class-level defaults for the freshness/progress fields (SW-12), so a
+    # manager built without __init__ (test stubs use AnalyzerManager.__new__)
+    # still reads them as None.  __init__ and _run assign instance values.
+    _indexing_started_at: str | None = None
+    _progress_message: str | None = None
+    _progress_at: str | None = None
+    _head_read_seq: int = 0
+
     def __init__(self, rust_analyzer_bin: str, repository_root: str) -> None:
         self._rust_analyzer_bin = rust_analyzer_bin
         self._repository_root = repository_root
@@ -245,7 +305,20 @@ class AnalyzerManager:
         # None before ready and after teardown.  Access via delegate methods.
         self._lsp: PatchedRustAnalyzer | None = None
         # Git commit hash of the tree being indexed; None until _run captures it.
+        # Re-captured by the progress handler after a watcher re-index.
         self._indexed_commit: str | None = None
+        # ISO 8601 UTC time the current run began (top of _run); None before
+        # the first run.  Reset by every restart, since each restart runs _run.
+        self._indexing_started_at: str | None = None
+        # Latest rust-analyzer $/progress title/message and its ISO 8601 UTC
+        # arrival time; None until the first progress notification of a run.
+        self._progress_message: str | None = None
+        self._progress_at: str | None = None
+        # Ticket counter for the progress handler's HEAD reads: each re-capture
+        # takes the next ticket before its git call and writes only if its
+        # ticket is still the latest, so of two overlapping re-captures the
+        # older read can never land last.
+        self._head_read_seq: int = 0
         # rust-analyzer `--version` output, captured once by start();
         # None until captured, or if capture fails.  Never re-captured by
         # restart() — the binary underlying rust_analyzer_bin cannot change
@@ -275,6 +348,21 @@ class AnalyzerManager:
     def indexed_commit(self) -> str | None:
         """Git commit hash of the tree currently indexed, or None if not yet known."""
         return self._indexed_commit
+
+    @property
+    def indexing_started_at(self) -> str | None:
+        """ISO 8601 UTC time the current indexing run began, or None before the first."""
+        return self._indexing_started_at
+
+    @property
+    def progress_message(self) -> str | None:
+        """Latest rust-analyzer ``$/progress`` title and message, or None."""
+        return self._progress_message
+
+    @property
+    def progress_at(self) -> str | None:
+        """ISO 8601 UTC time of the latest ``$/progress`` notification, or None."""
+        return self._progress_at
 
     @property
     def rust_analyzer_version(self) -> str | None:
@@ -331,12 +419,12 @@ class AnalyzerManager:
             self._rust_analyzer_version_captured = True
         self._task = asyncio.create_task(self._run(self._generation), name="analyzer-lifecycle")
 
-    async def _capture_head_commit(self) -> None:
-        """Capture git HEAD commit into ``_indexed_commit``.
+    async def _read_head_commit(self) -> str | None:
+        """Return ``git -C <repo> rev-parse HEAD``, or None on any failure.
 
-        Run ``git -C <repo> rev-parse HEAD`` in a thread.  On any failure
-        (not a git repo, git missing, etc.) set ``_indexed_commit`` to None
-        and log at debug — never raise.
+        The git call runs through ``asyncio.to_thread`` so it never blocks
+        the event loop.  On any failure (not a git repo, git missing, etc.)
+        log at debug and return None — never raise.
         """
         try:
 
@@ -349,17 +437,99 @@ class AnalyzerManager:
 
             result = await asyncio.to_thread(_run_git)
             if result.returncode == 0:
-                self._indexed_commit = result.stdout.strip()
-            else:
-                _log.debug(
-                    "AnalyzerManager: git rev-parse HEAD failed (rc=%d): %s",
-                    result.returncode,
-                    result.stderr.strip(),
-                )
-                self._indexed_commit = None
+                return result.stdout.strip()
+            _log.debug(
+                "AnalyzerManager: git rev-parse HEAD failed (rc=%d): %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+            return None
         except Exception:
             _log.debug("AnalyzerManager: could not capture HEAD commit", exc_info=True)
-            self._indexed_commit = None
+            return None
+
+    async def _capture_head_commit(self) -> None:
+        """Capture git HEAD commit into ``_indexed_commit``.
+
+        Delegates to :meth:`_read_head_commit`; on any failure
+        ``_indexed_commit`` becomes None — never raises.
+        """
+        self._indexed_commit = await self._read_head_commit()
+
+    def _make_progress_handler(self, gen: int) -> ProgressHandler:
+        """Build the ``$/progress`` handler for the run spawned under *gen*.
+
+        ``_run`` calls this and passes the result to ``PatchedRustAnalyzer``
+        as ``progress_handler``; ``_get_initialize_params`` registers it with
+        multilspy, which awaits it for every ``$/progress`` notification.
+
+        Every notification of the current generation records
+        ``progress_message`` (the work-done ``title``, remembered per token
+        from its ``begin`` event, joined with the latest ``message``) and
+        ``progress_at``; ``begin`` and ``end`` events are logged at info as
+        ``rust-analyzer progress: <title> <message>``.  A superseded run
+        (``gen != self._generation``) records nothing.
+
+        **Commit re-capture after a watcher re-index.**  rust-analyzer
+        watches the tree itself (SW-03), so a branch switch re-indexes without
+        a restart and ``_run``'s one commit capture would go stale.  On the
+        ``end`` event of a re-index token (:data:`REINDEX_PROGRESS_TOKENS`;
+        any other token, flycheck's included, is ignored), while ``state ==
+        "ready"`` and *gen* is current, the handler takes a read ticket,
+        awaits :meth:`_read_head_commit`, re-checks the generation after the
+        await (a run superseded during the git call must not overwrite the
+        value ``restart()`` cleared) and checks that its ticket is still the
+        latest (multilspy runs each notification as its own task, so two
+        re-captures can overlap and the older read must not land last), and
+        only then writes ``_indexed_commit``, logging at info when the commit
+        changed.
+
+        Limit: rust-analyzer emits progress only when a change touches a file
+        it loads (cache priming is on in multilspy's ``initialize_params.json``
+        line 574), so a branch switch that changes no Rust or Cargo file
+        leaves ``indexed_commit`` at the old commit and ``stale`` at ``true``
+        until ``refresh``.
+        """
+        titles: dict[Any, str] = {}
+
+        async def _on_progress(params: Any) -> None:
+            if gen != self._generation or not isinstance(params, dict):
+                return
+            value = params.get("value")
+            if not isinstance(value, dict):
+                return
+            token = params.get("token")
+            kind = value.get("kind")
+            if kind == "begin":
+                titles[token] = str(value.get("title") or "")
+            title = titles.get(token, "")
+            message = value.get("message")
+            text = " ".join(part for part in (title, str(message or "")) if part) or None
+            if kind == "end":
+                titles.pop(token, None)
+            self._progress_message = text
+            self._progress_at = _utc_now_iso()
+            if kind in ("begin", "end"):
+                _log.info("rust-analyzer progress: %s %s", title, message or "")
+            if kind != "end" or token not in REINDEX_PROGRESS_TOKENS:
+                return
+            if self.state != STATE_READY:
+                return
+            self._head_read_seq += 1
+            ticket = self._head_read_seq
+            new_commit = await self._read_head_commit()
+            if gen != self._generation or ticket != self._head_read_seq:
+                return
+            old_commit = self._indexed_commit
+            self._indexed_commit = new_commit
+            if new_commit != old_commit:
+                _log.info(
+                    "indexed_commit re-captured after re-index: %s -> %s",
+                    old_commit,
+                    new_commit,
+                )
+
+        return _on_progress
 
     async def _capture_rust_analyzer_version(self) -> None:
         """Capture ``<rust_analyzer_bin> --version`` into ``_rust_analyzer_version``.
@@ -423,6 +593,10 @@ class AnalyzerManager:
         process.  ``server.stop()`` is a no-op on an already-clean exit
         (multilspy already called it; the process handle is already None).
         """
+        self._indexing_started_at = _utc_now_iso()
+        self._progress_message = None
+        self._progress_at = None
+        _log.info("AnalyzerManager: analyzer start (gen %d)", gen)
         # Capture the commit being indexed before starting the server.
         await self._capture_head_commit()
         if gen != self._generation:
@@ -449,7 +623,9 @@ class AnalyzerManager:
                 logger=logger,
                 repository_root_path=self._repository_root,
                 rust_analyzer_bin=self._rust_analyzer_bin,
+                progress_handler=self._make_progress_handler(gen),
             )
+            _log.info("AnalyzerManager: workspace load begun (%s)", self._repository_root)
             async with lsp.start_server():
                 # We are now inside the context: indexing is complete (quiescent).
                 if gen != self._generation:

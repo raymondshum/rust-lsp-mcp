@@ -614,3 +614,69 @@ class TestStatusRustAnalyzerVersion:
             mgr = asyncio.run(_scenario())
 
         assert mgr.rust_analyzer_version is None
+
+
+# ---------------------------------------------------------------------------
+# SW-04 / SW-12: freshness and progress fields
+# ---------------------------------------------------------------------------
+
+_NEW_FIELDS = (
+    "doc_indexed_commit",
+    "doc_stale",
+    "indexing_started_at",
+    "analyzer_progress",
+    "analyzer_progress_at",
+)
+
+
+class TestStatusFreshnessFields:
+    def test_new_fields_null_without_manager_or_store(self) -> None:
+        from rust_lsp_mcp.doc_store import clear_doc_store
+
+        clear_doc_store()
+        result = _call_status(None, subprocess_raises=OSError("no git"))
+        assert result["status"] == STATUS_OK
+        for field in _NEW_FIELDS:
+            assert field in result
+            assert result[field] is None, field
+
+    def test_progress_fields_read_from_manager(self) -> None:
+        mgr = _make_manager(STATE_INDEXING)
+        mgr._indexing_started_at = "2026-11-04T07:00:00+00:00"
+        mgr._progress_message = "Indexing 3/10 (core)"
+        mgr._progress_at = "2026-11-04T07:00:05+00:00"
+        result = _call_status(mgr, subprocess_raises=OSError("no git"))
+        assert result["indexing_started_at"] == "2026-11-04T07:00:00+00:00"
+        assert result["analyzer_progress"] == "Indexing 3/10 (core)"
+        assert result["analyzer_progress_at"] == "2026-11-04T07:00:05+00:00"
+
+    def test_doc_stale_true_after_doc_file_changes(self, tmp_path: Any) -> None:
+        import os
+
+        from rust_lsp_mcp.doc_store import init_doc_store
+        from rust_lsp_mcp.settings import Settings
+        from tests.test_doc_store import FakeEmbeddingFunction
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        doc = corpus / "guide.md"
+        doc.write_text("# Guide\n\nOriginal text.\n", encoding="utf-8")
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md",
+        )
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+
+        # git fails both at build time (not a repo) and here (patched), so the
+        # commit halves agree on "none" and only the digest decides.
+        before = _call_status(None, subprocess_raises=OSError("no git"))
+        assert before["doc_index_state"] == "ready"
+        assert before["doc_indexed_commit"] == "none"
+        assert before["doc_stale"] is False
+
+        mtime = doc.stat().st_mtime_ns + 1_000_000_000
+        doc.write_text("# Guide\n\nEdited after the build.\n", encoding="utf-8")
+        os.utime(doc, ns=(mtime, mtime))
+        after = _call_status(None, subprocess_raises=OSError("no git"))
+        assert after["doc_stale"] is True
