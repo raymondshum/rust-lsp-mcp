@@ -12,9 +12,8 @@ Test coverage:
       transitions to ``"ready"`` once the background task completes.  A
       lifespan implementation that blocked on the rebuild before yielding
       would deadlock the ``asyncio.wait_for`` wrapper and fail this test.
-    - When an on-disk collection can be adopted synchronously (the common
-      warm-restart case), the store is ready immediately and no background
-      task is spawned at all.
+    - When an on-disk collection can be adopted (the common warm-restart
+      case), the background task adopts it without rebuilding.
     - A background rebuild that raises is recorded on the store (``state ==
       "error"``, ``error_message`` set) without the exception ever escaping
       the background task.
@@ -133,8 +132,12 @@ def _fake_analyzer_lifespan_factory(manager: _FakeManager) -> Any:
 
 
 class TestLifespanYieldsWhileBuildInFlight:
-    def test_lifespan_yields_while_build_in_flight(self) -> None:
+    def test_lifespan_yields_while_build_in_flight(self, tmp_path: pathlib.Path) -> None:
         build_event = threading.Event()
+        # The worker thread takes the doc-store flock under chroma_path, so it
+        # must point at a writable tmp directory (the default
+        # /workspaces/chroma does not exist on the host).
+        settings = _make_settings(tmp_path, tmp_path / "corpus")
 
         def _lightweight_init(
             self: DocStore, settings: Settings, embedding_function: Any | None = None
@@ -153,8 +156,9 @@ class TestLifespanYieldsWhileBuildInFlight:
             # AttributeError the moment status() is invoked mid-test below.
             self._read_lock = threading.Lock()
 
-        def _patched_rebuild(self: DocStore) -> int:
-            # Blocks the WORKER THREAD (asyncio.to_thread) until the test
+        def _patched_rebuild(self: DocStore, **kwargs: Any) -> int:
+            # Accepts **kwargs so _prepare_store's rebuild(lock_held=True)
+            # passes through.  Blocks the WORKER THREAD (asyncio.to_thread) until the test
             # releases it — proves the lifespan does not wait for this.
             build_event.wait(timeout=5)
             self._state = DOC_STATE_READY
@@ -167,6 +171,7 @@ class TestLifespanYieldsWhileBuildInFlight:
                 patch.object(
                     core_mod, "analyzer_lifespan", _fake_analyzer_lifespan_factory(fake_manager)
                 ),
+                patch.object(core_mod, "get_settings", return_value=settings),
                 patch.object(DocStore, "__init__", _lightweight_init),
                 patch.object(doc_store_mod, "_try_adopt", return_value=False),
                 patch.object(DocStore, "rebuild", _patched_rebuild),
@@ -197,7 +202,7 @@ class TestLifespanYieldsWhileBuildInFlight:
 
 
 # ---------------------------------------------------------------------------
-# 2. Adopt path: ready immediately, no background task spawned.
+# 2. Adopt path: the background task adopts without rebuilding.
 # ---------------------------------------------------------------------------
 
 
@@ -215,12 +220,24 @@ class TestAdoptPathReadyBeforeYield:
             assert pre_store.is_ready is True
             doc_store_mod.clear_doc_store()
 
-            await doc_store_mod.init_doc_store_background(settings, embedding_function=ef)
+            rebuild_calls: list[None] = []
+            orig_rebuild = DocStore.rebuild
+
+            def _spy_rebuild(self: DocStore, **kwargs: Any) -> int:
+                rebuild_calls.append(None)
+                return orig_rebuild(self, **kwargs)
+
+            with patch.object(DocStore, "rebuild", _spy_rebuild):
+                await doc_store_mod.init_doc_store_background(settings, embedding_function=ef)
+                # _prepare_store (flock, construction, adopt check) now runs on
+                # the background task's worker thread, so await it first.
+                assert doc_store_mod._build_task is not None
+                await doc_store_mod._build_task
 
             store = doc_store_mod.get_doc_store()
             assert store is not None
             assert store.is_ready is True
-            assert doc_store_mod._build_task is None
+            assert rebuild_calls == [], "a completed same-project collection must be adopted"
 
             doc_store_mod.clear_doc_store()
 
@@ -269,14 +286,20 @@ class TestBackgroundBuildFailureRecorded:
 
 
 class TestConstructionFailureRecordsInitError:
-    def test_construction_failure_records_init_error(self) -> None:
-        settings = Settings(chroma_path="/tmp/does-not-matter", project_root="/tmp")
+    def test_construction_failure_records_init_error(self, tmp_path: pathlib.Path) -> None:
+        # tmp chroma_path: the worker opens the doc-store lock file there
+        # before it constructs the store.
+        settings = Settings(chroma_path=str(tmp_path / "chroma"), project_root=str(tmp_path))
 
         async def _scenario() -> None:
             doc_store_mod.clear_doc_store()
             with patch.object(DocStore, "__init__", side_effect=RuntimeError("construction boom")):
                 # Must not raise.
                 await doc_store_mod.init_doc_store_background(settings)
+                # Construction now runs on the background task's worker
+                # thread; keep the patch active across the await.
+                assert doc_store_mod._build_task is not None
+                await doc_store_mod._build_task
 
             assert doc_store_mod.get_doc_store() is None
             state, err = doc_store_mod.doc_store_state()

@@ -93,7 +93,8 @@ Add the server to your client configuration (such as Claude Desktop):
       "args": [
         "run", "-i", "--rm",
         "-v", "/absolute/path/to/your/rust/project:/project:ro",
-        "-v", "rust-lsp-mcp-data:/data",
+        "-e", "RLM_PROJECT_ID=<project-name>",
+        "-v", "rlm-<project-name>-data:/data",
         "rust-lsp-mcp"
       ]
     }
@@ -105,7 +106,9 @@ Add the server to your client configuration (such as Claude Desktop):
 - `run -i --rm`: Creates a temporary container per session connected via stdio. The container removes itself on exit.
 - `-v /absolute/path/to/your/rust/project:/project:ro`: Mounts your target Rust project read-only. Replace `/absolute/path/...` with your project's local path.
   - **SELinux hosts**: On systems enforcing SELinux (such as Fedora with rootless Podman), append `,z` to share the mount across containers: `-v /path:/project:ro,z`. Use lowercase `z` for shared access, not uppercase `Z`.
-- `-v rust-lsp-mcp-data:/data`: Persists the ChromaDB documentation index and Cargo caches across restarts. The text embedding model is pre-baked into the image.
+- `-e RLM_PROJECT_ID=<project-name>`: Names the project for the documentation index. Replace `<project-name>` with a short name for your project, such as `ripgrep`. Without it, the server derives a name from the project path, its git remote, and the package name in its root `Cargo.toml`. Every project is mounted at the same path (`/project`), so two different projects that share the git remote (or both have none) and have the same root package name (or both have none) would get the same derived name; setting `RLM_PROJECT_ID` keeps them apart.
+- `-v rlm-<project-name>-data:/data`: Persists the ChromaDB documentation index and Cargo caches across restarts, in a volume named after the project. The text embedding model is pre-baked into the image.
+- **More than one IDE window**: Two windows on different projects need different volume names, so give each project its own `rlm-<project-name>-data`. Two windows on the same project can share one volume; their first builds take turns, and the second window reuses the index the first one built. One limit remains for now: a `refresh` in one window still breaks documentation search in the other window on that shared volume, until it restarts ([KI-13](docs/impl/known-issues.md)).
 
 > **Process lifecycle**: Each client session launches a fresh rust-analyzer process. While the `/data` volume preserves Cargo's build cache, the in-memory index rebuilds on each start. For a long-lived process across calls, see [CLI access (daemon mode)](#cli-access-for-agents-without-mcp).
 
@@ -115,8 +118,9 @@ Rust build scripts (`build.rs`) and procedural macros run host code during index
 
 1. **Prime the cache once** (fetches dependencies without running build scripts):
    ```bash
-   scripts/prime-cache.sh /absolute/path/to/your/rust/project
+   scripts/prime-cache.sh /absolute/path/to/your/rust/project rlm-<project-name>-data
    ```
+   Pass the same volume name the isolated config below mounts; without the second argument the script primes the default `rust-lsp-mcp-data` volume instead.
 
 2. **Run in isolated mode** (`--network none`):
    ```json
@@ -128,7 +132,8 @@ Rust build scripts (`build.rs`) and procedural macros run host code during index
            "run", "-i", "--rm", "--network", "none",
            "-e", "CARGO_NET_OFFLINE=true",
            "-v", "/absolute/path/to/your/rust/project:/project:ro",
-           "-v", "rust-lsp-mcp-data:/data",
+           "-e", "RLM_PROJECT_ID=<project-name>",
+           "-v", "rlm-<project-name>-data:/data",
            "rust-lsp-mcp"
          ]
        }

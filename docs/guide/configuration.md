@@ -25,9 +25,11 @@ container setup without creating any files.
 
 You can override any setting in two ways:
 
-- **`.env` file** — create a file named `.env` in the project root. A template named
-  `env.sample` is provided; copy it to `.env` and edit the values you want to change.
-  The development container does this copy automatically on first start.
+- **`.env` file** — create a file named `.env` in the directory the server is started
+  in (its working directory); the server looks for `.env` there, not next to the target
+  project. A template named `env.sample` is provided; copy it to `.env` and edit the
+  values you want to change. The development container does this copy automatically
+  on first start.
 - **Environment variable** — set a variable in the shell before starting the server.
 
 Order of precedence, strongest last:
@@ -49,7 +51,8 @@ library.
 | Environment variable | Default | What it does |
 |---|---|---|
 | `RLM_PROJECT_ROOT` | `/workspaces/ripgrep` | Folder of the Rust project to navigate and whose Markdown files are searched. Repo-agnostic — point it at any Rust project. The default is the bundled ripgrep sample inside the container. *(The old name `RLM_RIPGREP_SRC` still works as a deprecated alias and emits a warning.)* |
-| `RLM_DOC_COLLECTION` | `project_docs` | Name of the ChromaDB collection that holds the documentation index. Change it only if you keep multiple projects' indexes under one `RLM_CHROMA_PATH`. |
+| `RLM_PROJECT_ID` | *(empty)* | Name that identifies the target project's documentation index (setting `project_id`). An empty or whitespace-only value means unset: the server then derives the identity from the project folder's resolved path, its git `remote.origin.url` and the `[package].name` in its root `Cargo.toml` (empty when the file is absent, unparsable or has no `[package]` table), so a version bump or a dependency edit does not change it. That derived identity is the same for two different projects when they share the mount path, share the git remote (or both have none) and have the same root package name (or both have none); set `RLM_PROJECT_ID` to a distinct name for each project to tell those apart. Projects with different identities keep separate indexes even on one `RLM_CHROMA_PATH`. |
+| `RLM_DOC_COLLECTION` | `project_docs` | Prefix of the ChromaDB collection name that holds the documentation index. The server appends `_` and 12 hex characters derived from the project identity, so projects sharing one `RLM_CHROMA_PATH` already get separate collections. To tell two projects apart, set `RLM_PROJECT_ID`, not this setting. |
 | `RLM_RUST_ANALYZER_BIN` | `/usr/local/cargo/bin/rust-analyzer` | Path to the rust-analyzer program inside the container. You can confirm the correct path with `rustup which rust-analyzer`. |
 | `RLM_CHROMA_PATH` | `/workspaces/chroma` | Folder where the documentation search database is stored. Kept on a persistent mount so the index survives container rebuilds. |
 | `RLM_DOC_GLOB_PATTERNS` | `**/*.md` | Which Markdown files to include in documentation search, written as comma-separated path patterns relative to the project folder. The default includes every Markdown file anywhere in the project. |

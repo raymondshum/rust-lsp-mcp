@@ -175,3 +175,29 @@ def test_prime_cache_sh_still_parses() -> None:
     text = _prime_cache_sh_text()
     assert text.startswith("#!/usr/bin/env bash")
     assert "set -euo pipefail" in text
+
+
+# ---------------------------------------------------------------------------
+# SW-11: docker-compose.yml container and volume names come from variables, so
+# the daemon can run for more than one project per host.  Read as plain text
+# (no YAML parser), matching the style of the checks above.
+# ---------------------------------------------------------------------------
+
+
+def _compose_text() -> str:
+    return (REPO_ROOT / "docker-compose.yml").read_text()
+
+
+def test_compose_has_no_hard_coded_container_names() -> None:
+    lines = [line.strip() for line in _compose_text().splitlines()]
+    for hard_coded in ("container_name: rust-lsp-mcp", "container_name: rust-lsp-mcp-isolated"):
+        assert hard_coded not in lines, (
+            f"docker-compose.yml still hard-codes `{hard_coded}` — a second project's "
+            "daemon would collide on the container name. Use ${RLM_CONTAINER_NAME:-…} (SW-11)."
+        )
+
+
+def test_compose_names_come_from_variables() -> None:
+    text = _compose_text()
+    for variable in ("RLM_CONTAINER_NAME", "RLM_DATA_VOLUME", "RLM_PROJECT_ID"):
+        assert variable in text, f"docker-compose.yml does not reference {variable} (SW-11)"

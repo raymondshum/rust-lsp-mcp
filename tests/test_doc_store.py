@@ -18,9 +18,14 @@ Coverage:
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import hashlib
+import multiprocessing
+import os
 import pathlib
 import threading
+import time
 from typing import Any
 from unittest.mock import patch
 
@@ -31,12 +36,18 @@ from chromadb.config import Settings as ChromaSettings
 
 from rust_lsp_mcp.doc_store import (
     DOC_STATE_BUILDING,
+    DOC_STATE_READY,
     DocStore,
     DocStoreNotReady,
+    _project_fingerprint,
     clear_doc_store,
+    doc_collection_name,
     doc_index_chunk_count,
+    doc_store_state,
     get_doc_store,
     init_doc_store,
+    init_doc_store_background,
+    project_identity,
 )
 from rust_lsp_mcp.settings import Settings
 
@@ -823,9 +834,9 @@ class TestSingletonLifecycle:
         rebuild_calls: list[None] = []
         orig_rebuild = DocStore.rebuild
 
-        def _spy_rebuild(self: DocStore) -> int:
+        def _spy_rebuild(self: DocStore, **kwargs: Any) -> int:
             rebuild_calls.append(None)
-            return orig_rebuild(self)
+            return orig_rebuild(self, **kwargs)
 
         with patch.object(DocStore, "rebuild", _spy_rebuild):
             store2 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
@@ -867,19 +878,26 @@ class TestSingletonLifecycle:
             path=str(tmp_path / "chroma"),
             settings=ChromaSettings(anonymized_telemetry=False),
         )
+        # Create it under the LIVE (identity-derived) name, through the same
+        # helper doc_store uses, so the adopt check really sees it.
+        identity = project_identity(settings)
         partial_col = client.create_collection(
-            settings.doc_collection,
+            doc_collection_name(settings, identity),
             embedding_function=fake_ef,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             configuration={"hnsw": {"space": "cosine"}},
         )
         partial_col.add(ids=["partial-1"], documents=["orphaned chunk from interrupted build"])
         # Stamp the CURRENT project's fingerprint but NOT build_complete, so the
         # fingerprint check passes and only the missing sentinel blocks adoption.
-        current_fingerprint = str(pathlib.Path(settings.project_root).resolve())
-        partial_col.modify(metadata={"project_root": current_fingerprint})
-        # Confirm the fingerprint matches but the sentinel is absent.
+        current_fingerprint = f"{pathlib.Path(settings.project_root).resolve()}|{identity}"
+        assert current_fingerprint == _project_fingerprint(settings)
+        partial_col.modify(
+            metadata={"project_root": current_fingerprint, "project_identity": identity}
+        )
+        # Confirm the fingerprint and identity match but the sentinel is absent.
         partial_meta = partial_col.metadata or {}
         assert partial_meta.get("project_root") == current_fingerprint
+        assert partial_meta.get("project_identity") == identity
         assert partial_meta.get("build_complete") is None
 
         # Now call the real init_doc_store.
@@ -928,8 +946,9 @@ class TestSingletonLifecycle:
             settings=ChromaSettings(anonymized_telemetry=False),
         )
         # Create the collection but add no rows and no sentinel at all.
+        # Under the LIVE (identity-derived) name, so adoption is really tested.
         empty_col = client.create_collection(
-            settings.doc_collection,
+            doc_collection_name(settings),
             embedding_function=fake_ef,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             configuration={"hnsw": {"space": "cosine"}},
         )
@@ -1084,9 +1103,9 @@ class TestDocStoreCrossProjectIdentity:
         rebuild_calls: list[None] = []
         orig_rebuild = DocStore.rebuild
 
-        def _spy_rebuild(self: DocStore) -> int:
+        def _spy_rebuild(self: DocStore, **kwargs: Any) -> int:
             rebuild_calls.append(None)
-            return orig_rebuild(self)
+            return orig_rebuild(self, **kwargs)
 
         with patch.object(DocStore, "rebuild", _spy_rebuild):
             store2 = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
@@ -1192,3 +1211,317 @@ def test_two_doc_stores_same_path_do_not_raise(tmp_path: pathlib.Path) -> None:
     store2 = DocStore(settings, embedding_function=FakeEmbeddingFunction())
     assert store1._client is not None
     assert store2._client is not None
+
+
+# ---------------------------------------------------------------------------
+# SW-01: project identity in the adopt check.
+# ---------------------------------------------------------------------------
+
+
+class TestAdoptProjectIdentity:
+    def _restamp_identity(self, settings: Settings, new_identity: str) -> None:
+        """Overwrite the live collection's ``project_identity`` key, keeping the rest."""
+        client = chromadb.PersistentClient(
+            path=settings.chroma_path,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        col = client.get_collection(
+            doc_collection_name(settings),
+            embedding_function=FakeEmbeddingFunction(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        )
+        meta = dict(col.metadata or {})
+        assert meta.get("build_complete") is True
+        assert meta.get("project_identity") == project_identity(settings)
+        meta["project_identity"] = new_identity
+        col.modify(metadata=meta)
+
+    def _init_counting_rebuilds(self, settings: Settings) -> tuple[DocStore, int]:
+        rebuild_calls: list[None] = []
+        orig_rebuild = DocStore.rebuild
+
+        def _spy_rebuild(self: DocStore, **kwargs: Any) -> int:
+            rebuild_calls.append(None)
+            return orig_rebuild(self, **kwargs)
+
+        with patch.object(DocStore, "rebuild", _spy_rebuild):
+            store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        return store, len(rebuild_calls)
+
+    def test_build_stamps_project_identity(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        meta = store._collection.metadata or {}
+        assert meta.get("project_identity") == project_identity(settings)
+        assert meta.get("project_root") == _project_fingerprint(settings)
+        assert store._collection.name == doc_collection_name(settings)
+
+    def test_matching_identity_is_adopted(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        clear_doc_store()
+
+        store, rebuilds = self._init_counting_rebuilds(settings)
+        assert store.is_ready is True
+        assert rebuilds == 0, "a collection whose project_identity matches must be adopted"
+
+    def test_differing_identity_is_not_adopted(self, tmp_path: pathlib.Path) -> None:
+        """Same name, same fingerprint, build_complete — but a different
+        ``project_identity`` key: the identity conjunct alone blocks adoption."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        clear_doc_store()
+        self._restamp_identity(settings, "some-other-project")
+
+        store, rebuilds = self._init_counting_rebuilds(settings)
+        assert store.is_ready is True
+        assert rebuilds == 1, "a collection whose project_identity differs must be rebuilt"
+        meta = store._collection.metadata or {}
+        assert meta.get("project_identity") == project_identity(settings)
+
+
+# ---------------------------------------------------------------------------
+# SW-02: the inter-process doc-store lock.
+# ---------------------------------------------------------------------------
+
+# Seconds the spawn-side stub embedding function sleeps per call, so the
+# first process's build holds the lock long enough for the second to wait.
+_SPAWN_EF_SLEEP_SECONDS = 1.0
+_spawn_ef_calls: list[float] = []
+
+
+class _SpawnCountingEmbeddingFunction(FakeEmbeddingFunction):
+    """Module-level (spawn-importable) stub EF that records each call's time."""
+
+    def __call__(self, input: chromadb.api.types.Documents) -> chromadb.api.types.Embeddings:
+        _spawn_ef_calls.append(time.monotonic())
+        time.sleep(_SPAWN_EF_SLEEP_SECONDS)
+        return super().__call__(input)
+
+    @staticmethod
+    def name() -> str:
+        return "fake-deterministic-spawn-counting"
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> _SpawnCountingEmbeddingFunction:
+        return _SpawnCountingEmbeddingFunction()
+
+
+def _sw02_worker(chroma_path: str, project_root: str, barrier: Any, results: Any) -> None:
+    """Child process: start the doc store against a shared chroma_path, report back."""
+    try:
+        settings = Settings(
+            chroma_path=chroma_path, project_root=project_root, doc_glob_patterns="**/*.md"
+        )
+        barrier.wait(timeout=60)
+        started = time.monotonic()
+        store = init_doc_store(settings, embedding_function=_SpawnCountingEmbeddingFunction())
+        deadline = time.monotonic() + 30
+        while store.state != DOC_STATE_READY and time.monotonic() < deadline:
+            time.sleep(0.05)
+        results.put(
+            {
+                "pid": os.getpid(),
+                "state": store.state,
+                "error": store.error_message,
+                "chunks": store.chunk_count(),
+                "ef_calls": len(_spawn_ef_calls),
+                "first_ef_call": _spawn_ef_calls[0] if _spawn_ef_calls else None,
+                "started": started,
+                "finished": time.monotonic(),
+            }
+        )
+    except BaseException as exc:  # report, never hang the parent
+        results.put({"pid": os.getpid(), "state": "crashed", "error": repr(exc)})
+
+
+def _flock_holder(lock_path: str, ready: Any, release: Any) -> None:
+    """Child process: hold the doc-store flock until *release* is set."""
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready.set()
+        release.wait(timeout=60)
+    finally:
+        os.close(fd)
+
+
+class TestDocStoreStartLock:
+    def test_two_processes_on_fresh_volume_serialise_and_one_rebuilds(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """SW-02 regression: two processes start together on one empty
+        chroma_path with the same identity.  Both end ``ready`` with equal
+        chunk counts and no error; the second waits on the lock, then adopts
+        the first one's collection without rebuilding (exactly one process
+        ever calls the embedding function)."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        chroma_path = str(tmp_path / "chroma")  # not created: first start.
+
+        ctx = multiprocessing.get_context("spawn")
+        barrier = ctx.Barrier(2)
+        results = ctx.Queue()
+        procs = [
+            ctx.Process(target=_sw02_worker, args=(chroma_path, str(corpus), barrier, results))
+            for _ in range(2)
+        ]
+        for proc in procs:
+            proc.start()
+        try:
+            reports = [results.get(timeout=90) for _ in procs]
+        finally:
+            for proc in procs:
+                proc.join(timeout=30)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+
+        for report in reports:
+            assert report["state"] == DOC_STATE_READY, report
+            assert report["error"] is None, report
+        assert reports[0]["chunks"] == reports[1]["chunks"]
+        assert reports[0]["chunks"] > 0
+
+        builders = [r for r in reports if r["ef_calls"] > 0]
+        adopters = [r for r in reports if r["ef_calls"] == 0]
+        assert len(builders) == 1 and len(adopters) == 1, (
+            f"exactly one process must rebuild; the other must adopt: {reports}"
+        )
+        builder, adopter = builders[0], adopters[0]
+        # The adopter waited on the lock: it finished only after the builder's
+        # embedding pass had started (it could not adopt before the build
+        # completed and wrote the sentinel).
+        assert adopter["finished"] >= builder["first_ef_call"] + _SPAWN_EF_SLEEP_SECONDS * 0.5, (
+            reports
+        )
+
+    def test_uncreated_chroma_path_is_created_with_lock_file(self, tmp_path: pathlib.Path) -> None:
+        """The lock step creates chroma_path itself (the Dockerfile only creates
+        /data), so a fresh first start does not fail with ENOENT."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        chroma_path = tmp_path / "fresh" / "chroma"
+        assert not chroma_path.exists()
+        settings = Settings(
+            chroma_path=str(chroma_path), project_root=str(corpus), doc_glob_patterns="**/*.md"
+        )
+
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+
+        assert store.state == DOC_STATE_READY
+        assert chroma_path.is_dir()
+        assert (chroma_path / ".rlm-doc-store.lock").exists()
+
+    def test_background_start_does_not_block_on_held_lock(self, tmp_path: pathlib.Path) -> None:
+        """While another process holds the doc-store lock, an awaited
+        ``init_doc_store_background`` returns at once and the state reads
+        ``building``; once the holder releases, the background task finishes
+        and the state reaches ``ready``."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        chroma_path = tmp_path / "chroma"
+        chroma_path.mkdir()
+        settings = Settings(
+            chroma_path=str(chroma_path), project_root=str(corpus), doc_glob_patterns="**/*.md"
+        )
+
+        ctx = multiprocessing.get_context("spawn")
+        ready = ctx.Event()
+        release = ctx.Event()
+        holder = ctx.Process(
+            target=_flock_holder,
+            args=(str(chroma_path / ".rlm-doc-store.lock"), ready, release),
+        )
+        holder.start()
+        try:
+            assert ready.wait(timeout=60), "fake lock holder never acquired the flock"
+
+            async def _scenario() -> None:
+                try:
+                    started = time.monotonic()
+                    await init_doc_store_background(
+                        settings, embedding_function=FakeEmbeddingFunction()
+                    )
+                    assert time.monotonic() - started < 1.0
+                    assert doc_store_state() == (DOC_STATE_BUILDING, None)
+                    # Still blocked on the held lock a moment later.
+                    await asyncio.sleep(0.3)
+                    assert doc_store_state() == (DOC_STATE_BUILDING, None)
+                    assert get_doc_store() is None
+                finally:
+                    # Always release, or the worker thread would keep
+                    # asyncio.run's executor shutdown waiting.
+                    release.set()
+                import rust_lsp_mcp.doc_store as doc_store_mod
+
+                task = doc_store_mod._build_task
+                assert task is not None
+                await asyncio.wait_for(task, timeout=30)
+                assert doc_store_state() == (DOC_STATE_READY, None)
+
+            asyncio.run(_scenario())
+        finally:
+            release.set()
+            holder.join(timeout=30)
+            if holder.is_alive():
+                holder.kill()
+                holder.join()
+
+
+class TestRebuildTakesFlock:
+    def test_rebuild_without_lock_held_waits_for_flock(self, tmp_path: pathlib.Path) -> None:
+        """The ``refresh`` path: ``rebuild()`` called without ``lock_held`` on a
+        live store takes the inter-process flock itself, so it waits while
+        another process holds the lock and completes once it is released."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert store.state == DOC_STATE_READY
+
+        ctx = multiprocessing.get_context("spawn")
+        ready = ctx.Event()
+        release = ctx.Event()
+        holder = ctx.Process(
+            target=_flock_holder,
+            args=(str(pathlib.Path(settings.chroma_path) / ".rlm-doc-store.lock"), ready, release),
+        )
+        holder.start()
+        done = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def _refresh_rebuild() -> None:
+            try:
+                outcome["count"] = store.rebuild()
+            except BaseException as exc:  # surfaced by the asserts below
+                outcome["error"] = exc
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=_refresh_rebuild, daemon=True)
+        try:
+            assert ready.wait(timeout=60), "fake lock holder never acquired the flock"
+            worker.start()
+            assert not done.wait(timeout=0.5), (
+                "rebuild() without lock_held finished while another process held the "
+                "doc-store flock — the refresh path must take the flock"
+            )
+        finally:
+            release.set()
+            holder.join(timeout=30)
+            if holder.is_alive():
+                holder.kill()
+                holder.join()
+        assert done.wait(timeout=30), "rebuild() never completed after the flock was released"
+        assert "error" not in outcome, outcome
+        assert outcome["count"] > 0
+        assert store.state == DOC_STATE_READY

@@ -33,25 +33,57 @@ Read/write coordination (DS-12):
     of returning a misleading ``[]``/partial result when it observes the
     store mid-rebuild; ``search_docs`` translates that into ``not_ready``.
 
+Project identity (SW-01):
+    Every project gets its own identity (:func:`project_identity`): the
+    explicit ``RLM_PROJECT_ID`` when set, else a hash of the resolved
+    ``project_root``, its git ``remote.origin.url`` and its root
+    ``Cargo.toml``'s ``[package].name``.  The identity is part of the adopt fingerprint and
+    of the ChromaDB collection name (:func:`doc_collection_name`), so two
+    projects that share one ``/data`` volume, even at the same mount path,
+    keep separate collections and never adopt each other's index.
+
+Inter-process start lock (SW-02, KI-13):
+    One exclusive ``fcntl.flock`` on ``<chroma_path>/.rlm-doc-store.lock``
+    covers the whole decide-and-build critical section: ``PersistentClient``
+    construction, the adopt check and, when nothing is adoptable, the
+    rebuild.  Two containers starting together on one volume therefore
+    serialise: the second waits, then adopts the first one's collection
+    instead of racing ChromaDB's schema creation or deleting a live
+    collection.  The thread that acquires the flock is the thread that
+    releases it, and no code path opens a second descriptor on the lock
+    file while it holds the first (``flock`` binds to the open file
+    description, so a second descriptor in the same process would block on
+    the first).  A ``rebuild()`` called on a live store (``refresh``) takes
+    the store's ``_build_lock`` first and then its own flock.
+
 Startup split (DS-08):
-    ``init_doc_store`` (synchronous) does the cheap part — construct the
-    store, set the module singleton, and attempt to adopt an already-built
-    on-disk collection — then, only if nothing was adopted, blocks on
-    ``rebuild()``.  ``init_doc_store_background`` instead does the cheap part
-    synchronously and offloads ``rebuild()`` to a worker thread via an
-    ``asyncio.Task``, so the FastMCP lifespan can ``yield`` (start serving
-    ``status``/navigation tools) without waiting for the embedding pass.  Both
-    entry points share the singleton-before-rebuild ordering, so
-    ``get_doc_store()``/``doc_store_state()`` observe the in-flight store the
-    moment either one is called.
+    ``init_doc_store`` (synchronous) runs :func:`_prepare_store` on the
+    calling thread: take the flock, construct the store, set the module
+    singleton, attempt to adopt an already-built on-disk collection and,
+    only if nothing was adopted, rebuild under the same flock.
+    ``init_doc_store_background`` instead runs the whole of
+    ``_prepare_store`` (flock wait included) on a worker thread inside a
+    tracked ``asyncio.Task``, so the FastMCP lifespan can ``yield`` (start
+    serving ``status``/navigation tools) without waiting for another
+    process's build or for the embedding pass.  While that worker waits on
+    the flock the singleton is ``None`` and ``doc_store_state()`` reports
+    ``"building"``; once it publishes the store, ``get_doc_store()`` /
+    ``doc_store_state()`` observe the in-flight store.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
+import hashlib
 import logging
+import os
 import pathlib
+import subprocess
 import threading
+import tomllib
+from collections.abc import Iterator
 from typing import Any, cast
 
 import chromadb
@@ -83,16 +115,158 @@ class DocStoreNotReady(Exception):
     """
 
 
-def _project_fingerprint(settings: Settings) -> str:
-    """Return a stable identity string for ``settings.project_root``.
+# Lock file guarding the decide-and-build critical section across processes
+# (SW-02).  Created next to the ChromaDB files and never deleted: the kernel
+# drops the flock when the holder's descriptor closes or the process exits.
+_LOCK_FILENAME = ".rlm-doc-store.lock"
 
-    Resolved to an absolute, symlink-free path so different spellings of the
-    same directory (relative vs absolute, trailing slash, symlink hops) match,
-    while genuinely different projects fingerprint differently.  Stored in
-    collection metadata at build time (DS-05) so a collection built for one
-    project is never silently adopted by a server pointed at another.
+# A wait on the lock longer than this is logged once at info.
+_LOCK_WAIT_LOG_SECONDS = 2.0
+
+# Timeout for the ``git config`` call in project_identity().
+_GIT_TIMEOUT_SECONDS = 5.0
+
+
+def _git_remote_url(project_root: pathlib.Path) -> str:
+    """Return ``remote.origin.url`` for *project_root*, or ``""`` on any failure."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "config", "--get", "remote.origin.url"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _root_package_name(project_root: pathlib.Path) -> str:
+    """Return ``[package].name`` of ``<project_root>/Cargo.toml``, or ``""``.
+
+    Empty when the file is absent or unreadable, when ``tomllib`` cannot parse
+    it, or when it has no ``[package]`` table (a workspace-only root) or no
+    string ``name``.  Only the name is used, never the file bytes, so a
+    version bump or a dependency edit does not change the project identity
+    (which would rename the collection, force a full re-embed and orphan the
+    old collection on the volume).
     """
-    return str(pathlib.Path(settings.project_root).resolve())
+    try:
+        with (project_root / "Cargo.toml").open("rb") as fh:
+            manifest = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return ""
+    package = manifest.get("package")
+    if not isinstance(package, dict):
+        return ""
+    name = package.get("name")
+    return name if isinstance(name, str) else ""
+
+
+def project_identity(settings: Settings) -> str:
+    """Return the identity of the target project for the doc index (SW-01).
+
+    ``settings.project_id`` is stripped of surrounding whitespace first; when
+    the stripped value is non-empty it is the identity (empty or
+    whitespace-only counts as unset).  Otherwise the identity is the first 16
+    hex characters of the SHA-256 over three newline-joined parts: the
+    resolved ``project_root``, the output of ``git -C <project_root> config
+    --get remote.origin.url`` (empty on any failure, 5-second timeout) and the
+    root package name (``[package].name`` of ``<project_root>/Cargo.toml``,
+    see :func:`_root_package_name`).
+
+    The derived identity collides for two different projects that share the
+    mount path, share the git remote (or both have none) and have the same
+    root package name (or both have none); ``RLM_PROJECT_ID`` tells those
+    apart.
+    """
+    explicit = (settings.project_id or "").strip()
+    if explicit:
+        return explicit
+    root = pathlib.Path(settings.project_root).resolve()
+    remote = _git_remote_url(root)
+    package_name = _root_package_name(root)
+    digest = hashlib.sha256("\n".join([str(root), remote, package_name]).encode())
+    return digest.hexdigest()[:16]
+
+
+def _collection_name_for(settings: Settings, identity: str) -> str:
+    """Return the ChromaDB collection name for *identity* (see doc_collection_name)."""
+    suffix = hashlib.sha256(identity.encode()).hexdigest()[:12]
+    return f"{settings.doc_collection}_{suffix}"
+
+
+def doc_collection_name(settings: Settings, identity: str | None = None) -> str:
+    """Return the live ChromaDB collection name for *settings*' project.
+
+    ``settings.doc_collection`` is only the prefix: the server appends ``_``
+    and 12 hex characters of the SHA-256 of the project identity, so the name
+    is always a valid ChromaDB identifier whatever ``RLM_PROJECT_ID`` holds,
+    and projects sharing one ``chroma_path`` get separate collections.  Pass
+    *identity* when the caller already computed it, to avoid a second
+    ``git`` call.  Tests read the live name through this helper too.
+    """
+    if identity is None:
+        identity = project_identity(settings)
+    return _collection_name_for(settings, identity)
+
+
+def _project_fingerprint(settings: Settings, identity: str | None = None) -> str:
+    """Return ``<resolved project_root>|<project identity>`` for *settings*.
+
+    The path is resolved to an absolute, symlink-free form so different
+    spellings of the same directory (relative vs absolute, trailing slash,
+    symlink hops) match.  Stored in collection metadata under
+    ``project_root`` at build time (DS-05, SW-01) so a collection built for
+    one project is never silently adopted by a server pointed at another,
+    including another project mounted at the same path.
+    """
+    if identity is None:
+        identity = project_identity(settings)
+    return f"{pathlib.Path(settings.project_root).resolve()}|{identity}"
+
+
+@contextlib.contextmanager
+def _doc_store_flock(chroma_path: str) -> Iterator[None]:
+    """Hold the exclusive inter-process doc-store lock for the ``with`` body.
+
+    Creates ``chroma_path`` first (the lock now runs before
+    ``PersistentClient``, which used to be what created it), then opens
+    ``<chroma_path>/.rlm-doc-store.lock`` with ``O_CREAT | O_RDWR`` and takes
+    ``fcntl.flock(LOCK_EX)`` on it.  No timeout: the kernel releases the lock
+    when the holder exits.  A wait longer than two seconds is logged once at
+    info.  The calling thread acquires and releases; closing the descriptor
+    on exit releases the lock.
+    """
+    lock_dir = pathlib.Path(chroma_path)
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_dir / _LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o666)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            timer = threading.Timer(
+                _LOCK_WAIT_LOG_SECONDS,
+                _log.info,
+                args=("doc_store: waiting for the doc-store lock held by another process",),
+            )
+            timer.daemon = True
+            timer.start()
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            finally:
+                timer.cancel()
+        yield
+    finally:
+        # Closing the only descriptor on this open file description releases
+        # the flock (explicit unlock first for clarity).
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 class DocStore:
@@ -100,7 +274,8 @@ class DocStore:
 
     Args:
         settings: Runtime settings (``chroma_path``, ``project_root``,
-            ``doc_collection``, ``doc_glob_patterns`` are the relevant fields).
+            ``doc_collection``, ``project_id``, ``doc_glob_patterns`` are the
+            relevant fields).
         embedding_function: Optional ChromaDB embedding function.  ``None``
             means use ChromaDB's bundled ``DefaultEmbeddingFunction``
             (all-MiniLM-L6-v2, ONNX, downloaded once to the model-cache mount).
@@ -195,7 +370,7 @@ class DocStore:
         except Exception:
             return None
 
-    def rebuild(self) -> int:
+    def rebuild(self, *, lock_held: bool = False) -> int:
         """Wholesale rebuild: drop + recreate the collection, re-index every
         matching ``*.md``.  Flips ``state`` to ``"building"`` during the rebuild
         and to ``"ready"`` on completion (or ``"error"`` on failure, re-raising
@@ -203,24 +378,55 @@ class DocStore:
 
         Synchronous/blocking — callers that must not block the event loop run it
         via a worker thread (e.g. ``anyio.to_thread.run_sync`` or
-        ``asyncio.to_thread``).  Serialized behind ``_build_lock`` so a
-        concurrent caller cannot interleave with an in-flight rebuild.
+        ``asyncio.to_thread``).
+
+        Args:
+            lock_held: ``False`` (every caller except ``_prepare_store``) takes
+                the in-process ``_build_lock`` first, so a concurrent caller
+                cannot interleave with an in-flight rebuild, and then the
+                inter-process doc-store flock for the duration of the build,
+                released afterwards.  ``True`` means the calling thread already
+                holds both ``_build_lock`` and the flock (``_prepare_store``'s
+                decide-and-build section); neither is taken again.
         """
+        if lock_held:
+            return self._rebuild_recording_errors(acquire_flock=False)
         with self._build_lock:
-            try:
-                return self._rebuild_locked()
-            except Exception as exc:
-                self._state = DOC_STATE_ERROR
-                self._error = f"{type(exc).__name__}: {exc}"
-                raise
+            return self._rebuild_recording_errors(acquire_flock=True)
+
+    def _rebuild_recording_errors(self, *, acquire_flock: bool) -> int:
+        """Run ``_rebuild_locked`` (under the flock if asked), recording a failure.
+
+        Must only be called while holding ``_build_lock``.
+        """
+        try:
+            if acquire_flock:
+                with _doc_store_flock(self._settings.chroma_path):
+                    return self._rebuild_locked()
+            return self._rebuild_locked()
+        except Exception as exc:
+            self._state = DOC_STATE_ERROR
+            self._error = f"{type(exc).__name__}: {exc}"
+            raise
 
     def _rebuild_locked(self) -> int:
-        """The actual rebuild body; must only be called while holding ``_build_lock``."""
-        collection_name = self._settings.doc_collection
-        # Computed once up front; stamped into collection metadata below so a
-        # later init_doc_store() can refuse to adopt a collection built for a
-        # different project_root (DS-05).
-        project_fingerprint = _project_fingerprint(self._settings)
+        """The actual rebuild body.
+
+        Must only be called while holding ``_build_lock`` and the doc-store
+        flock.
+        """
+        # Computed once up front; the identity names the collection and is
+        # stamped into its metadata (with the fingerprint) below so a later
+        # init_doc_store() can refuse to adopt a collection built for a
+        # different project (DS-05, SW-01).
+        identity = project_identity(self._settings)
+        collection_name = doc_collection_name(self._settings, identity)
+        project_fingerprint = _project_fingerprint(self._settings, identity)
+        build_metadata = {
+            "build_complete": True,
+            "project_root": project_fingerprint,
+            "project_identity": identity,
+        }
 
         # --- Start transition (DS-12): under _read_lock, briefly -----------
         # Mark not ready at the very start — never ready mid-build.  Clearing
@@ -326,12 +532,10 @@ class DocStore:
             # every time — the adopt gate no longer requires count() > 0 (a
             # count-0 collection can never satisfy that), it relies solely on
             # this sentinel + the project_root fingerprint below. project_root
-            # is stamped alongside it (DS-05) — modify() REPLACES metadata
-            # wholesale (verified against chromadb 1.5.9), so both keys must be
-            # written together in one call.
-            collection.modify(
-                metadata={"build_complete": True, "project_root": project_fingerprint}
-            )
+            # and project_identity are stamped alongside it (DS-05, SW-01) —
+            # modify() REPLACES metadata wholesale (verified against chromadb
+            # 1.5.9), so all keys must be written together in one call.
+            collection.modify(metadata=build_metadata)
             # --- End transition (empty-corpus path): under _read_lock -----
             with self._read_lock:
                 self._collection = collection
@@ -349,9 +553,10 @@ class DocStore:
 
         # Write completion sentinel BEFORE flipping is_ready — a hard-killed build
         # will lack this sentinel, causing init_doc_store to rebuild rather than
-        # adopt a silently-partial collection.  project_root is stamped alongside
-        # it (DS-05) so a later init_doc_store() can detect cross-project reuse.
-        collection.modify(metadata={"build_complete": True, "project_root": project_fingerprint})
+        # adopt a silently-partial collection.  project_root and project_identity
+        # are stamped alongside it (DS-05, SW-01) so a later init_doc_store() can
+        # detect cross-project reuse.
+        collection.modify(metadata=build_metadata)
 
         # --- End transition (DS-12): under _read_lock, briefly -------------
         # Only mark ready after ALL adds AND the sentinel are written, and only
@@ -451,15 +656,15 @@ class DocStore:
 
 _doc_store: DocStore | None = None
 
-# Set when _prepare_store fails to construct the DocStore itself (e.g. a bad
-# chroma_path); read by doc_store_state() when there is no store singleton to
+# Set when _prepare_store fails before the DocStore exists (taking the
+# doc-store lock, or constructing the store itself, e.g. a bad chroma_path);
+# read by doc_store_state() when there is no store singleton to
 # ask.  Cleared at the start of every _prepare_store call and by
 # clear_doc_store().
 _init_error: str | None = None
 
-# The background rebuild task spawned by init_doc_store_background(), or
-# None if no background build is in flight (either none was started, or the
-# store was adopted synchronously with nothing to build).
+# The background startup task spawned by init_doc_store_background() (it runs
+# the whole of _prepare_store on a worker thread), or None if none was started.
 _build_task: asyncio.Task[None] | None = None
 
 
@@ -477,8 +682,8 @@ def doc_store_state() -> tuple[str, str | None]:
 
     Mirrors :attr:`DocStore.state` / :attr:`DocStore.error_message`, but is
     usable even before the singleton exists (e.g. while the background build
-    task's ``_prepare_store`` call is still constructing it) or if
-    construction itself failed.
+    task's ``_prepare_store`` call is still waiting on the doc-store lock or
+    constructing it) or if lock acquisition or construction itself failed.
 
     - If the singleton is set, defer to it (``store.state``, ``store.error_message``).
     - Else, if construction previously failed, report ``("error", _init_error)``.
@@ -506,13 +711,19 @@ def doc_index_chunk_count() -> int | None:
     return _doc_store.chunk_count()
 
 
-def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | None) -> bool:
+def _try_adopt(
+    store: DocStore,
+    settings: Settings,
+    embedding_function: Any | None,
+    identity: str | None = None,
+) -> bool:
     """Attempt to adopt an existing, fully-built ChromaDB collection onto *store*.
 
     Cheap (no embedding work): a single ``get_collection`` metadata check.
     "Build once" persistence: if the ChromaDB collection was built for the
-    SAME ``project_root`` (DS-05 identity check) and carries the
-    build-complete sentinel, adopt it (``store._collection`` and
+    SAME project (its ``project_root`` fingerprint and its
+    ``project_identity`` both equal the current values — DS-05, SW-01) and
+    carries the build-complete sentinel, adopt it (``store._collection`` and
     ``store._state = DOC_STATE_READY``) and return ``True`` WITHOUT
     re-embedding.  Returns ``False`` on any failure to adopt (not found,
     interrupted build, cross-project mismatch, or an unexpected exception) —
@@ -522,22 +733,26 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
     DS-24: the adopt gate deliberately does NOT require ``count() > 0``.
     ``build_complete`` is written ONLY at successful ``rebuild()`` completion
     (both the empty-corpus path and the populated path — see
-    ``_rebuild_locked``), so the sentinel alone (plus the project fingerprint)
-    is the reliable "complete + same project" marker; an interrupted build
-    (rows written, process killed before the sentinel) still correctly lacks
-    the sentinel and falls through to rebuild below regardless of row count.
-    Requiring ``count() > 0`` would make an intentionally-empty completed
-    corpus (0 markdown files matched the glob) impossible to ever adopt — it
-    would rebuild on every single startup even though nothing changed.
+    ``_rebuild_locked``), so the sentinel alone (plus the project fingerprint
+    and identity) is the reliable "complete + same project" marker; an
+    interrupted build (rows written, process killed before the sentinel)
+    still correctly lacks the sentinel and falls through to rebuild below
+    regardless of row count.  Requiring ``count() > 0`` would make an
+    intentionally-empty completed corpus (0 markdown files matched the glob)
+    impossible to ever adopt — it would rebuild on every single startup even
+    though nothing changed.
 
     Args:
         store: The just-constructed :class:`DocStore` to adopt onto.
-        settings: Runtime settings (for ``doc_collection`` / fingerprinting).
+        settings: Runtime settings (for the collection name / fingerprinting).
         embedding_function: Same embedding function passed to ``DocStore()``;
             forwarded to ``get_collection`` so an adopted collection queries
             with the SAME EF it was built with.
+        identity: The project identity, when the caller already computed it.
     """
-    current_fingerprint = _project_fingerprint(settings)
+    if identity is None:
+        identity = project_identity(settings)
+    current_fingerprint = _project_fingerprint(settings, identity)
     try:
         # get_collection's default embedding_function is chromadb's
         # DefaultEmbeddingFunction() (NOT None) — verified against chromadb
@@ -550,20 +765,25 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
         get_kwargs: dict[str, Any] = {}
         if embedding_function is not None:
             get_kwargs["embedding_function"] = embedding_function
-        existing = store._client.get_collection(settings.doc_collection, **get_kwargs)
+        existing = store._client.get_collection(
+            doc_collection_name(settings, identity), **get_kwargs
+        )
         meta = existing.metadata or {}
         existing_project_root = meta.get("project_root")
+        existing_identity = meta.get("project_identity")
         build_complete = bool(meta.get("build_complete"))
-        if build_complete and existing_project_root == current_fingerprint:
+        same_project = (
+            existing_project_root == current_fingerprint and existing_identity == identity
+        )
+        if build_complete and same_project:
             _log.info(
                 "doc_store: adopting existing collection (%d chunks) — skipping rebuild",
                 existing.count(),
             )
             # Publish collection+state atomically under _read_lock (DS-12),
             # uniform with rebuild's start/end transitions.  _prepare_store
-            # publishes the singleton BEFORE calling _try_adopt, and a
-            # concurrent refresh re-init runs on a worker thread while
-            # searches run on others, so this adopt IS concurrently reachable —
+            # publishes the singleton BEFORE calling _try_adopt, and searches
+            # run on other threads, so this adopt IS concurrently reachable —
             # the lock makes the two writes atomic w.r.t. an in-flight
             # search()'s snapshot rather than relying on statement-order-
             # under-GIL.
@@ -572,16 +792,18 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
                 store._state = DOC_STATE_READY
             return True
         if build_complete:
-            # Sentinel present but built for a different project_root (or a
-            # pre-DS-05 collection with no project_root at all, which compares
-            # unequal to current_fingerprint and is safely treated the same
-            # way — backward compatible: it just triggers a rebuild instead of
-            # silently adopting an unidentified collection).
+            # Sentinel present but built for a different project (or a
+            # pre-SW-01 collection with no project_identity at all, which
+            # compares unequal and is safely treated the same way — it just
+            # triggers a rebuild instead of silently adopting an unidentified
+            # collection).
             _log.info(
-                "doc_store: collection was built for project_root=%r but current is %r"
-                " — rebuilding",
+                "doc_store: collection was built for project_root=%r, project_identity=%r"
+                " but current is %r, %r — rebuilding",
                 existing_project_root,
+                existing_identity,
                 current_fingerprint,
+                identity,
             )
         elif existing.count() > 0:
             _log.info(
@@ -602,32 +824,53 @@ def _try_adopt(store: DocStore, settings: Settings, embedding_function: Any | No
 
 
 def _prepare_store(settings: Settings, embedding_function: Any | None = None) -> DocStore:
-    """Construct the :class:`DocStore`, publish it as the singleton, attempt adopt.
+    """Run the whole decide-and-build critical section under the doc-store flock.
 
-    The cheap half of startup (DS-08): no embedding work happens here — only
-    object construction (a ChromaDB client open, no collection I/O beyond
-    ``_try_adopt``'s single metadata read) and, if a completed same-project
-    collection already exists on disk, an in-place adopt.  Callers
-    (``init_doc_store`` / ``init_doc_store_background``) decide whether to
-    follow up with a (possibly backgrounded) ``rebuild()``.
+    Sequence, all on the calling thread and all under ONE exclusive
+    acquisition of ``<chroma_path>/.rlm-doc-store.lock`` (SW-02):
 
-    The singleton is set BEFORE any build is attempted — intentional (DS-14):
-    ``get_doc_store()`` / ``doc_store_state()`` observe the in-flight
-    ``"building"`` store immediately rather than ``None``.
+    1. Construct the :class:`DocStore` (and with it the ``PersistentClient``).
+    2. Take the new store's in-process ``_build_lock`` BEFORE publishing it
+       as the singleton, so no other thread can hold that ``_build_lock``
+       while this thread holds the flock.
+    3. Publish the singleton (DS-14: ``get_doc_store()`` /
+       ``doc_store_state()`` observe the in-flight ``"building"`` store
+       rather than ``None``).
+    4. Adopt a completed same-project collection when one exists; otherwise
+       ``rebuild(lock_held=True)`` under the locks already held.
 
-    Raises whatever :class:`DocStore` construction raises (after recording it
-    in the module-level ``_init_error`` for ``doc_store_state()`` to report);
-    callers are responsible for catching it.
+    Both locks are released when this returns or raises.  A second process
+    (another container on the same volume) waits on the flock, then adopts
+    the collection the first one built instead of rebuilding it.
+
+    Raises whatever lock acquisition, :class:`DocStore` construction or the
+    rebuild raises.  A failure before the store exists is recorded in the
+    module-level ``_init_error`` for ``doc_store_state()`` to report; a
+    rebuild failure is recorded on the (published) store itself.  Callers
+    are responsible for catching it.
     """
     global _doc_store, _init_error
     _init_error = None
+    store: DocStore | None = None
     try:
-        store = DocStore(settings, embedding_function=embedding_function)
+        with _doc_store_flock(settings.chroma_path):
+            identity = project_identity(settings)
+            _log.info(
+                "doc_store: project identity %s, collection %s",
+                identity,
+                doc_collection_name(settings, identity),
+            )
+            store = DocStore(settings, embedding_function=embedding_function)
+            with store._build_lock:
+                _doc_store = store
+                if not _try_adopt(store, settings, embedding_function, identity):
+                    _log.info("doc_store: no usable existing collection — rebuilding")
+                    count = store.rebuild(lock_held=True)
+                    _log.info("doc_store: rebuild complete, %d chunks indexed", count)
     except Exception as exc:
-        _init_error = f"{type(exc).__name__}: {exc}"
+        if store is None:
+            _init_error = f"{type(exc).__name__}: {exc}"
         raise
-    _doc_store = store
-    _try_adopt(store, settings, embedding_function)
     return store
 
 
@@ -636,20 +879,20 @@ def init_doc_store(settings: Settings, embedding_function: Any | None = None) ->
 
     Synchronous/blocking — used by tests and by ``refresh`` (which already
     runs off the event loop via ``run_sync``).  Not used directly by lifespan
-    startup any more; see ``init_doc_store_background`` for the non-blocking
-    entry point.
+    startup; see ``init_doc_store_background`` for the non-blocking entry
+    point.  Runs :func:`_prepare_store` on the calling thread, so it may wait
+    on the inter-process doc-store lock while another process builds.
 
     "Build once" persistence: if the ChromaDB collection already exists, was
-    built for the SAME ``project_root`` (DS-05 identity check), and carries
+    built for the SAME project (DS-05/SW-01 identity check), and carries
     the build-complete sentinel, adopt it and mark ready WITHOUT re-embedding
     — this includes an intentionally-empty completed corpus (DS-24: the
     sentinel, not row count, is what marks a build "complete"; see
     ``_try_adopt``).  Otherwise rebuild from scratch.  This avoids
     re-embedding on every server restart when the bind-mount data is already
     populated, while refusing to silently serve a previous project's docs when
-    ``RLM_PROJECT_ROOT`` is repointed at a different project but the same
-    ``chroma_path``/``doc_collection`` (the documented shared-volume,
-    repo-agnostic flow).
+    the server is pointed at a different project on the same ``chroma_path``
+    (the documented shared-volume, repo-agnostic flow).
 
     Args:
         settings: Runtime settings.
@@ -660,52 +903,41 @@ def init_doc_store(settings: Settings, embedding_function: Any | None = None) ->
             real adopt gate, interrupted-build fallback, and singleton
             assignment run fully offline (DS-06).
     """
-    store = _prepare_store(settings, embedding_function)
-    if not store.is_ready:
-        _log.info("doc_store: no usable existing collection — rebuilding")
-        count = store.rebuild()
-        _log.info("doc_store: rebuild complete, %d chunks indexed", count)
-    return store
+    return _prepare_store(settings, embedding_function)
 
 
 async def init_doc_store_background(
     settings: Settings, embedding_function: Any | None = None
 ) -> None:
-    """Non-blocking startup entry point (DS-08): prepare the store, build in the background.
+    """Non-blocking startup entry point (DS-08): prepare and build on a worker thread.
 
     Never raises — this is called directly from the FastMCP lifespan, which
     must not fail startup over a doc-index problem (nav tools are unaffected).
     Any failure is logged and swallowed; ``doc_store_state()`` /
     ``get_doc_store()`` remain the source of truth for callers that care.
 
-    Sequence:
-        1. ``_prepare_store`` — cheap: construct + publish singleton + adopt
-           attempt.  On exception, log and return (singleton stays unset or is
-           whatever ``_prepare_store`` left behind; ``_init_error`` is set).
-        2. If adopted (``store.is_ready``), we're done — no build needed.
-        3. Otherwise spawn ``rebuild()`` on a worker thread as a tracked
-           background ``asyncio.Task`` (module global ``_build_task``) so the
-           lifespan can return immediately; the task's own exception handling
-           logs failures (which ``rebuild()`` has already recorded on the
-           store via ``state``/``error_message``) without ever propagating.
+    Returns without touching the doc-store lock: the whole of
+    :func:`_prepare_store` (flock wait, construction, adopt check, rebuild)
+    runs via ``asyncio.to_thread`` inside a tracked background
+    ``asyncio.Task`` (module global ``_build_task``), so a wait on another
+    process's build never freezes MCP ``initialize`` or the analyzer task.
+    While the worker waits on the flock the singleton is ``None`` and
+    ``doc_store_state()`` reports ``"building"``.  The task's own exception
+    handling logs a failure (already recorded in ``_init_error`` or on the
+    store's ``state``/``error_message``) without ever propagating.
     """
-    try:
-        store = _prepare_store(settings, embedding_function)
-    except Exception:
-        _log.exception("doc_store: init failed during background startup")
-        return
-
-    if store.is_ready:
-        return
-
-    global _build_task
+    global _build_task, _init_error
+    # Drop a stale construction error from an earlier attempt so the window
+    # before the worker starts reports "building", not the old error.
+    _init_error = None
 
     async def _build() -> None:
         try:
-            count = await asyncio.to_thread(store.rebuild)
-            _log.info("doc_store: background rebuild complete, %d chunks indexed", count)
+            store = await asyncio.to_thread(_prepare_store, settings, embedding_function)
         except Exception:
-            _log.exception("doc_store: background rebuild failed")
+            _log.exception("doc_store: background startup failed")
+            return
+        _log.info("doc_store: background startup complete (state=%s)", store.state)
 
     _build_task = asyncio.create_task(_build(), name="doc-store-build")
 
