@@ -114,6 +114,15 @@ Check this list at these lifecycle checkpoints (see
   `refresh` in one server still deletes and recreates the collection another
   server on the same volume is serving, and that server's doc search fails until
   it restarts. The one-server-per-volume guidance above still holds for serving.
+  **2026-11-04 (remediation T05, daemon):** under `rlm-connect`
+  ([docs/guide/daemon.md](../guide/daemon.md)) every IDE window on a project
+  attaches through `rust-lsp mcp-bridge` to that project's one daemon
+  container, `rlm-<ID>`, on its own volume, `rlm-<ID>-data`. The bridge opens no
+  Chroma client, and no offline ingest command exists, so the daemon is the
+  only writer on each project volume; the cross-process read above cannot
+  arise between windows that use `rlm-connect`. It still applies to the
+  per-session `docker run` config and to any second server started by hand on
+  the same volume.
 
 ### KI-14 — `refresh` blast radius on a shared daemon
 - **Where:** `refresh` MCP tool ([src/rust_lsp_mcp/tools/refresh.py](../../src/rust_lsp_mcp/tools/refresh.py))
@@ -150,6 +159,13 @@ Check this list at these lifecycle checkpoints (see
   answering from the old index for every caller, and a second `refresh`
   during a rebuild queues nothing (`doc_rebuild_started: false`). Entry
   stays open for the analyzer half.
+
+  **2026-11-04 (remediation T05, daemon):** under `rlm-connect`
+  ([docs/guide/daemon.md](../guide/daemon.md)) there is one daemon per project
+  folder, shared by every IDE window and `rust-lsp` call on that project, so
+  the blast radius applies per project: one window's `refresh` stalls
+  navigation in the other windows on the same project, never in another
+  project's daemon.
 
 ### KI-15 — Benign `ClosedResourceError` log noise in stateless HTTP mode
 - **Where:** the streamable-HTTP daemon's per-request teardown, inside the

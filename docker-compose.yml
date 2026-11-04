@@ -81,7 +81,7 @@ services:
       # Explicit doc-index identity (empty = derive it from the project path,
       # git remote and root Cargo.toml). See docs/guide/configuration.md.
       RLM_PROJECT_ID: "${RLM_PROJECT_ID:-}"
-    restart: unless-stopped
+    restart: on-failure
     volumes:
       # The target Rust project, read-only. Set RUST_PROJECT to its host path.
       # The `z` is the SHARED SELinux relabel (lowercase — never the private

@@ -61,6 +61,7 @@ tools, not raw LSP's 0-indexed convention.
 | `refresh` | `refresh` | `rust-lsp refresh` |
 | `validate-file-path` | `validate_file_path` | `rust-lsp validate-file-path FILE` |
 | `version` | — (client-only, see below) | `rust-lsp version` |
+| `mcp-bridge` | — (stdio relay, see [below](#mcp-bridge-stdio-relay-for-rlm-connect)) | `rust-lsp mcp-bridge [--port N] [--listener-timeout SECS] [--log-level LEVEL]` |
 
 Each subcommand's arguments map directly onto its tool's inputs — see the
 matching section of the [Tools / API reference](tools.md) for what each field
@@ -191,6 +192,36 @@ issuing real navigation calls. A plain `rust-lsp status` (no `--wait`) is a
 one-shot check with no polling — use it once you already expect the daemon to
 be ready and just want the current state.
 
+## `mcp-bridge`: stdio relay for `rlm-connect`
+
+`rust-lsp mcp-bridge` is not a tool call and prints no envelope. It lets an IDE
+that speaks MCP only over stdio use the daemon: it reads newline-delimited
+JSON-RPC messages from stdin, POSTs each one to
+`http://127.0.0.1:<port>/mcp`, and writes each reply message to stdout as one
+JSON line. A `text/event-stream` reply is split into its `data:` events, one
+line each; a notification answered with `202 Accepted` writes nothing. stdout
+carries MCP messages only; the bridge's log goes to stderr.
+
+You normally never run it yourself. The host-side launcher
+`scripts/rlm-connect` starts or reuses the project's daemon container and then
+execs `docker exec -i rlm-<ID> /app/.venv/bin/rust-lsp mcp-bridge`; see the
+[daemon runbook](daemon.md) for the launcher's options (`--up`,
+`--print-names`, `--engine`, `--image`, `--network`) and the IDE
+configuration.
+
+| Option | Default | What it does |
+|---|---|---|
+| `--port N` | `$RLM_HTTP_PORT`, else `8000` | The daemon listener's port on `127.0.0.1`. |
+| `--listener-timeout SECS` | `120` | Before relaying the first message, try to connect every 0.5 seconds until the listener accepts or `SECS` pass. Messages that arrive meanwhile are held in order, so an IDE's `initialize` sent during a cold start is relayed once the daemon listens. |
+| `--log-level LEVEL` | `INFO` | Level of the stderr log: `DEBUG`, `INFO`, `WARNING` or `ERROR`. |
+
+If the listener wait expires, or a connection fails after the listener was
+reached, the bridge answers the pending request with a JSON-RPC error (code
+`-32000`) on stdout, prints a hint on stderr, and carries on with the next
+message. It exits `0` when stdin closes. It imports nothing from the server
+package and opens no database, so it never acts as a second writer on the
+project volume ([KI-13](../impl/known-issues.md)).
+
 ## Daemon logs
 
 View daemon logs via `docker logs rust-lsp-mcp` (or `podman logs`).
@@ -221,7 +252,9 @@ Check `rust-lsp status` before refreshing. Only trigger `refresh` when code chan
 - [Tools / API reference](tools.md) — the underlying tool semantics, response
   shapes, and status vocabulary that every `rust-lsp` subcommand shares with
   the MCP tools.
-- [Configuration](configuration.md) — `RLM_TRANSPORT`, `RLM_HTTP_PORT`, and
-  the CLI-only `RLM_CLI_URL`.
+- [Configuration](configuration.md) — `RLM_TRANSPORT`, `RLM_HTTP_PORT`,
+  `RLM_IDLE_TIMEOUT_SECONDS`, and the CLI-only `RLM_CLI_URL`.
+- [Daemon runbook](daemon.md) — `rlm-connect`: one warm daemon per project,
+  shared by every IDE window.
 - [Agent skill: `rust-code-navigation`](../../.claude/skills/rust-code-navigation/SKILL.md)
   — helps an agent decide when to reach for these tools at all, MCP or CLI.

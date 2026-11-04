@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""rlm-connect: start or reuse one rust-lsp-mcp daemon per project, then bridge stdio into it.
+
+Usage:
+    rlm-connect [--up | --print-names] [--engine docker|podman] [--image NAME]
+                [--network none|default] [FOLDER]
+
+An IDE runs this as its MCP stdio server command. The launcher resolves FOLDER
+(default: the current working directory, which VS Code sets to the workspace
+folder for a stdio server) to a real path and derives, from the first 12 hex
+characters of its SHA-256:
+
+    container  rlm-<ID>
+    volume     rlm-<ID>-data
+    RLM_PROJECT_ID=<ID>
+
+It then inspects the container: absent -> ``run -d`` (detached daemon in
+streamable-HTTP mode, read-only project mount, per-project volume,
+``--network none`` unless ``--network default``); stopped -> ``start``;
+running -> left alone. A name conflict from a simultaneous start counts as
+success. Without ``--up`` it replaces itself (``os.execvp``) with
+``<engine> exec -i rlm-<ID> /app/.venv/bin/rust-lsp mcp-bridge``, which relays
+MCP messages between this process's stdio and the daemon's in-container
+127.0.0.1 listener (no port is ever published on the host).
+
+stdout carries MCP messages only once the bridge runs, so every diagnostic
+goes to stderr. The only stdout writes are the container name under ``--up``
+and the two names under ``--print-names``; both exit without exec.
+
+``RLM_IDLE_TIMEOUT_SECONDS`` set in the caller's environment is passed to the
+daemon only when this launcher creates the container: ``start`` reuses the
+environment the container was created with.
+
+Python 3 standard library only, so it runs on any host with python3.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+from collections.abc import Mapping
+
+DEFAULT_IMAGE = "rust-lsp-mcp"
+DAEMON_PORT = "8000"
+BRIDGE_ARGV = ["/app/.venv/bin/rust-lsp", "mcp-bridge"]
+IDLE_TIMEOUT_ENV = "RLM_IDLE_TIMEOUT_SECONDS"
+
+# State strings returned by inspect_state().
+ABSENT = "absent"
+STOPPED = "stopped"
+RUNNING = "running"
+
+
+def _err(message: str) -> None:
+    """Write one diagnostic line to stderr (never stdout)."""
+    print(f"rlm-connect: {message}", file=sys.stderr, flush=True)
+
+
+def derive_names(folder: str) -> tuple[str, str, str, str]:
+    """Return ``(real_path, project_id, container_name, volume_name)`` for FOLDER.
+
+    The identity hashes the resolved real path, so every spelling of the same
+    folder (a symlink, a trailing slash, ``..``) maps to the same daemon.
+    """
+    real = os.path.realpath(folder)
+    project_id = hashlib.sha256(real.encode("utf-8")).hexdigest()[:12]
+    return real, project_id, f"rlm-{project_id}", f"rlm-{project_id}-data"
+
+
+def pick_engine(requested: str | None) -> str:
+    """Return the container engine: the requested one, else docker on PATH, else podman."""
+    if requested:
+        return requested
+    if shutil.which("docker"):
+        return "docker"
+    return "podman"
+
+
+def _run_engine(engine: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run an engine command with stdout and stderr captured (both kept off our stdout)."""
+    return subprocess.run([engine, *args], capture_output=True, text=True, check=False)
+
+
+def _relay_output(proc: subprocess.CompletedProcess[str]) -> None:
+    """Copy a captured engine command's output to stderr."""
+    for stream in (proc.stdout, proc.stderr):
+        text = (stream or "").strip()
+        if text:
+            print(text, file=sys.stderr, flush=True)
+
+
+def inspect_state(engine: str, container: str) -> str:
+    """Return ABSENT, STOPPED or RUNNING for the named container."""
+    proc = _run_engine(
+        engine,
+        ["inspect", "--type", "container", "--format", "{{.State.Running}}", container],
+    )
+    if proc.returncode != 0:
+        return ABSENT
+    return RUNNING if proc.stdout.strip().lower() == "true" else STOPPED
+
+
+def build_run_args(
+    real_path: str,
+    project_id: str,
+    container: str,
+    volume: str,
+    image: str,
+    network: str,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Build the engine arguments (after the engine name) that create the daemon."""
+    env = os.environ if environ is None else environ
+    args = ["run", "-d", "--init", "--name", container]
+    if network == "none":
+        args += ["--network", "none"]
+    args += [
+        "-e",
+        f"RLM_PROJECT_ID={project_id}",
+        "-e",
+        "RLM_TRANSPORT=streamable-http",
+        "-e",
+        f"RLM_HTTP_PORT={DAEMON_PORT}",
+    ]
+    idle = env.get(IDLE_TIMEOUT_ENV)
+    if idle is not None:
+        args += ["-e", f"{IDLE_TIMEOUT_ENV}={idle}"]
+    args += [
+        "--memory",
+        "6g",
+        "--cpus",
+        "4",
+        "-v",
+        f"{real_path}:/project:ro,z",
+        "-v",
+        f"{volume}:/data",
+        image,
+    ]
+    return args
+
+
+def _is_name_conflict(proc: subprocess.CompletedProcess[str]) -> bool:
+    """True when a failed ``run`` lost a race to a simultaneous start of the same name."""
+    text = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+    return "already in use" in text
+
+
+def ensure_running(
+    engine: str,
+    real_path: str,
+    project_id: str,
+    container: str,
+    volume: str,
+    image: str,
+    network: str,
+) -> bool:
+    """Start or reuse the daemon container. Return True when it is (or is being) up."""
+    state = inspect_state(engine, container)
+    if state == RUNNING:
+        _err(f"{container} is running; reusing it")
+        return True
+    if state == STOPPED:
+        _err(f"{container} is stopped; starting it")
+        proc = _run_engine(engine, ["start", container])
+        _relay_output(proc)
+        if proc.returncode != 0:
+            _err(f"`{engine} start {container}` failed with exit code {proc.returncode}")
+            return False
+        return True
+    _err(f"{container} is absent; creating it from image {image} (volume {volume})")
+    proc = _run_engine(
+        engine, build_run_args(real_path, project_id, container, volume, image, network)
+    )
+    _relay_output(proc)
+    if proc.returncode == 0:
+        return True
+    if _is_name_conflict(proc):
+        _err(f"{container} was created by a simultaneous start; reusing it")
+        return True
+    _err(f"`{engine} run` failed with exit code {proc.returncode}")
+    return False
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="rlm-connect",
+        description=(
+            "Start or reuse the rust-lsp-mcp daemon for FOLDER, then bridge this "
+            "process's stdio into it (an MCP stdio server for an IDE). "
+            "Diagnostics go to stderr."
+        ),
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--up",
+        action="store_true",
+        help="Start or reuse the daemon, print its container name and exit without attaching.",
+    )
+    mode.add_argument(
+        "--print-names",
+        action="store_true",
+        help="Print the container name and the volume name, one per line, and exit. "
+        "Calls no container engine.",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["docker", "podman"],
+        default=None,
+        help="Container engine (default: docker when on PATH, else podman).",
+    )
+    parser.add_argument(
+        "--image",
+        default=DEFAULT_IMAGE,
+        help=f"Image to create the daemon from (default: {DEFAULT_IMAGE}).",
+    )
+    parser.add_argument(
+        "--network",
+        choices=["none", "default"],
+        default="none",
+        help="'none' (default) runs the daemon with no network; 'default' keeps the "
+        "engine's default network for a project that needs one.",
+    )
+    parser.add_argument(
+        "folder",
+        nargs="?",
+        default=None,
+        help="Project folder (default: the current working directory).",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    folder = args.folder if args.folder is not None else os.getcwd()
+    real_path, project_id, container, volume = derive_names(folder)
+
+    if args.print_names:
+        print(container)
+        print(volume)
+        return 0
+
+    if not os.path.isdir(real_path):
+        _err(f"project folder does not exist or is not a directory: {real_path}")
+        return 2
+
+    engine = pick_engine(args.engine)
+    if shutil.which(engine) is None:
+        _err(f"container engine `{engine}` not found on PATH")
+        return 1
+
+    if not ensure_running(
+        engine, real_path, project_id, container, volume, args.image, args.network
+    ):
+        return 1
+
+    if args.up:
+        print(container, flush=True)
+        return 0
+
+    exec_argv = [engine, "exec", "-i", container, *BRIDGE_ARGV]
+    _err(f"attaching: {' '.join(exec_argv)}")
+    sys.stderr.flush()
+    os.execvp(engine, exec_argv)
+    return 1  # unreachable: execvp replaces the process or raises
+
+
+if __name__ == "__main__":
+    sys.exit(main())

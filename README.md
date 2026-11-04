@@ -82,8 +82,22 @@ Build the container image from the repository root:
 docker build -t rust-lsp-mcp .
 ```
 
+### Connect through rlm-connect
+
+`scripts/rlm-connect` runs one long-lived daemon per project folder and attaches every IDE window on that folder to it over stdio, so rust-analyzer indexes and the docs embed once per project rather than once per window. It derives the container name, the volume name and `RLM_PROJECT_ID` from the folder's real path, starts the daemon with `--network none` if it is not already running, then becomes the window's stdio bridge into it. VS Code workspace config (`.vscode/mcp.json`):
+
+```json
+{
+  "servers": {
+    "rust-lsp-mcp": { "type": "stdio", "command": "rlm-connect", "args": ["${workspaceFolder}"] }
+  }
+}
+```
+
+Prime the project's cache, warm the daemon from the shell, and check it before opening the IDE with the [daemon runbook](docs/guide/daemon.md), which also covers the Claude Desktop config, the idle timeout, and how a window recovers after the daemon stops.
+
 ### Step 2: Configure your MCP client
-Add the server to your client configuration (such as Claude Desktop):
+The alternative to `rlm-connect` is one ephemeral container per client session. Add the server to your client configuration (such as Claude Desktop):
 
 ```json
 {
