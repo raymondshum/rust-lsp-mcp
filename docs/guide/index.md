@@ -10,6 +10,7 @@ The README covers the quick start; these pages go deeper into how the system wor
 - [Tools / API reference](tools.md) — complete tool reference and protocol, with modular guides for [Navigation](tools/navigation.md), [Documentation Search](tools/search.md), and [Administration](tools/admin.md).
 - [Configuration](configuration.md) — every setting and environment variable, with defaults and what each one does.
 - [CLI reference](cli.md) — the `rust-lsp` command-line client for agents without MCP tool access: subcommands, exit codes, `--wait`, and troubleshooting.
+- [Daemon runbook](daemon.md) — `rlm-connect`: one warm daemon per project shared by every IDE window; warming and checking it from the shell, logs, idle timeout, IDE configuration and recovery.
 - [Development setup](development.md) — how to set up the development container, run the server, and run the two kinds of tests.
 - [Components](components.md) — a guided, module-by-module tour of the source code.
 - [Dependencies](dependencies.md) — the main libraries and external tools the project relies on, and why.
@@ -23,6 +24,7 @@ The guide has two tracks. Pick the one that matches what you want to do.
 
 - **Wiring the server into an AI assistant** — [Tools / API reference](tools.md) and [Configuration](configuration.md).
 - **Driving it from a shell-only agent (no MCP tools)** — [CLI reference](cli.md).
+- **Running one warm daemon per project for your IDE windows** — [Daemon runbook](daemon.md).
 
 **Contributors and engineers — you want to work *on* the server.**
 

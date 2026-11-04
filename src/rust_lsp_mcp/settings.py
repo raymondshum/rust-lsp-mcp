@@ -116,6 +116,13 @@ class Settings(BaseSettings):
     # instead of an OverflowError at the uvicorn bind (adversarial note, C1).
     http_port: int = Field(default=8000, ge=1, le=65535)
 
+    # Idle timeout for streamable-http mode, in seconds; ignored in stdio mode.
+    # The daemon exits with code 0 when no request has arrived for this long
+    # (and none is in flight), so a per-project daemon started by rlm-connect
+    # does not hold rust-analyzer's memory forever. 0 disables the timeout.
+    # Env: RLM_IDLE_TIMEOUT_SECONDS.
+    idle_timeout_seconds: int = Field(default=3600, ge=0)
+
     @model_validator(mode="after")
     def _warn_deprecated_ripgrep_src(self) -> "Settings":
         """Emit a DeprecationWarning when the legacy RLM_RIPGREP_SRC env var is

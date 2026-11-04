@@ -33,6 +33,11 @@ per the phase-2 handoff for explicit sign-off.
 ``--wait SECS`` is a global option and, per argparse's subparser mechanics,
 must be given BEFORE the subcommand name (``rust-lsp --wait 180 status``, not
 ``rust-lsp status --wait 180``) -- documented in its own ``--help`` text.
+
+``mcp-bridge`` is not a tool call: it hands the process to
+``rust_lsp_cli.bridge``, which relays MCP messages between stdio and the
+daemon's listener for ``scripts/rlm-connect``. Like ``version`` it is absent
+from ``COMMANDS``; ``--wait`` does not apply to it.
 """
 
 import argparse
@@ -243,6 +248,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("file", help="Workspace-relative path to probe, e.g. src/main.rs.")
 
+    p = subparsers.add_parser(
+        "mcp-bridge",
+        help=(
+            "Relay MCP JSON-RPC messages between stdio and the daemon's "
+            "127.0.0.1 listener (what rlm-connect runs inside the daemon "
+            "container). stdout carries MCP messages only."
+        ),
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Daemon listener port (default: $RLM_HTTP_PORT, else 8000).",
+    )
+    p.add_argument(
+        "--listener-timeout",
+        type=_finite_float,
+        metavar="SECS",
+        default=120.0,
+        help=(
+            "How long to wait for the daemon's listener before the first relay, "
+            "polling every 0.5s (default: 120). Messages read meanwhile are held "
+            "in order."
+        ),
+    )
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Level of the bridge's stderr log (default: INFO).",
+    )
+
     subparsers.add_parser(
         "version",
         help=(
@@ -335,6 +372,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "version":
         return _run_version(base_url, args.wait)
+
+    if args.command == "mcp-bridge":
+        from rust_lsp_cli import bridge
+
+        port = args.port
+        if port is None:
+            port = int(os.environ.get("RLM_HTTP_PORT", str(DEFAULT_HTTP_PORT)))
+        return bridge.run(port, args.listener_timeout, args.log_level)
 
     tool_name, build_args = COMMANDS[args.command]
     arguments = build_args(args)
