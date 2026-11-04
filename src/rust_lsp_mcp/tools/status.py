@@ -1,4 +1,4 @@
-"""Full 4-field status tool — state, indexed_commit, current_commit, stale.
+"""Status tool — analyzer state, commit freshness, progress and doc index state.
 
 Registered with the FastMCP app at import time via ``@mcp.tool()``.
 
@@ -14,7 +14,7 @@ from typing import Any
 from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, get_preflight_warnings, mcp
-from rust_lsp_mcp.doc_store import doc_index_chunk_count, doc_store_state
+from rust_lsp_mcp.doc_store import doc_index_chunk_count, doc_store_freshness, doc_store_state
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
 
@@ -35,8 +35,10 @@ async def status() -> dict[str, Any]:
                            ``refresh`` to retry.
     - ``analyzer_error``  — diagnostic message when ``state == "error"``, else
                            ``null``.
-    - ``indexed_commit`` — git HEAD hash captured when indexing began, or
-                           ``null`` if not yet captured or git is unavailable.
+    - ``indexed_commit`` — git HEAD hash captured at analyzer start and
+                           re-captured when a watcher-driven re-index
+                           completes, or ``null`` if not yet captured or git
+                           is unavailable.
     - ``current_commit`` — git HEAD hash at call time (``git -C <repo> rev-parse
                            HEAD``), or ``null`` on any failure (non-git directory,
                            git binary missing, subprocess error).  Never raises.
@@ -47,6 +49,19 @@ async def status() -> dict[str, Any]:
                                      (no committed changes since indexing);
                            ``true``  if the commits differ (committed changes
                                      have landed since indexing began).
+                           rust-analyzer watches the tree, so after a branch
+                           switch that touches Rust or Cargo files
+                           ``indexed_commit`` is re-captured when the
+                           re-index ends and ``stale`` returns to ``false``
+                           without ``refresh``.
+    - ``indexing_started_at`` — ISO 8601 UTC time the current analyzer
+                           indexing run began (reset by every ``refresh``),
+                           or ``null`` before the first run / with no manager.
+    - ``analyzer_progress`` — latest rust-analyzer progress title and message
+                           (e.g. ``"Indexing 120/512 (serde)"``), or ``null``
+                           before the first progress notification of the run.
+    - ``analyzer_progress_at`` — ISO 8601 UTC time of that progress
+                           notification, or ``null``.
     - ``doc_index_state`` — ``"building"``/``"ready"``/``"error"`` for the
                            documentation search index (independent of
                            ``state`` above — see ``search_docs``).
@@ -58,6 +73,17 @@ async def status() -> dict[str, Any]:
                            reading (a completed corpus with zero matching
                            Markdown files) and is distinct from ``null``
                            (index not ready yet / no store) — see UR-20.
+    - ``doc_indexed_commit`` — git HEAD hash stamped on the doc index when it
+                           was built, or ``null`` when ``doc_index_state !=
+                           "ready"`` (``"none"`` if git failed at build time).
+    - ``doc_stale``      — ``true`` when the current HEAD differs from
+                           ``doc_indexed_commit`` or a doc file covered by the
+                           index changed since the build (size or mtime);
+                           ``false`` when neither changed; ``null`` when
+                           ``doc_index_state != "ready"``.  No running server
+                           rebuilds the doc index on its own: ``doc_stale``
+                           stays ``true`` until the next ``refresh`` or
+                           server restart.
     - ``preflight_warnings`` — list of advisory strings computed once at
                            server startup (empty list = all clear, or the
                            preflight never ran — e.g. most unit tests). Never
@@ -103,6 +129,9 @@ async def status() -> dict[str, Any]:
     doc_state, doc_err = doc_store_state()
     preflight_warnings = get_preflight_warnings()
     rust_analyzer_version: str | None = mgr.rust_analyzer_version if mgr is not None else None
+    indexing_started_at: str | None = mgr.indexing_started_at if mgr is not None else None
+    analyzer_progress: str | None = mgr.progress_message if mgr is not None else None
+    analyzer_progress_at: str | None = mgr.progress_at if mgr is not None else None
     # Package versions are cheap to resolve (importlib.metadata reads
     # installed distribution metadata, no I/O beyond that) — compute fresh
     # per call rather than caching, unlike rust_analyzer_version's subprocess.
@@ -118,6 +147,9 @@ async def status() -> dict[str, Any]:
     # identical pattern).
     current_commit: str | None = await asyncio.to_thread(_git_head, repo_root)
     doc_chunk_count: int | None = await asyncio.to_thread(doc_index_chunk_count)
+    # SW-04: the doc freshness check runs a git call and a stat walk over the
+    # doc files — same DS-19 worker-thread offload.
+    doc_indexed_commit, doc_stale = await asyncio.to_thread(doc_store_freshness)
 
     stale: bool | None
     if indexed_commit is None or current_commit is None:
@@ -131,9 +163,14 @@ async def status() -> dict[str, Any]:
         indexed_commit=indexed_commit,
         current_commit=current_commit,
         stale=stale,
+        indexing_started_at=indexing_started_at,
+        analyzer_progress=analyzer_progress,
+        analyzer_progress_at=analyzer_progress_at,
         doc_index_state=doc_state,
         doc_index_error=doc_err,
         doc_index_chunk_count=doc_chunk_count,
+        doc_indexed_commit=doc_indexed_commit,
+        doc_stale=doc_stale,
         preflight_warnings=preflight_warnings,
         server_version=server_version,
         multilspy_version=multilspy_version,

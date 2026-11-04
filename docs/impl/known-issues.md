@@ -194,6 +194,46 @@ Check this list at these lifecycle checkpoints (see
 
 ## Resolved
 
+### SW-03 — A new file after a branch switch was not found without `refresh`
+- **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`PatchedRustAnalyzer._get_initialize_params`, `AnalyzerManager._make_progress_handler`).
+- **What:** the 2026-11-03 defect sweep (SW-03, high) found that multilspy's bundled
+  initialize parameters set `files.watcher` to `"client"`: rust-analyzer registered a
+  file watch with the client, multilspy accepted it and never sent a change event, so
+  a `.rs` file added by a branch switch, a pull or an agent's edit stayed invisible to
+  `find_symbol` until `refresh`.
+- **Resolved:** 2026-11-04 (remediation T02). `_get_initialize_params` sets
+  `files.watcher` to `"server"`, so rust-analyzer watches the tree itself, and binds
+  `$/progress` to the manager's handler, which re-captures `indexed_commit` when a
+  re-index ends while the analyzer is ready, so `stale` returns to `false` without
+  `refresh`. Live probe under rootless podman with the ripgrep fixture bind-mounted
+  `:ro,z`: after `git checkout` of a branch adding a new function, `find_symbol`
+  found it on the first poll (0.8 s) and `status` read `stale: false` at the same
+  poll. A switch that changes no Rust or Cargo file starts no re-index, so `stale`
+  stays `true` until `refresh` (stated in the skill). Guarded by
+  [tests/test_analyzer_init_params.py](../../tests/test_analyzer_init_params.py),
+  [tests/test_analyzer_commit_recapture.py](../../tests/test_analyzer_commit_recapture.py)
+  and [tests/test_freshness_integration.py](../../tests/test_freshness_integration.py).
+
+### SW-04 — A doc index built on another branch was served as current
+- **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
+  (`doc_store_files`, `doc_store_digest`, `_rebuild_locked`, `_try_adopt`,
+  `doc_store_freshness`) · [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py).
+- **What:** the 2026-11-03 defect sweep (SW-04, high) found that the adopt check
+  compared only the project identity and the build sentinel, so a restart after a
+  branch switch adopted the doc index built on the old branch, and `status` gave no
+  sign that `search_docs` answered from another tree.
+- **Resolved:** 2026-11-04 (remediation T02). A successful rebuild stamps the
+  collection with `indexed_commit` (git `HEAD`, or `"none"`) and `doc_digest` (16 hex
+  characters of SHA-256 over path, size and mtime of every file `doc_store_files`
+  selects, the one helper that globs the doc patterns, so an excluded file never
+  changes the digest). `_try_adopt` refuses on either difference and the startup
+  thread rebuilds; `status` reports `doc_indexed_commit` and `doc_stale`. In the
+  same live probe, `doc_stale` read `false` at ready and `true` after the branch
+  switch. Guarded by `TestDocStoreFreshnessStamp` in
+  [tests/test_doc_store.py](../../tests/test_doc_store.py) and
+  `TestStatusFreshnessFields` in [tests/test_status.py](../../tests/test_status.py).
+
 ### SW-01 — Every project shared one doc index identity on a shared volume
 - **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
   (`_project_fingerprint`, `_try_adopt`, the collection name) ·

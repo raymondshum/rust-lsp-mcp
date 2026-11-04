@@ -501,12 +501,17 @@ Always `ok`, with these fields:
 |---|---|---|
 | `state` | `"indexing"`, `"ready"`, or `"error"` | Whether the analyzer has finished indexing. `"error"` means the background indexing run failed permanently — gated tools (via `require_ready`) return an `error` envelope (`recovery: "refresh"`, not `not_ready`) while in this state. Call `refresh` to retry. |
 | `analyzer_error` | string or `null` | Diagnostic message when `state` is `"error"`, else `null`. |
-| `indexed_commit` | string or `null` | The git commit hash that was current when indexing started. `null` if not yet captured or git is unavailable. |
+| `indexed_commit` | string or `null` | The git commit hash captured at analyzer start and re-captured when a re-index completes. `null` if not yet captured or git is unavailable. |
 | `current_commit` | string or `null` | The git commit hash right now. `null` on any failure (non-git directory, git not installed, etc.). |
-| `stale` | boolean or `null` | `true` if the two commit hashes differ; `false` if they match; `null` if either hash is unknown. |
+| `stale` | boolean or `null` | `true` if the two commit hashes differ; `false` if they match; `null` if either hash is unknown. The server watches the project tree, so after a branch switch or pull that changes Rust or Cargo files, `indexed_commit` is re-captured when the re-index ends and `stale` returns to `false` without `refresh`. A switch that changes no Rust or Cargo file starts no re-index, so `stale` stays `true` until `refresh`. |
+| `indexing_started_at` | string or `null` | ISO 8601 UTC time the current analyzer indexing run began; reset by every `refresh`. `null` before the first run. |
+| `analyzer_progress` | string or `null` | The latest rust-analyzer progress title and message (for example `"Indexing 120/512 (serde)"`). `null` before the first progress report of the run. |
+| `analyzer_progress_at` | string or `null` | ISO 8601 UTC time of that progress report, or `null`. |
 | `doc_index_state` | `"building"`, `"ready"`, or `"error"` | Whether the documentation search index (used by `search_docs`) has finished building. Independent of `state` above. |
 | `doc_index_error` | string or `null` | Diagnostic message when `doc_index_state` is `"error"`, else `null`. |
 | `doc_index_chunk_count` | integer or `null` | Number of indexed Markdown chunks (a live `collection.count()`), or `null` when `doc_index_state != "ready"`. `0` is a valid, meaningful reading — a completed index over zero matching Markdown files (e.g. wrong `RLM_DOC_GLOB_PATTERNS`, empty/un-mounted project, or a project that genuinely ships no docs) — and is distinct from `null` ("not ready yet / no store"). Works whether the index was just rebuilt or adopted from a prior run. |
+| `doc_indexed_commit` | string or `null` | The git commit hash stamped on the doc index when it was built (`"none"` if git failed then). `null` when `doc_index_state != "ready"`. |
+| `doc_stale` | boolean or `null` | `true` if the current commit differs from `doc_indexed_commit` or a Markdown file the index covers was added, removed or changed (size or modification time) since the build; `false` if neither changed; `null` when `doc_index_state != "ready"`. No running server rebuilds the doc index on its own: this stays `true` until the next `refresh` or server restart. |
 | `preflight_warnings` | array of strings | Advisory-only diagnostics computed once at server startup: whether the configured `rust_analyzer_bin` resolves to an existing executable, and whether `project_root` exists and is a directory. An empty array means either "both checks passed" or "the preflight has not run yet" (e.g. some test contexts) — these are intentionally indistinguishable. Warnings here never affect `state`, `doc_index_state`, or the envelope `status` — they are a hint, not a failure signal. |
 | `server_version` | string or `null` | Installed `rust-lsp-mcp` package version, resolved fresh on every call. `null` if the distribution metadata isn't resolvable. |
 | `multilspy_version` | string or `null` | Installed `multilspy` package version, same resolution and `null`-degradation as `server_version`. |
@@ -526,9 +531,14 @@ means "no committed changes since indexing began," not a freshness guarantee.
   "indexed_commit": "a3f1c9d",
   "current_commit": "a3f1c9d",
   "stale": false,
+  "indexing_started_at": "2026-11-04T07:28:38+00:00",
+  "analyzer_progress": "Indexing",
+  "analyzer_progress_at": "2026-11-04T07:28:59+00:00",
   "doc_index_state": "ready",
   "doc_index_error": null,
   "doc_index_chunk_count": 42,
+  "doc_indexed_commit": "a3f1c9d",
+  "doc_stale": false,
   "preflight_warnings": [],
   "server_version": "0.4.0",
   "multilspy_version": "0.0.15",

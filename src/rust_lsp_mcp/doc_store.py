@@ -56,6 +56,16 @@ Inter-process start lock (SW-02, KI-13):
     the first).  A ``rebuild()`` called on a live store (``refresh``) takes
     the store's ``_build_lock`` first and then its own flock.
 
+Doc index freshness (SW-04):
+    :func:`doc_store_files` is the one place that selects the files to index
+    (the glob patterns, de-duplication and ``doc_exclude_patterns``); no other
+    function globs the doc patterns.  A successful rebuild stamps the
+    collection with ``indexed_commit`` (git ``HEAD`` of ``project_root``) and
+    ``doc_digest`` (:func:`doc_store_digest`, over the same file list), so
+    :func:`_try_adopt` refuses an index built on another branch or from other
+    file contents, and :func:`doc_store_freshness` reports whether the ready
+    index still matches the tree.
+
 Startup split (DS-08):
     ``init_doc_store`` (synchronous) runs :func:`_prepare_store` on the
     calling thread: take the flock, construct the store, set the module
@@ -123,8 +133,12 @@ _LOCK_FILENAME = ".rlm-doc-store.lock"
 # A wait on the lock longer than this is logged once at info.
 _LOCK_WAIT_LOG_SECONDS = 2.0
 
-# Timeout for the ``git config`` call in project_identity().
+# Timeout for the ``git config`` call in project_identity() and the
+# ``git rev-parse HEAD`` call in _doc_head_commit().
 _GIT_TIMEOUT_SECONDS = 5.0
+
+# Stamped as indexed_commit when git rev-parse HEAD fails.
+_NO_COMMIT = "none"
 
 
 def _git_remote_url(project_root: pathlib.Path) -> str:
@@ -165,6 +179,94 @@ def _root_package_name(project_root: pathlib.Path) -> str:
         return ""
     name = package.get("name")
     return name if isinstance(name, str) else ""
+
+
+def _doc_head_commit(project_root: str) -> str:
+    """Return ``git -C <project_root> rev-parse HEAD``, or ``"none"`` on any failure.
+
+    Synchronous with a 5-second timeout; callers run it on a worker thread.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", project_root, "rev-parse", "HEAD"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _NO_COMMIT
+    if result.returncode != 0:
+        return _NO_COMMIT
+    return result.stdout.strip() or _NO_COMMIT
+
+
+def doc_store_files(settings: Settings) -> list[pathlib.Path]:
+    """Return the Markdown files the doc index covers, sorted by path.
+
+    The one function that globs the doc patterns: every
+    ``settings.doc_glob_patterns`` entry is globbed under ``project_root``,
+    matches are de-duplicated and filtered to regular files, and every path
+    a ``settings.doc_exclude_patterns`` glob matches is removed.
+    ``_rebuild_locked`` indexes exactly this list and :func:`doc_store_digest`
+    hashes exactly this list, so an excluded file never changes the digest.
+    """
+    src_root = pathlib.Path(settings.project_root)
+    patterns = [p.strip() for p in settings.doc_glob_patterns.split(",") if p.strip()]
+
+    all_files: list[pathlib.Path] = []
+    for pattern in patterns:
+        all_files.extend(src_root.glob(pattern))
+
+    # Deduplicate (multiple patterns may match same file) and filter to files only.
+    seen: set[pathlib.Path] = set()
+    unique_files: list[pathlib.Path] = []
+    for f in all_files:
+        if f not in seen and f.is_file():
+            seen.add(f)
+            unique_files.append(f)
+
+    # Compute the exclusion set from doc_exclude_patterns and remove those paths.
+    exclude_patterns = [p.strip() for p in settings.doc_exclude_patterns.split(",") if p.strip()]
+    if exclude_patterns:
+        excluded: set[pathlib.Path] = set()
+        for pattern in exclude_patterns:
+            excluded.update(src_root.glob(pattern))
+        before_count = len(unique_files)
+        unique_files = [f for f in unique_files if f not in excluded]
+        removed = before_count - len(unique_files)
+        _log.debug("doc_store: excluded %d files matching doc_exclude_patterns", removed)
+
+    return sorted(unique_files)
+
+
+def doc_store_digest(settings: Settings, files: list[pathlib.Path] | None = None) -> str:
+    """Return the doc index digest for *settings*' project (SW-04).
+
+    The first 16 hex characters of the SHA-256 over the newline-joined
+    ``<relative path>\t<size>\t<mtime_ns>`` lines of every file
+    :func:`doc_store_files` returns, in its sorted order.  A file that
+    vanishes between the listing and the ``stat`` contributes
+    ``<relative path>\t-\t-``.  Pass *files* when the caller already holds
+    the :func:`doc_store_files` result (the rebuild does, so the digest
+    covers exactly the files it indexes); otherwise the list is computed
+    here.  The one function that computes the digest: the rebuild stamp, the
+    adopt check and :func:`doc_store_freshness` all call it.
+    """
+    if files is None:
+        files = doc_store_files(settings)
+    src_root = pathlib.Path(settings.project_root)
+    lines: list[str] = []
+    for filepath in files:
+        rel_path = filepath.relative_to(src_root).as_posix()
+        try:
+            st = filepath.stat()
+        except OSError:
+            lines.append(f"{rel_path}\t-\t-")
+            continue
+        lines.append(f"{rel_path}\t{st.st_size}\t{st.st_mtime_ns}")
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
 
 
 def project_identity(settings: Settings) -> str:
@@ -422,11 +524,6 @@ class DocStore:
         identity = project_identity(self._settings)
         collection_name = doc_collection_name(self._settings, identity)
         project_fingerprint = _project_fingerprint(self._settings, identity)
-        build_metadata = {
-            "build_complete": True,
-            "project_root": project_fingerprint,
-            "project_identity": identity,
-        }
 
         # --- Start transition (DS-12): under _read_lock, briefly -----------
         # Mark not ready at the very start — never ready mid-build.  Clearing
@@ -471,36 +568,22 @@ class DocStore:
             create_kwargs["embedding_function"] = self._ef
         collection = self._client.create_collection(collection_name, **create_kwargs)
 
-        # Glob markdown files.
+        # Select the files to index (the one shared helper, SW-04).
         src_root = pathlib.Path(self._settings.project_root)
-        patterns = [p.strip() for p in self._settings.doc_glob_patterns.split(",") if p.strip()]
-
-        all_files: list[pathlib.Path] = []
-        for pattern in patterns:
-            all_files.extend(src_root.glob(pattern))
-
-        # Deduplicate (multiple patterns may match same file) and filter to files only.
-        seen: set[pathlib.Path] = set()
-        unique_files: list[pathlib.Path] = []
-        for f in all_files:
-            if f not in seen and f.is_file():
-                seen.add(f)
-                unique_files.append(f)
-
-        # Compute the exclusion set from doc_exclude_patterns and remove those paths.
-        exclude_patterns = [
-            p.strip() for p in self._settings.doc_exclude_patterns.split(",") if p.strip()
-        ]
-        if exclude_patterns:
-            excluded: set[pathlib.Path] = set()
-            for pattern in exclude_patterns:
-                excluded.update(src_root.glob(pattern))
-            before_count = len(unique_files)
-            unique_files = [f for f in unique_files if f not in excluded]
-            removed = before_count - len(unique_files)
-            _log.debug("doc_store: excluded %d files matching doc_exclude_patterns", removed)
-
+        unique_files = doc_store_files(self._settings)
         _log.debug("doc_store: found %d markdown files to index", len(unique_files))
+
+        # Freshness stamp (SW-04), taken BEFORE the files are read: a file
+        # changed while the build runs then reads as stale on the next check
+        # instead of being stamped as indexed.  Stamped together with the
+        # completion sentinel below.
+        build_metadata = {
+            "build_complete": True,
+            "project_root": project_fingerprint,
+            "project_identity": identity,
+            "indexed_commit": _doc_head_commit(self._settings.project_root),
+            "doc_digest": doc_store_digest(self._settings, unique_files),
+        }
 
         # Chunk and collect all docs.
         ids: list[str] = []
@@ -531,8 +614,9 @@ class DocStore:
             # build and ADOPTS it on the next startup instead of rebuilding
             # every time — the adopt gate no longer requires count() > 0 (a
             # count-0 collection can never satisfy that), it relies solely on
-            # this sentinel + the project_root fingerprint below. project_root
-            # and project_identity are stamped alongside it (DS-05, SW-01) —
+            # this sentinel + the project_root fingerprint below. project_root,
+            # project_identity, indexed_commit and doc_digest are stamped
+            # alongside it (DS-05, SW-01, SW-04) —
             # modify() REPLACES metadata wholesale (verified against chromadb
             # 1.5.9), so all keys must be written together in one call.
             collection.modify(metadata=build_metadata)
@@ -555,7 +639,8 @@ class DocStore:
         # will lack this sentinel, causing init_doc_store to rebuild rather than
         # adopt a silently-partial collection.  project_root and project_identity
         # are stamped alongside it (DS-05, SW-01) so a later init_doc_store() can
-        # detect cross-project reuse.
+        # detect cross-project reuse, and indexed_commit and doc_digest (SW-04)
+        # so it can detect an index built from another tree state.
         collection.modify(metadata=build_metadata)
 
         # --- End transition (DS-12): under _read_lock, briefly -------------
@@ -711,6 +796,42 @@ def doc_index_chunk_count() -> int | None:
     return _doc_store.chunk_count()
 
 
+def doc_store_freshness() -> tuple[str | None, bool | None]:
+    """Return ``(doc_indexed_commit, doc_stale)`` for the doc index (SW-04).
+
+    ``(None, None)`` when there is no store or it is not ``"ready"``.
+    Otherwise the ``indexed_commit`` stamped on the ready collection (``None``
+    when an adopted pre-stamp collection lacks it) and ``doc_stale``:
+    ``True`` when the stamped commit differs from the current ``HEAD`` or the
+    stamped ``doc_digest`` differs from :func:`doc_store_digest` now (a
+    missing stamp compares unequal), else ``False``.
+
+    Synchronous: the digest walk and the git call run on the caller's thread,
+    so async callers (``status``) run it through ``asyncio.to_thread``, never
+    on the event loop.  Never raises; an unexpected failure reads as
+    ``(None, None)``.
+    """
+    store = _doc_store
+    if store is None:
+        return None, None
+    with store._read_lock:
+        if store._state != DOC_STATE_READY or store._collection is None:
+            return None, None
+        collection = store._collection
+    try:
+        meta = collection.metadata or {}
+        stamped_commit = meta.get("indexed_commit")
+        stamped_digest = meta.get("doc_digest")
+        current_commit = _doc_head_commit(store._settings.project_root)
+        current_digest = doc_store_digest(store._settings)
+    except Exception:
+        _log.debug("doc_store: freshness check failed", exc_info=True)
+        return None, None
+    indexed_commit = stamped_commit if isinstance(stamped_commit, str) else None
+    stale = stamped_commit != current_commit or stamped_digest != current_digest
+    return indexed_commit, stale
+
+
 def _try_adopt(
     store: DocStore,
     settings: Settings,
@@ -719,14 +840,20 @@ def _try_adopt(
 ) -> bool:
     """Attempt to adopt an existing, fully-built ChromaDB collection onto *store*.
 
-    Cheap (no embedding work): a single ``get_collection`` metadata check.
+    Cheap (no embedding work): a single ``get_collection`` metadata check,
+    plus one ``git rev-parse HEAD`` and one ``stat`` walk over
+    :func:`doc_store_files` for the freshness stamp.
     "Build once" persistence: if the ChromaDB collection was built for the
     SAME project (its ``project_root`` fingerprint and its
-    ``project_identity`` both equal the current values — DS-05, SW-01) and
-    carries the build-complete sentinel, adopt it (``store._collection`` and
+    ``project_identity`` both equal the current values — DS-05, SW-01), from
+    the SAME tree state (its stamped ``indexed_commit`` equals the current
+    ``HEAD`` and its stamped ``doc_digest`` equals :func:`doc_store_digest`
+    now — SW-04; a missing stamp on a pre-SW-04 collection compares unequal)
+    and carries the build-complete sentinel, adopt it (``store._collection`` and
     ``store._state = DOC_STATE_READY``) and return ``True`` WITHOUT
     re-embedding.  Returns ``False`` on any failure to adopt (not found,
-    interrupted build, cross-project mismatch, or an unexpected exception) —
+    interrupted build, cross-project mismatch, a stale commit or digest, or
+    an unexpected exception) —
     mirroring the original ``init_doc_store``'s fall-through-to-rebuild
     behaviour exactly.
 
@@ -776,6 +903,26 @@ def _try_adopt(
             existing_project_root == current_fingerprint and existing_identity == identity
         )
         if build_complete and same_project:
+            # SW-04: refuse an index built from another tree state.  Logged at
+            # info with the key that differed; the caller rebuilds.
+            current_commit = _doc_head_commit(settings.project_root)
+            if meta.get("indexed_commit") != current_commit:
+                _log.info(
+                    "doc_store: not adopting: %s differs (stamped %r, current %r) — rebuilding",
+                    "indexed_commit",
+                    meta.get("indexed_commit"),
+                    current_commit,
+                )
+                return False
+            current_digest = doc_store_digest(settings)
+            if meta.get("doc_digest") != current_digest:
+                _log.info(
+                    "doc_store: not adopting: %s differs (stamped %r, current %r) — rebuilding",
+                    "doc_digest",
+                    meta.get("doc_digest"),
+                    current_digest,
+                )
+                return False
             _log.info(
                 "doc_store: adopting existing collection (%d chunks) — skipping rebuild",
                 existing.count(),

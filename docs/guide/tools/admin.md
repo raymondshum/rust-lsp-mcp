@@ -37,12 +37,17 @@ Always returns `status: "ok"` with a health envelope:
 |---|---|---|
 | `state` | string | `"indexing"`, `"ready"`, or `"error"`. |
 | `analyzer_error` | string \| null | Diagnostic error string if `state` is `"error"`. |
-| `indexed_commit` | string \| null | Git HEAD commit captured when analyzer started. |
+| `indexed_commit` | string \| null | Git HEAD commit captured at analyzer start and re-captured when a re-index completes. |
 | `current_commit` | string \| null | Live git HEAD commit on disk. |
-| `stale` | boolean \| null | `true` if `indexed_commit != current_commit`. `null` if git is unavailable. |
+| `stale` | boolean \| null | `true` if `indexed_commit != current_commit`. `null` if git is unavailable. `indexed_commit` is re-captured when a watcher-driven re-index ends, so a branch switch that changes Rust or Cargo files returns this to `false` without `refresh`. |
+| `indexing_started_at` | string \| null | ISO 8601 UTC time the current indexing run began (reset by `refresh`). |
+| `analyzer_progress` | string \| null | Latest rust-analyzer progress title and message. |
+| `analyzer_progress_at` | string \| null | ISO 8601 UTC time of the latest progress report. |
 | `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. |
 | `doc_index_error` | string \| null | Error message if documentation store build failed. |
 | `doc_index_chunk_count` | integer \| null | Total stored document chunks (`0` indicates unmounted or empty doc path). |
+| `doc_indexed_commit` | string \| null | Git commit stamped on the doc index at build time; `null` unless `doc_index_state` is `"ready"`. |
+| `doc_stale` | boolean \| null | `true` if the commit changed, or a Markdown file the index covers was added, removed or changed, since the doc index was built; stays `true` until `refresh` or a restart. `null` unless `doc_index_state` is `"ready"`. |
 | `preflight_warnings` | list[string] | Advisory warnings detected during startup. |
 | `server_version` | string \| null | Installed package version of `rust-lsp-mcp`. |
 | `multilspy_version` | string \| null | Installed version of `multilspy`. |

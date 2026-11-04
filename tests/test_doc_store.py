@@ -43,6 +43,9 @@ from rust_lsp_mcp.doc_store import (
     clear_doc_store,
     doc_collection_name,
     doc_index_chunk_count,
+    doc_store_digest,
+    doc_store_files,
+    doc_store_freshness,
     doc_store_state,
     get_doc_store,
     init_doc_store,
@@ -1286,6 +1289,222 @@ class TestAdoptProjectIdentity:
         assert rebuilds == 1, "a collection whose project_identity differs must be rebuilt"
         meta = store._collection.metadata or {}
         assert meta.get("project_identity") == project_identity(settings)
+
+
+# ---------------------------------------------------------------------------
+# SW-04: the commit and digest stamp, the adopt check and the freshness query.
+# ---------------------------------------------------------------------------
+
+
+def _bump_file(path: pathlib.Path, text: str) -> None:
+    """Rewrite *path* with *text* and move its mtime forward by one second.
+
+    The explicit mtime step keeps the digest change independent of the
+    filesystem's timestamp granularity (the size changes too, but a test must
+    not rely on that alone).
+    """
+    before = path.stat().st_mtime_ns if path.exists() else 0
+    path.write_text(text, encoding="utf-8")
+    after = before + 1_000_000_000
+    os.utime(path, ns=(after, after))
+
+
+class TestDocStoreFreshnessStamp:
+    def _restamp(self, settings: Settings, key: str, value: str) -> None:
+        """Overwrite one metadata key on the live collection, keeping the rest."""
+        client = chromadb.PersistentClient(
+            path=settings.chroma_path,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        col = client.get_collection(
+            doc_collection_name(settings),
+            embedding_function=FakeEmbeddingFunction(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        )
+        meta = dict(col.metadata or {})
+        assert meta.get("build_complete") is True
+        assert key in meta
+        meta[key] = value
+        col.modify(metadata=meta)
+
+    def _init_counting_rebuilds(self, settings: Settings) -> tuple[DocStore, int]:
+        rebuild_calls: list[None] = []
+        orig_rebuild = DocStore.rebuild
+
+        def _spy_rebuild(self: DocStore, **kwargs: Any) -> int:
+            rebuild_calls.append(None)
+            return orig_rebuild(self, **kwargs)
+
+        with patch.object(DocStore, "rebuild", _spy_rebuild):
+            store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        return store, len(rebuild_calls)
+
+    def _built(self, tmp_path: pathlib.Path) -> Settings:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        clear_doc_store()
+        return settings
+
+    def test_build_stamps_commit_and_digest(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        meta = store._collection.metadata or {}
+        # The corpus is not a git repository, so git fails and "none" is stamped.
+        assert meta.get("indexed_commit") == "none"
+        assert meta.get("doc_digest") == doc_store_digest(settings)
+        assert len(str(meta.get("doc_digest"))) == 16
+
+    def test_build_stamps_git_head(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="abc123"):
+            store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert (store._collection.metadata or {}).get("indexed_commit") == "abc123"
+
+    def test_adopt_accepted_when_commit_and_digest_match(self, tmp_path: pathlib.Path) -> None:
+        settings = self._built(tmp_path)
+        store, rebuilds = self._init_counting_rebuilds(settings)
+        assert store.is_ready is True
+        assert rebuilds == 0, "a collection whose commit and digest match must be adopted"
+
+    def test_adopt_refused_when_indexed_commit_differs(self, tmp_path: pathlib.Path) -> None:
+        settings = self._built(tmp_path)
+        self._restamp(settings, "indexed_commit", "0" * 40)
+
+        store, rebuilds = self._init_counting_rebuilds(settings)
+        assert rebuilds == 1, "a collection built at another commit must be rebuilt"
+        assert store.is_ready is True
+        assert (store._collection.metadata or {}).get("indexed_commit") == "none"
+
+    def test_adopt_refused_when_doc_digest_differs(self, tmp_path: pathlib.Path) -> None:
+        settings = self._built(tmp_path)
+        self._restamp(settings, "doc_digest", "0" * 16)
+
+        store, rebuilds = self._init_counting_rebuilds(settings)
+        assert rebuilds == 1, "a collection built from other doc contents must be rebuilt"
+        assert (store._collection.metadata or {}).get("doc_digest") == doc_store_digest(settings)
+
+    def test_adopt_refused_after_doc_file_changes(self, tmp_path: pathlib.Path) -> None:
+        settings = self._built(tmp_path)
+        _bump_file(pathlib.Path(settings.project_root) / "guide.md", "# Guide\n\nChanged.\n")
+
+        _, rebuilds = self._init_counting_rebuilds(settings)
+        assert rebuilds == 1
+
+    def test_adopt_refused_for_pre_stamp_collection(self, tmp_path: pathlib.Path) -> None:
+        """A collection without the SW-04 keys compares unequal and rebuilds once."""
+        settings = self._built(tmp_path)
+        client = chromadb.PersistentClient(
+            path=settings.chroma_path,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        col = client.get_collection(
+            doc_collection_name(settings),
+            embedding_function=FakeEmbeddingFunction(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        )
+        meta = {
+            k: v
+            for k, v in (col.metadata or {}).items()
+            if k not in ("indexed_commit", "doc_digest")
+        }
+        col.modify(metadata=meta)
+
+        _, first = self._init_counting_rebuilds(settings)
+        clear_doc_store()
+        _, second = self._init_counting_rebuilds(settings)
+        assert (first, second) == (1, 0)
+
+    def test_digest_stable_without_change(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        assert doc_store_digest(settings) == doc_store_digest(settings)
+
+    def test_digest_changes_when_matched_file_changes(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        before = doc_store_digest(settings)
+        _bump_file(corpus / "intro.md", "# Introduction\n\nRewritten.\n")
+        assert doc_store_digest(settings) != before
+
+    def test_digest_changes_when_matched_file_added_or_removed(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        before = doc_store_digest(settings)
+        (corpus / "new.md").write_text("# New\n\nAdded doc.\n", encoding="utf-8")
+        added = doc_store_digest(settings)
+        assert added != before
+        (corpus / "intro.md").unlink()
+        assert doc_store_digest(settings) not in (before, added)
+
+    def test_digest_ignores_excluded_file(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        (corpus / "CHANGELOG.md").write_text("# Changelog\n\n- v1\n", encoding="utf-8")
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md",
+            doc_exclude_patterns="**/CHANGELOG.md",
+        )
+        before = doc_store_digest(settings)
+        _bump_file(corpus / "CHANGELOG.md", "# Changelog\n\n- v1\n- v2 with more text\n")
+        assert doc_store_digest(settings) == before
+
+    def test_doc_store_files_matches_indexed_files(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        (corpus / "sub").mkdir()
+        (corpus / "sub" / "deep.md").write_text("# Deep\n\nNested doc.\n", encoding="utf-8")
+        (corpus / "CHANGELOG.md").write_text("# Changelog\n\n- v1\n", encoding="utf-8")
+        (corpus / "dir.md").mkdir()  # a directory matching the glob is not a file
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md,*.md",  # overlapping patterns: de-duplicated
+            doc_exclude_patterns="**/CHANGELOG.md",
+        )
+        files = doc_store_files(settings)
+        rel = [f.relative_to(corpus).as_posix() for f in files]
+        assert rel == ["guide.md", "intro.md", "sub/deep.md"]
+
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        count = store.rebuild()
+        indexed = {r["file"] for r in store.search("doc", n_results=count)}
+        assert indexed == set(rel)
+
+    def test_freshness_none_without_ready_store(self, tmp_path: pathlib.Path) -> None:
+        clear_doc_store()
+        assert doc_store_freshness() == (None, None)
+
+    def test_freshness_false_then_true_after_doc_change(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_freshness() == ("none", False)
+
+        _bump_file(corpus / "guide.md", "# Guide\n\nEdited after the build.\n")
+        assert doc_store_freshness() == ("none", True)
+
+    def test_freshness_true_when_head_moves(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="aaa"):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+            assert doc_store_freshness() == ("aaa", False)
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="bbb"):
+            assert doc_store_freshness() == ("aaa", True)
 
 
 # ---------------------------------------------------------------------------

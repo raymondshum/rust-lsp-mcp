@@ -7,8 +7,9 @@ description: >
   the symbols in a file, or search the project's Markdown docs. Prefer this
   over grep/ripgrep/Read whenever the question is semantic ("where is X
   defined?", "who calls X?", "what type is this?", "what does this do?")
-  because it returns rust-analyzer's ground truth, not text matches. Rust
-  projects only; read-only (cannot edit); requires the index to be ready.
+  because it returns rust-analyzer's ground truth for the indexed tree, not
+  text matches. Rust projects only; read-only (cannot edit); requires the
+  index to be ready.
 ---
 
 # When to use rust-lsp-mcp
@@ -139,6 +140,22 @@ navigation calls will see `not_ready` until it finishes. Only run it when
 you have a specific reason to believe the index is stale (e.g. the project's
 source changed underneath it); don't call it speculatively or to "fix" an
 unrelated error.
+
+## Freshness
+
+- **The server watches the project tree.** A saved edit, a pull or a branch
+  switch reaches the code index within seconds, with no `refresh`.
+- **`status` reports both indexes.** `stale` covers committed code changes
+  (the indexed commit against the current `HEAD`); `doc_stale` covers the doc
+  index (its stamped commit and its Markdown files against the tree now).
+- **After a branch switch,** poll `status` until `stale` is `false`. If
+  `stale` still reads `true` after 60 seconds, call `refresh` once: a switch
+  that changes no Rust or Cargo file starts no re-index, so `stale` stays
+  `true` until `refresh`.
+- **`search_docs` answers from the doc index, which no running server
+  rebuilds on its own.** After a change, `doc_stale` reads `true` until the
+  next `refresh` or server restart, and `doc_index_state` reads `"building"`
+  while that rebuild runs.
 
 ## When NOT to use it
 - **Not a Rust project** → the server can't help; use normal search.

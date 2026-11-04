@@ -113,6 +113,10 @@ class _FakeManager:
         self.indexed_commit: str | None = "deadbeef"
         self.repository_root = "/tmp"
         self.rust_analyzer_version: str | None = None  # KI-12
+        # SW-12 progress fields read by status().
+        self.indexing_started_at: str | None = None
+        self.progress_message: str | None = None
+        self.progress_at: str | None = None
 
 
 def _fake_analyzer_lifespan_factory(manager: _FakeManager) -> Any:
