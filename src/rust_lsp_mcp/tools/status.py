@@ -44,18 +44,35 @@ async def status() -> dict[str, Any]:
                            latest ``experimental/serverStatus`` notification:
                            ``"ok"``, ``"warning"`` or ``"error"`` (e.g. a
                            failed workspace load), or ``null`` before the
-                           first report.  ``"error"`` can coexist with
+                           first report, after ``refresh`` and after
+                           rust-analyzer exits (``state`` is then
+                           ``"error"``).  ``"error"`` can coexist with
                            ``state == "ready"``: the server answers queries,
                            but over an incomplete workspace.
     - ``analyzer_health_message`` — the message of that report, or ``null``.
+    - ``watcher_health`` — health of rust-analyzer's file watcher:
+                           ``"error"`` once rust-analyzer's stderr reports a
+                           watch failure in this run (e.g. the host inotify
+                           limit, ``notify error: OS file watch limit
+                           reached.``), so edits and branch switches may not
+                           reach the index until ``refresh``; ``"ok"`` once
+                           ``state == "ready"`` with no such failure;
+                           ``null`` with no manager, before the run is
+                           ready unless a watch failure was already seen in
+                           this run (then ``"error"``), after ``refresh``
+                           and after rust-analyzer exits.
+    - ``watcher_message`` — the stderr line of the run's first watch
+                           failure, or ``null``.
     - ``analyzer_exit_code`` — exit code of a rust-analyzer process that died
                            without a shutdown request (``state`` is then
                            ``"error"``), else ``null``.  Cleared by
                            ``refresh``.
     - ``indexed_commit`` — git HEAD hash captured at analyzer start and
-                           re-captured when a watcher-driven re-index
-                           completes, or ``null`` if not yet captured or git
-                           is unavailable.
+                           re-captured when rust-analyzer reports itself
+                           quiescent after a watcher-driven re-index, or when
+                           HEAD moved over a tree the index already reflects
+                           (see ``stale``); ``null`` if not yet captured or
+                           git is unavailable.
     - ``current_commit`` — git HEAD hash at call time (``git -C <repo> rev-parse
                            HEAD``), or ``null`` on any failure (non-git directory,
                            git binary missing, subprocess error).  Never raises.
@@ -67,16 +84,33 @@ async def status() -> dict[str, Any]:
                            ``true``  if the commits differ (committed changes
                                      have landed since indexing began).
                            rust-analyzer watches the tree, so after a branch
-                           switch that touches Rust or Cargo files
-                           ``indexed_commit`` is re-captured when the
-                           re-index ends and ``stale`` returns to ``false``
-                           without ``refresh``.
+                           switch that makes it re-index, ``indexed_commit``
+                           is re-captured once rust-analyzer reports
+                           ``quiescent: true`` after that re-index.  After a
+                           commit of saved edits, or a switch it does not
+                           re-index for (one that changes no Rust or Cargo
+                           file included), ``status`` re-captures
+                           ``indexed_commit`` itself while ``stale`` would
+                           read ``true``: when rust-analyzer is quiescent
+                           with no re-index in flight, and every Rust or
+                           Cargo file that differs between the two commits
+                           matches HEAD on disk and was last modified more
+                           than ``HEAD_SETTLE_SECONDS`` (2 s) ago.  Either
+                           way ``stale`` returns to ``false`` without
+                           ``refresh``.  ``status`` makes no such
+                           re-capture while ``watcher_health == "error"``
+                           (an edit on disk may never have reached the
+                           index), so ``stale`` then stays ``true`` until
+                           ``refresh``.
     - ``indexing_started_at`` — ISO 8601 UTC time the current analyzer
                            indexing run began (reset by every ``refresh``),
                            or ``null`` before the first run / with no manager.
     - ``analyzer_progress`` — latest rust-analyzer progress title and message
-                           (e.g. ``"Indexing 120/512 (serde)"``), or ``null``
-                           before the first progress notification of the run.
+                           (e.g. ``"Indexing 120/512 (serde)"``); after that
+                           work ends, ``"<title> done"`` (e.g. ``"Indexing
+                           done"``), or ``null`` when it had no title.
+                           ``null`` before the first progress notification
+                           of the run.
     - ``analyzer_progress_at`` — ISO 8601 UTC time of that progress
                            notification, or ``null``.
     - ``doc_index_state`` — ``"building"``/``"ready"``/``"error"`` for the
@@ -137,8 +171,10 @@ async def status() -> dict[str, Any]:
         Commit-hash comparison does **not** detect uncommitted working-tree
         edits, so ``stale: false`` means "no *committed* changes since
         indexing," not a freshness guarantee.  For a target project with no
-        commits since indexing began, ``stale`` is ``false``; once a newer
-        commit lands it flips to ``true``.
+        commits since indexing began, ``stale`` is ``false``.  A newer commit
+        reads ``true`` until the index reflects it: at once when the commit
+        only records files already saved and settled on disk, else when the
+        re-index it starts ends.
 
     This tool is always callable regardless of analyzer state — it is the
     readiness check itself and therefore never returns ``not_ready``.
@@ -154,6 +190,7 @@ async def status() -> dict[str, Any]:
     state: str = mgr.state if mgr is not None else "indexing"
     analyzer_error: str | None = mgr.error_message if mgr is not None else None
     indexed_commit: str | None = mgr.indexed_commit if mgr is not None else None
+    generation: int = mgr.generation if mgr is not None else 0
     repo_root: str = mgr.repository_root if mgr is not None else get_settings().project_root
     doc_state, doc_err = doc_store_state()
     doc_progress = doc_index_progress()
@@ -165,6 +202,8 @@ async def status() -> dict[str, Any]:
     analyzer_health: str | None = mgr.analyzer_health if mgr is not None else None
     analyzer_health_message: str | None = mgr.analyzer_health_message if mgr is not None else None
     analyzer_exit_code: int | None = mgr.analyzer_exit_code if mgr is not None else None
+    watcher_health: str | None = mgr.watcher_health if mgr is not None else None
+    watcher_message: str | None = mgr.watcher_message if mgr is not None else None
     # Package versions are cheap to resolve (importlib.metadata reads
     # installed distribution metadata, no I/O beyond that) — compute fresh
     # per call rather than caching, unlike rust_analyzer_version's subprocess.
@@ -189,6 +228,15 @@ async def status() -> dict[str, Any]:
         stale = None
     else:
         stale = indexed_commit != current_commit
+    if stale and mgr is not None and current_commit is not None:
+        # Backlog line 49: HEAD moved over a tree the index already reflects
+        # (a commit of saved edits) and no re-index will re-capture it.
+        # Only indexed_commit/stale take the result; every other field stays
+        # at the snapshot above.
+        reconciled = await mgr.reconcile_head(current_commit, generation)
+        if reconciled is not None:
+            indexed_commit = reconciled
+            stale = False
 
     return ok(
         state=state,
@@ -196,6 +244,8 @@ async def status() -> dict[str, Any]:
         analyzer_health=analyzer_health,
         analyzer_health_message=analyzer_health_message,
         analyzer_exit_code=analyzer_exit_code,
+        watcher_health=watcher_health,
+        watcher_message=watcher_message,
         indexed_commit=indexed_commit,
         current_commit=current_commit,
         stale=stale,

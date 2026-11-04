@@ -197,7 +197,7 @@ class TestStatusReportsHealthErrorWhileReady:
 
         async def _record() -> None:
             mgr._generation = 0
-            await mgr._make_status_handler(0)("error", "Failed to load workspaces")
+            await mgr._make_status_handler(0)("error", "Failed to load workspaces", True)
 
         asyncio.run(_record())
         with (

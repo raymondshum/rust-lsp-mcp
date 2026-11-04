@@ -121,6 +121,15 @@ class _FakeManager:
         self.analyzer_health: str | None = None
         self.analyzer_health_message: str | None = None
         self.analyzer_exit_code: int | None = None
+        # Backlog line 42 watcher fields read by status().
+        self.watcher_health: str | None = None
+        self.watcher_message: str | None = None
+        # Backlog line 49: status() reads the generation and may await
+        # reconcile_head when stale would read true.
+        self.generation = 0
+
+    async def reconcile_head(self, current_commit: str, gen: int) -> str | None:
+        return None
 
 
 def _fake_analyzer_lifespan_factory(manager: _FakeManager) -> Any:

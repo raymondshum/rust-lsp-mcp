@@ -106,10 +106,10 @@ def test_server_status_handler_replaces_multilspy_closure() -> None:
 
 
 def test_server_status_handler_sets_ready_and_forwards_health() -> None:
-    calls: list[tuple[Any, Any]] = []
+    calls: list[tuple[Any, Any, Any]] = []
 
-    async def status_handler(health: Any, message: Any) -> None:
-        calls.append((health, message))
+    async def status_handler(health: Any, message: Any, quiescent: Any) -> None:
+        calls.append((health, message, quiescent))
 
     analyzer = _make(status_handler=status_handler)
     analyzer._get_initialize_params(str(_FIXTURE))
@@ -122,7 +122,7 @@ def test_server_status_handler_sets_ready_and_forwards_health() -> None:
         assert analyzer.server_ready.is_set()
 
     asyncio.run(_scenario())
-    assert calls == [("warning", "loading"), ("error", "Failed to load")]
+    assert calls == [("warning", "loading", False), ("error", "Failed to load", True)]
 
 
 def test_server_status_handler_without_status_handler_still_sets_ready() -> None:
@@ -136,12 +136,12 @@ def test_manager_status_handler_records_health() -> None:
     mgr = AnalyzerManager(rust_analyzer_bin="/nonexistent", repository_root=str(_FIXTURE))
     handler = mgr._make_status_handler(mgr._generation)
     assert mgr.analyzer_health is None
-    asyncio.run(handler("error", "cargo metadata failed"))
+    asyncio.run(handler("error", "cargo metadata failed", True))
     assert mgr.analyzer_health == "error"
     assert mgr.analyzer_health_message == "cargo metadata failed"
 
     stale = mgr._make_status_handler(mgr._generation - 1)
-    asyncio.run(stale("ok", None))
+    asyncio.run(stale("ok", None, True))
     assert mgr.analyzer_health == "error"
 
 
@@ -166,13 +166,13 @@ def test_health_logging_first_ok_silent_then_changes_at_warning(
     def _health_logs() -> list[logging.LogRecord]:
         return [r for r in caplog.records if r.getMessage().startswith("rust-analyzer health")]
 
-    asyncio.run(handler("ok", None))
+    asyncio.run(handler("ok", None, True))
     assert _health_logs() == []
-    asyncio.run(handler("ok", None))
+    asyncio.run(handler("ok", None, True))
     assert _health_logs() == []
-    asyncio.run(handler("error", "Failed to load workspaces"))
-    asyncio.run(handler("error", "Failed to load workspaces"))
-    asyncio.run(handler("ok", None))
+    asyncio.run(handler("error", "Failed to load workspaces", True))
+    asyncio.run(handler("error", "Failed to load workspaces", True))
+    asyncio.run(handler("ok", None, True))
     records = _health_logs()
     assert [r.getMessage() for r in records] == [
         "rust-analyzer health error: Failed to load workspaces",
@@ -182,7 +182,7 @@ def test_health_logging_first_ok_silent_then_changes_at_warning(
 
     caplog.clear()
     fresh = AnalyzerManager(rust_analyzer_bin="/nonexistent", repository_root=str(_FIXTURE))
-    asyncio.run(fresh._make_status_handler(fresh._generation)("warning", "proc-macro"))
+    asyncio.run(fresh._make_status_handler(fresh._generation)("warning", "proc-macro", True))
     assert [r.getMessage() for r in _health_logs()] == ["rust-analyzer health warning: proc-macro"]
 
 

@@ -71,8 +71,10 @@ import asyncio
 import collections
 import contextlib
 import logging
+import os
 import pathlib
 import subprocess
+import time
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -108,9 +110,9 @@ ProgressHandler = Callable[[Any], Coroutine[Any, Any, None]]
 
 # Signature of the health callback a manager hands to ``PatchedRustAnalyzer``
 # as ``status_handler``: awaited with the ``health`` (``"ok"``, ``"warning"``
-# or ``"error"``) and ``message`` fields of each ``experimental/serverStatus``
-# notification.
-StatusHandler = Callable[[Any, Any], Coroutine[Any, Any, None]]
+# or ``"error"``), ``message`` and ``quiescent`` fields of each
+# ``experimental/serverStatus`` notification.
+StatusHandler = Callable[[Any, Any, Any], Coroutine[Any, Any, None]]
 
 # How many rust-analyzer stderr lines the manager keeps, and how many of the
 # newest ones go into the error message after the process dies.
@@ -160,10 +162,112 @@ REINDEX_PROGRESS_TOKENS: frozenset[str] = frozenset(
     {"rustAnalyzer/cachePriming", "rustAnalyzer/Fetching", "rustAnalyzer/Roots Scanned"}
 )
 
+# rust-analyzer's file watcher reports every notify error on stderr through
+# ``log_notify_error`` (``crates/vfs-notify/src/lib.rs`` line 368 to 370 at
+# rust-lang/rust 58cf8f9, the image's rust-analyzer 1.99.1):
+# ``tracing::warn!("notify error: {}", err)``, for the watcher's creation
+# (line 108), each ``watch()`` call (line 354) and each event error (line
+# 200).  The inotify limit displays as ``OS file watch limit reached.``
+# (notify 8.2.0 ``src/error.rs`` line 117, mapped from ENOSPC in
+# ``src/inotify.rs`` line 449); an exhausted ``max_user_instances`` surfaces
+# as an ``Io`` error from the watcher's creation.
+WATCH_FAILURE_MARKER = "notify error:"
+# notify's ``ErrorKind::PathNotFound`` display (``src/error.rs`` line 112):
+# logged with the watcher on for a path that is gone, with no observed effect
+# on the index (backlog line 86, deferred), so it is not a watch failure.
+WATCH_BENIGN_TEXT = "No path was found"
+
+
+# How long a changed Rust or Cargo file must sit unmodified before
+# reconcile_head counts it as settled (backlog line 49): an mtime within this
+# interval may belong to a save rust-analyzer has not processed yet.
+HEAD_SETTLE_SECONDS: float = 2.0
+
+# Timeout for each git call of reconcile_head; a timeout is a git failure.
+HEAD_GIT_TIMEOUT_SECONDS: float = 10.0
+
+
+def _is_watch_failure_line(line: str) -> bool:
+    """Return whether a rust-analyzer stderr *line* reports a file-watch failure."""
+    return WATCH_FAILURE_MARKER in line and WATCH_BENIGN_TEXT not in line
+
 
 def _utc_now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string (seconds precision)."""
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _is_index_input(path: str) -> bool:
+    """Return whether a repo-relative *path* is a file the code index reads."""
+    name = PurePath(path).name
+    return name.endswith(".rs") or name in ("Cargo.toml", "Cargo.lock")
+
+
+def _run_git(repo_root: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run ``git -C <repo_root> <args>`` with :data:`HEAD_GIT_TIMEOUT_SECONDS`."""
+    return subprocess.run(
+        ["git", "-C", repo_root, *args],
+        capture_output=True,
+        text=True,
+        timeout=HEAD_GIT_TIMEOUT_SECONDS,
+    )
+
+
+def _tree_matches_head(repo_root: str, old_commit: str, new_commit: str, now: float) -> bool:
+    """Return whether the code-index inputs on disk are settled at *new_commit*.
+
+    Worker-thread body of :meth:`AnalyzerManager.reconcile_head`.  Takes the
+    Rust and Cargo paths in ``git diff --name-only -z --no-renames <old>
+    <new>`` (relative to *repo_root*; ``-z`` so no path is C-quoted); an
+    empty list matches, because no file the
+    code index reads changed.  Otherwise every such path must match
+    *new_commit* on disk: ``git diff --quiet <new> -- <paths>`` exits 0 for
+    the tracked ones, a path absent from *new_commit* must be absent on disk
+    too (``git diff`` ignores an untracked file), and every path present on
+    disk must have an mtime older than ``now - HEAD_SETTLE_SECONDS``.  Any
+    git failure, a timeout included, returns False.
+    """
+    try:
+        # -z: with the default core.quotePath, a non-ASCII or quote-holding
+        # path prints C-quoted ("na\303\257ve.rs") and would slip past the
+        # index-input filter; NUL-separated output prints it verbatim.
+        diff = _run_git(
+            repo_root,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--relative",
+            old_commit,
+            new_commit,
+        )
+        if diff.returncode != 0:
+            return False
+        paths = sorted({p for p in diff.stdout.split("\0") if p and _is_index_input(p)})
+        if not paths:
+            return True
+        tree = _run_git(repo_root, "ls-tree", "-r", "-z", "--name-only", new_commit, "--", *paths)
+        if tree.returncode != 0:
+            return False
+        in_head = {p for p in tree.stdout.split("\0") if p}
+        settled_before = now - HEAD_SETTLE_SECONDS
+        for path in paths:
+            try:
+                mtime = os.stat(os.path.join(repo_root, path)).st_mtime
+            except FileNotFoundError:
+                if path in in_head:
+                    return False  # deleted on disk, present at HEAD
+                continue  # absent from both HEAD and the disk: matches
+            if path not in in_head or mtime >= settled_before:
+                return False  # untracked at HEAD, or saved too recently
+        tracked = [p for p in paths if p in in_head]
+        if not tracked:
+            return True
+        quiet = _run_git(repo_root, "diff", "--quiet", new_commit, "--", *tracked)
+        return quiet.returncode == 0
+    except Exception:
+        _log.debug("AnalyzerManager: HEAD reconcile git check failed", exc_info=True)
+        return False
 
 
 class AnalyzerTornDownError(RuntimeError):
@@ -350,15 +454,18 @@ class PatchedRustAnalyzer(RustAnalyzer):
         Re-implements multilspy's ``check_experimental_status`` (a closure
         inside ``start_server()``, so it cannot be called from here): a
         ``quiescent: true`` report sets ``server_ready``, which releases
-        ``start_server()``'s ready wait.  Then passes the report's ``health``
-        and ``message`` to the ``status_handler`` given to the constructor.
+        ``start_server()``'s ready wait.  Then passes the report's ``health``,
+        ``message`` and ``quiescent`` to the ``status_handler`` given to the
+        constructor.
         """
         if not isinstance(params, dict):
             return
         if params.get("quiescent") is True:
             self.server_ready.set()
         if self._status_handler is not None:
-            await self._status_handler(params.get("health"), params.get("message"))
+            await self._status_handler(
+                params.get("health"), params.get("message"), params.get("quiescent")
+            )
 
     @contextlib.contextmanager
     def open_file(self, relative_file_path: str) -> Iterator[None]:
@@ -445,6 +552,17 @@ class AnalyzerManager:
     analyzer_health: str | None = None
     analyzer_health_message: str | None = None
     analyzer_exit_code: int | None = None
+    # File-watcher health (backlog line 42), same reason: None before the run
+    # is ready, "ok" once ready with no watch failure, "error" after one.
+    watcher_health: str | None = None
+    watcher_message: str | None = None
+    # Quiescent-gated commit re-capture (backlog line 44) and the HEAD-move
+    # re-capture (line 49), same reason.
+    _recapture_pending: bool = False
+    _quiescent: bool | None = None
+    _reindex_inflight: frozenset[Any] = frozenset()
+    _quiescent_reads: int = 0
+    _generation: int = 0
 
     def __init__(self, rust_analyzer_bin: str, repository_root: str) -> None:
         self._rust_analyzer_bin = rust_analyzer_bin
@@ -479,6 +597,23 @@ class AnalyzerManager:
         # Exit code of a rust-analyzer process that died without a shutdown
         # request; None while it runs, before it starts, and after restart().
         self.analyzer_exit_code: int | None = None
+        # rust-analyzer's file-watcher health: "error" (with the stderr line
+        # as watcher_message) once the run's stderr shows a watch failure,
+        # "ok" from readiness on without one, None before readiness, after a
+        # death and after restart().
+        self.watcher_health: str | None = None
+        self.watcher_message: str | None = None
+        # Set by the progress handler on a re-index token's end; the status
+        # callback re-captures indexed_commit on the next quiescent: true.
+        self._recapture_pending: bool = False
+        # Latest experimental/serverStatus quiescent value of the run, or None
+        # before the first report.
+        self._quiescent: bool | None = None
+        # Re-index progress tokens with a begin and no end yet, current run.
+        self._reindex_inflight: frozenset[Any] = frozenset()
+        # Quiescent HEAD reads of the status callback now in flight;
+        # reconcile_head does not run while one is.
+        self._quiescent_reads: int = 0
         # The last STDERR_TAIL_LINES lines of the current run's rust-analyzer
         # stderr; replaced with an empty deque at the top of every _run.
         self._stderr_lines: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
@@ -511,6 +646,11 @@ class AnalyzerManager:
     def indexed_commit(self) -> str | None:
         """Git commit hash of the tree currently indexed, or None if not yet known."""
         return self._indexed_commit
+
+    @property
+    def generation(self) -> int:
+        """The current run generation, bumped by every restart and shutdown."""
+        return self._generation
 
     @property
     def indexing_started_at(self) -> str | None:
@@ -621,6 +761,79 @@ class AnalyzerManager:
         """
         self._indexed_commit = await self._read_head_commit()
 
+    async def reconcile_head(self, current_commit: str, gen: int) -> str | None:
+        """Re-capture ``indexed_commit`` when HEAD moved over an indexed tree (backlog line 49).
+
+        A commit of saved edits, or a branch switch whose files rust-analyzer
+        already reflects, moves HEAD while the files on disk, and so the
+        index, stay the same; no re-index runs, so nothing else re-captures
+        ``indexed_commit``.  ``status`` calls this when ``stale`` would read
+        ``true``, with the generation it read in its snapshot.
+
+        Writes *current_commit* as ``indexed_commit``, logs ``indexed_commit
+        re-captured after HEAD moved over an indexed tree: <old> -> <new>`` at
+        info and returns it, only when all of these hold; otherwise returns
+        None and leaves ``indexed_commit`` unchanged:
+
+        - *gen* is current and ``state == "ready"``;
+        - ``watcher_health`` is not ``"error"``: with a failed watcher a
+          change on disk reaches rust-analyzer as no event, so its quiescence
+          says nothing about which tree the index holds;
+        - no re-index token is in flight (``_reindex_inflight`` is empty), no
+          quiescent HEAD read of the status callback is in flight
+          (``_quiescent_reads``; it reads a HEAD at least as new), and the
+          latest ``serverStatus`` read ``quiescent: true``;
+        - *current_commit* differs from ``indexed_commit`` (which is known);
+        - every Rust or Cargo path (``*.rs``, ``Cargo.toml``, ``Cargo.lock``)
+          that differs between the two commits matches *current_commit* on
+          disk and, if present on disk, has an mtime older than now minus
+          :data:`HEAD_SETTLE_SECONDS` (see :func:`_tree_matches_head`).
+
+        The settle test does not compare mtimes with a quiescent transition:
+        rust-analyzer sends none for an in-place save of an existing file.  A
+        file counts as settled when its mtime is older than the settle
+        interval while the server reports quiescent with no re-index token
+        in flight.  The git calls run in a worker thread; any git failure
+        returns None.  The conditions are re-checked after the await, and a
+        quiescent re-capture that took a read ticket meanwhile wins: this
+        returns None rather than write an older HEAD over it.
+        """
+        if not self._head_reconcilable(current_commit, gen):
+            return None
+        old_commit = self._indexed_commit
+        assert old_commit is not None  # _head_reconcilable checked it
+        seq0 = self._head_read_seq
+        matches = await asyncio.to_thread(
+            _tree_matches_head, self._repository_root, old_commit, current_commit, time.time()
+        )
+        if not matches or not self._head_reconcilable(current_commit, gen):
+            return None
+        # A quiescent re-capture that took a ticket during the git check read
+        # HEAD after *current_commit* was read, so its value is the newer
+        # one: yield to it rather than write over it.
+        if self._indexed_commit != old_commit or self._head_read_seq != seq0:
+            return None
+        self._indexed_commit = current_commit
+        _log.info(
+            "indexed_commit re-captured after HEAD moved over an indexed tree: %s -> %s",
+            old_commit,
+            current_commit,
+        )
+        return current_commit
+
+    def _head_reconcilable(self, current_commit: str, gen: int) -> bool:
+        """Return whether :meth:`reconcile_head`'s in-process conditions hold."""
+        return (
+            gen == self._generation
+            and self.state == STATE_READY
+            and self.watcher_health != "error"
+            and not self._reindex_inflight
+            and not self._quiescent_reads
+            and self._quiescent is True
+            and self._indexed_commit is not None
+            and current_commit != self._indexed_commit
+        )
+
     def _make_progress_handler(self, gen: int) -> ProgressHandler:
         """Build the ``$/progress`` handler for the run spawned under *gen*.
 
@@ -630,30 +843,33 @@ class AnalyzerManager:
 
         Every notification of the current generation records
         ``progress_message`` (the work-done ``title``, remembered per token
-        from its ``begin`` event, joined with the latest ``message``) and
-        ``progress_at``; ``begin`` and ``end`` events are logged at info as
-        ``rust-analyzer progress: <title> <message>``.  A superseded run
-        (``gen != self._generation``) records nothing.
+        from its ``begin`` event, joined with the latest ``message``; on the
+        ``end`` event ``"<title> done"``, or None when the token had no
+        title) and ``progress_at``; ``begin`` and ``end`` events are logged at
+        info as ``rust-analyzer progress: <title> <message>``.  A superseded
+        run (``gen != self._generation``) records nothing.  The handler also
+        keeps ``_reindex_inflight``, the re-index tokens
+        (:data:`REINDEX_PROGRESS_TOKENS`) with a ``begin`` and no ``end`` yet,
+        which :meth:`reconcile_head` reads.
 
         **Commit re-capture after a watcher re-index.**  rust-analyzer
         watches the tree itself (SW-03), so a branch switch re-indexes without
         a restart and ``_run``'s one commit capture would go stale.  On the
-        ``end`` event of a re-index token (:data:`REINDEX_PROGRESS_TOKENS`;
-        any other token, flycheck's included, is ignored), while ``state ==
-        "ready"`` and *gen* is current, the handler takes a read ticket,
-        awaits :meth:`_read_head_commit`, re-checks the generation after the
-        await (a run superseded during the git call must not overwrite the
-        value ``restart()`` cleared) and checks that its ticket is still the
-        latest (multilspy runs each notification as its own task, so two
-        re-captures can overlap and the older read must not land last), and
-        only then writes ``_indexed_commit``, logging at info when the commit
-        changed.
+        ``end`` event of a re-index token (any other token, flycheck's
+        included, is ignored), while ``state == "ready"`` and *gen* is
+        current, the handler sets ``_recapture_pending``; it reads no HEAD
+        itself, because an early phase (``Fetching``, ``Roots Scanned``) can
+        end before the re-index finishes (backlog line 44).  The status
+        callback (:meth:`_make_status_handler`) re-captures on rust-analyzer's
+        next ``quiescent: true``.  A ``cachePriming`` ``end`` that arrives
+        after the last ``quiescent: true`` leaves the flag set until the next
+        ``quiescent`` transition; that is harmless, because the re-capture
+        then reads the HEAD of a tree the index reflects.
 
-        Limit: rust-analyzer emits progress only when a change touches a file
-        it loads (cache priming is on in multilspy's ``initialize_params.json``
-        line 574), so a branch switch that changes no Rust or Cargo file
-        leaves ``indexed_commit`` at the old commit and ``stale`` at ``true``
-        until ``refresh``.
+        Limit: rust-analyzer emits progress only when a change makes it reload
+        the workspace, so an in-place edit or a commit of saved edits starts
+        no re-index; :meth:`reconcile_head`, called by ``status``, covers a
+        HEAD that moved over a tree the index already reflects.
         """
         titles: dict[Any, str] = {}
 
@@ -672,17 +888,78 @@ class AnalyzerManager:
             text = " ".join(part for part in (title, str(message or "")) if part) or None
             if kind == "end":
                 titles.pop(token, None)
+                # The bare title read as ongoing work after the end (backlog
+                # line 47).
+                text = f"{title} done" if title else None
             self._progress_message = text
             self._progress_at = _utc_now_iso()
             if kind in ("begin", "end"):
                 _log.info("rust-analyzer progress: %s %s", title, message or "")
-            if kind != "end" or token not in REINDEX_PROGRESS_TOKENS:
+            if token not in REINDEX_PROGRESS_TOKENS:
                 return
-            if self.state != STATE_READY:
+            if kind == "begin":
+                self._reindex_inflight = self._reindex_inflight | {token}
+            elif kind == "end":
+                self._reindex_inflight = self._reindex_inflight - {token}
+                if self.state == STATE_READY:
+                    self._recapture_pending = True
+
+        return _on_progress
+
+    def _make_status_handler(self, gen: int) -> StatusHandler:
+        """Build the ``experimental/serverStatus`` callback for *gen*'s run (SW-07).
+
+        ``_run`` passes the result to ``PatchedRustAnalyzer`` as
+        ``status_handler``; its ``_on_server_status`` awaits it with the
+        ``health``, ``message`` and ``quiescent`` of every
+        ``experimental/serverStatus`` notification.  A superseded run
+        (``gen != self._generation``) records nothing.
+
+        **Health.**  Records ``health`` and ``message`` as ``analyzer_health``
+        and ``analyzer_health_message`` and logs a change of health at
+        warning as ``rust-analyzer health <value>: <message>`` (the first
+        report of a run is logged only when it is not ``"ok"``).
+
+        **Quiescence.**  Keeps the latest boolean ``quiescent`` as
+        ``_quiescent`` and logs each change at info as ``rust-analyzer
+        quiescent: <true|false>``.
+
+        **Commit re-capture (backlog line 44).**  On ``quiescent: true``
+        while ``state == "ready"`` and ``_recapture_pending`` is set (by a
+        re-index token's ``end``, see :meth:`_make_progress_handler`), the
+        callback clears the flag, takes a read ticket, awaits
+        :meth:`_read_head_commit`, re-checks the generation after the await
+        (a run superseded during the git call must not overwrite the value
+        ``restart()`` cleared) and checks that its ticket is still the latest
+        (multilspy runs each notification as its own task, so two re-captures
+        can overlap and the older read must not land last), and only then
+        writes ``_indexed_commit``, logging at info when the commit changed.
+        A ``quiescent: true`` with nothing pending reads no HEAD.
+        """
+
+        async def _on_status(health: Any, message: Any, quiescent: Any) -> None:
+            if gen != self._generation:
                 return
+            new_health = str(health) if health is not None else None
+            new_message = str(message) if message is not None else None
+            previous = self.analyzer_health
+            self.analyzer_health = new_health
+            self.analyzer_health_message = new_message
+            if new_health != previous and not (previous is None and new_health == "ok"):
+                _log.warning("rust-analyzer health %s: %s", new_health, new_message or "")
+            if isinstance(quiescent, bool) and quiescent != self._quiescent:
+                self._quiescent = quiescent
+                _log.info("rust-analyzer quiescent: %s", "true" if quiescent else "false")
+            if quiescent is not True or self.state != STATE_READY or not self._recapture_pending:
+                return
+            self._recapture_pending = False
             self._head_read_seq += 1
             ticket = self._head_read_seq
-            new_commit = await self._read_head_commit()
+            self._quiescent_reads += 1
+            try:
+                new_commit = await self._read_head_commit()
+            finally:
+                self._quiescent_reads -= 1
             if gen != self._generation or ticket != self._head_read_seq:
                 return
             old_commit = self._indexed_commit
@@ -694,36 +971,11 @@ class AnalyzerManager:
                     new_commit,
                 )
 
-        return _on_progress
-
-    def _make_status_handler(self, gen: int) -> StatusHandler:
-        """Build the health callback for the run spawned under *gen* (SW-07).
-
-        ``_run`` passes the result to ``PatchedRustAnalyzer`` as
-        ``status_handler``; its ``_on_server_status`` awaits it with the
-        ``health`` and ``message`` of every ``experimental/serverStatus``
-        notification.  The callback records both as ``analyzer_health`` and
-        ``analyzer_health_message`` and logs a change of health at warning as
-        ``rust-analyzer health <value>: <message>`` (the first report of a run
-        is logged only when it is not ``"ok"``).  A superseded run
-        (``gen != self._generation``) records nothing.
-        """
-
-        async def _on_status(health: Any, message: Any) -> None:
-            if gen != self._generation:
-                return
-            new_health = str(health) if health is not None else None
-            new_message = str(message) if message is not None else None
-            previous = self.analyzer_health
-            self.analyzer_health = new_health
-            self.analyzer_health_message = new_message
-            if new_health != previous and not (previous is None and new_health == "ok"):
-                _log.warning("rust-analyzer health %s: %s", new_health, new_message or "")
-
         return _on_status
 
     def _make_stderr_reader(
         self,
+        gen: int,
         lsp: PatchedRustAnalyzer,
         lines: collections.deque[str],
         started: asyncio.Event,
@@ -745,8 +997,26 @@ class AnalyzerManager:
         draining.  It sets
         *started* on entry and *done* when it stops (EOF, or the process
         handle cleared by ``stop()``).
+
+        **Watcher health (backlog line 42).**  A line that
+        :func:`_is_watch_failure_line` matches sets ``watcher_health =
+        "error"`` and ``watcher_message`` (the first such line of the run),
+        while *gen* is current, and logs ``rust-analyzer file watcher failed:
+        <line>`` at warning once per run.  A superseded run records nothing.
         """
         server = lsp.server
+        logged_watch_failure = False
+
+        def _note_line(line: str) -> None:
+            nonlocal logged_watch_failure
+            if gen != self._generation or not _is_watch_failure_line(line):
+                return
+            if self.watcher_health != "error":
+                self.watcher_health = "error"
+                self.watcher_message = line
+            if not logged_watch_failure:
+                logged_watch_failure = True
+                _log.warning("rust-analyzer file watcher failed: %s", line)
 
         async def run_forever_stderr() -> None:
             started.set()
@@ -768,6 +1038,7 @@ class AnalyzerManager:
                     line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                     lines.append(line)
                     _log.debug("rust-analyzer stderr: %s", line)
+                    _note_line(line)
             except (BrokenPipeError, ConnectionResetError, StopLoopException):
                 pass
             finally:
@@ -813,7 +1084,9 @@ class AnalyzerManager:
         (only if it started), so the message carries the dying process's last
         lines.  Then, if *gen* is still current and no shutdown was requested,
         sets ``state = "error"``, ``analyzer_exit_code`` and ``_error`` (``rust-analyzer
-        exited with code <n>; last stderr: <up to 20 lines>``), logs at error,
+        exited with code <n>; last stderr: <up to 20 lines>``), clears
+        ``analyzer_health``, ``analyzer_health_message``, ``watcher_health``
+        and ``watcher_message`` to None, logs at error,
         and sets ``_shutdown_event`` so a request already in flight on the dead
         process ends (``_race_teardown``) instead of awaiting a reply forever.
         """
@@ -825,6 +1098,12 @@ class AnalyzerManager:
         tail = list(self._stderr_lines)[-STDERR_MESSAGE_LINES:]
         stderr_text = "\n".join(tail) if tail else "(none)"
         self.state = STATE_ERROR
+        # The health reports described a process that is gone (backlog line
+        # 84): a dead rust-analyzer has no health and no file watcher.
+        self.analyzer_health = None
+        self.analyzer_health_message = None
+        self.watcher_health = None
+        self.watcher_message = None
         self.analyzer_exit_code = code
         if code == SHELL_COMMAND_NOT_FOUND:
             self._error = (
@@ -920,6 +1199,11 @@ class AnalyzerManager:
         self._indexing_started_at = _utc_now_iso()
         self._progress_message = None
         self._progress_at = None
+        self.watcher_health = None
+        self.watcher_message = None
+        self._recapture_pending = False
+        self._quiescent = None
+        self._reindex_inflight = frozenset()
         stderr_lines: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
         self._stderr_lines = stderr_lines
         _log.info("AnalyzerManager: analyzer start (gen %d)", gen)
@@ -958,7 +1242,7 @@ class AnalyzerManager:
             # Instance attribute shadows the method; start() looks it up on
             # the instance (``self.run_forever_stderr()``, server.py line 230).
             cast(Any, lsp.server).run_forever_stderr = self._make_stderr_reader(
-                lsp, stderr_lines, stderr_started, stderr_done
+                gen, lsp, stderr_lines, stderr_started, stderr_done
             )
             _log.info("AnalyzerManager: workspace load begun (%s)", self._repository_root)
             server_cm = lsp.start_server()
@@ -1002,6 +1286,10 @@ class AnalyzerManager:
                         self._generation,
                     )
                 else:
+                    # No await between here and _hold_ready's state write, so
+                    # no reader sees "ok" before state reads "ready".
+                    if self.watcher_health is None:
+                        self.watcher_health = "ok"
                     await self._hold_ready(gen, lsp, exit_watch, stderr_started, stderr_done)
             except BaseException as body_exc:
                 if not await server_cm.__aexit__(type(body_exc), body_exc, body_exc.__traceback__):
@@ -1456,7 +1744,9 @@ class AnalyzerManager:
             1. Acquire ``_lifecycle_lock``; if ``_closed``, log and return.
             2. Set ``self.state = STATE_INDEXING`` (must be first after 1),
                and clear ``_error``, ``analyzer_exit_code``,
-               ``analyzer_health`` and ``analyzer_health_message`` to None, so
+               ``analyzer_health``, ``analyzer_health_message``,
+               ``watcher_health`` and ``watcher_message`` to None (and
+               ``_recapture_pending`` and ``_quiescent``), so
                a new run that fails before its process starts reports "failed
                to start", not the previous run's exit code.
             3. Clear ``_indexed_commit`` to None so ``status`` reports an honest
@@ -1467,7 +1757,8 @@ class AnalyzerManager:
                stale run publishing readiness after this point.
             5. Re-assert ``state = STATE_INDEXING`` and re-clear
                ``_error``, ``analyzer_exit_code``, ``analyzer_health``,
-               ``analyzer_health_message`` and ``_indexed_commit`` —
+               ``analyzer_health_message``, the watcher and re-capture
+               fields and ``_indexed_commit`` —
                defense-in-depth: the old run's
                in-flight ``_capture_head_commit()`` may have landed during the
                drain window in step 4.  This is race-free because the old
@@ -1493,6 +1784,10 @@ class AnalyzerManager:
             self.analyzer_exit_code = None
             self.analyzer_health = None
             self.analyzer_health_message = None
+            self.watcher_health = None
+            self.watcher_message = None
+            self._recapture_pending = False
+            self._quiescent = None
 
             # Step 3: forget the old indexed commit — during the re-index window
             # the previous value is no longer what's indexed; None → status
@@ -1511,6 +1806,10 @@ class AnalyzerManager:
             self.analyzer_exit_code = None
             self.analyzer_health = None
             self.analyzer_health_message = None
+            self.watcher_health = None
+            self.watcher_message = None
+            self._recapture_pending = False
+            self._quiescent = None
             self._indexed_commit = None
 
             # Step 6: fresh events — old ones are spent.
