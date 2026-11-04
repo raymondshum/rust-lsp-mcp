@@ -15,10 +15,12 @@ from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, get_preflight_warnings, mcp
 from rust_lsp_mcp.doc_store import (
+    DOC_STATE_READY,
     doc_index_chunk_count,
     doc_index_progress,
     doc_store_freshness,
     doc_store_state,
+    doc_store_unreadable,
 )
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
@@ -139,14 +141,24 @@ async def status() -> dict[str, Any]:
     - ``doc_indexed_commit`` — git HEAD hash stamped on the doc index when it
                            was built, or ``null`` when ``doc_index_state !=
                            "ready"`` (``"none"`` if git failed at build time).
-    - ``doc_stale``      — ``true`` when the current HEAD differs from
-                           ``doc_indexed_commit`` or a doc file covered by the
-                           index changed since the build (size or mtime);
-                           ``false`` when neither changed; ``null`` when
+                           Informational: ``doc_stale`` does not compare it.
+    - ``doc_stale``      — ``true`` when a Markdown file the index covers was
+                           added, removed or changed (size or mtime) since
+                           the build; ``false`` when none was, including
+                           after a branch switch or commit that leaves the
+                           doc files byte-identical; ``null`` when
                            ``doc_index_state != "ready"``.  No running server
                            rebuilds the doc index on its own: ``doc_stale``
                            stays ``true`` until the next ``refresh`` or
                            server restart.
+    - ``doc_unreadable_files`` — number of matched doc files the build that
+                           produced the ready index could not read (an
+                           ``OSError`` such as a permission error); a
+                           non-zero count means that many matched files are
+                           absent from the index.  ``0`` when every file was
+                           read; ``null`` when ``doc_index_state !=
+                           "ready"`` or the index was built before this
+                           count existed.
     - ``preflight_warnings`` — list of advisory strings computed once at
                            server startup (empty list = all clear, or the
                            preflight never ran — e.g. most unit tests). Never
@@ -222,6 +234,15 @@ async def status() -> dict[str, Any]:
     # SW-04: the doc freshness check runs a git call and a stat walk over the
     # doc files — same DS-19 worker-thread offload.
     doc_indexed_commit, doc_stale = await asyncio.to_thread(doc_store_freshness)
+    # Backlog line 63: the unreadable-file count stamped on the ready index.
+    doc_unreadable_files: int | None = await asyncio.to_thread(doc_store_unreadable)
+    # Backlog line 50: the doc fields read after the awaits belong to the
+    # doc_state snapshotted above; a store that was not ready then reports
+    # null for all three, so one reply never pairs "building" with values.
+    if doc_state != DOC_STATE_READY:
+        doc_indexed_commit = None
+        doc_stale = None
+        doc_unreadable_files = None
 
     stale: bool | None
     if indexed_commit is None or current_commit is None:
@@ -258,6 +279,7 @@ async def status() -> dict[str, Any]:
         doc_index_chunk_count=doc_chunk_count,
         doc_indexed_commit=doc_indexed_commit,
         doc_stale=doc_stale,
+        doc_unreadable_files=doc_unreadable_files,
         preflight_warnings=preflight_warnings,
         server_version=server_version,
         multilspy_version=multilspy_version,

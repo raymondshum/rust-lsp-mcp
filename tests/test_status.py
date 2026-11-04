@@ -685,6 +685,7 @@ class TestStatusRustAnalyzerVersion:
 _NEW_FIELDS = (
     "doc_indexed_commit",
     "doc_stale",
+    "doc_unreadable_files",
     "indexing_started_at",
     "analyzer_progress",
     "analyzer_progress_at",
@@ -730,8 +731,8 @@ class TestStatusFreshnessFields:
         )
         init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
 
-        # git fails both at build time (not a repo) and here (patched), so the
-        # commit halves agree on "none" and only the digest decides.
+        # doc_stale follows the doc digest alone (backlog line 48); git
+        # fails at build time (not a repo), so the stamped commit is "none".
         before = _call_status(None, subprocess_raises=OSError("no git"))
         assert before["doc_index_state"] == "ready"
         assert before["doc_indexed_commit"] == "none"
@@ -742,6 +743,73 @@ class TestStatusFreshnessFields:
         os.utime(doc, ns=(mtime, mtime))
         after = _call_status(None, subprocess_raises=OSError("no git"))
         assert after["doc_stale"] is True
+
+    def _call_with_doc_fields(self, doc_state: str) -> dict[str, Any]:
+        import rust_lsp_mcp.tools.status as status_mod
+
+        with (
+            patch.object(status_mod, "doc_store_freshness", return_value=("abc", True)),
+            patch.object(status_mod, "doc_store_unreadable", return_value=2),
+        ):
+            return _call_status(
+                None,
+                subprocess_raises=OSError("no git"),
+                doc_store_state_return=(doc_state, None),
+            )
+
+    def test_doc_fields_null_unless_snapshot_ready(self) -> None:
+        """Backlog line 50: the doc fields read after the awaits follow the
+        doc_index_state snapshotted before them."""
+        result = self._call_with_doc_fields("building")
+        assert result["doc_index_state"] == "building"
+        assert result["doc_indexed_commit"] is None
+        assert result["doc_stale"] is None
+        assert result["doc_unreadable_files"] is None
+
+    def test_doc_fields_carried_when_snapshot_ready(self) -> None:
+        result = self._call_with_doc_fields("ready")
+        assert result["doc_index_state"] == "ready"
+        assert result["doc_indexed_commit"] == "abc"
+        assert result["doc_stale"] is True
+        assert result["doc_unreadable_files"] == 2
+
+    def _status_after_build(self, tmp_path: Any, unreadable: str | None) -> dict[str, Any]:
+        import pathlib
+
+        from rust_lsp_mcp.doc_store import init_doc_store
+        from rust_lsp_mcp.settings import Settings
+        from tests.test_doc_store import FakeEmbeddingFunction
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "guide.md").write_text("# Guide\n\nGuide text.\n", encoding="utf-8")
+        (corpus / "intro.md").write_text("# Intro\n\nIntro text.\n", encoding="utf-8")
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md",
+        )
+        real_read_bytes = pathlib.Path.read_bytes
+
+        def _read_bytes(path: pathlib.Path) -> bytes:
+            if path.name == unreadable:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read_bytes(path)
+
+        with patch.object(pathlib.Path, "read_bytes", _read_bytes):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        return _call_status(None, subprocess_raises=OSError("no git"))
+
+    def test_doc_unreadable_files_counts_unreadable_file(self, tmp_path: Any) -> None:
+        """Backlog line 63: a file whose read raises shows up as a count."""
+        result = self._status_after_build(tmp_path, "guide.md")
+        assert result["doc_index_state"] == "ready"
+        assert result["doc_unreadable_files"] == 1
+        assert result["doc_index_chunk_count"] == 1
+
+    def test_doc_unreadable_files_zero_after_clean_build(self, tmp_path: Any) -> None:
+        result = self._status_after_build(tmp_path, None)
+        assert result["doc_unreadable_files"] == 0
 
 
 # ---------------------------------------------------------------------------

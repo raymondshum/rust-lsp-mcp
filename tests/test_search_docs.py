@@ -1,7 +1,9 @@
 """Fast-tier tests for the search_docs tool.
 
-No live doc store, no ChromaDB, no model downloads.  All heavy dependencies
-are stubbed via monkeypatching.
+No model downloads.  Most tests stub the store via monkeypatching; the
+``doc_stale`` tests (backlog line 85) run a real ChromaDB store with the fake
+embedding function from ``tests/test_doc_store.py`` so the digest compare
+runs for real.
 Runs in CI as part of ``pytest -m "not integration"``.
 
 Test coverage:
@@ -517,3 +519,54 @@ class TestDS22EmptyQueryValidation:
         result = _run_search_docs(query="install cargo", store=store)
         assert result["status"] == STATUS_OK
         store.search.assert_called_once_with("install cargo", n_results=5)
+
+
+# ---------------------------------------------------------------------------
+# Backlog line 85: doc_stale in the ok and not_found envelopes, against a
+# real (fake-embedding) store so the digest compare runs for real.
+# ---------------------------------------------------------------------------
+
+
+class TestDocStaleField:
+    def _ready_store(self, tmp_path: Any, files: dict[str, str]) -> Any:
+        from rust_lsp_mcp.doc_store import init_doc_store
+        from rust_lsp_mcp.settings import Settings
+        from tests.test_doc_store import FakeEmbeddingFunction
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        for name, text in files.items():
+            (corpus / name).write_text(text, encoding="utf-8")
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md",
+        )
+        return init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+
+    def test_ok_carries_doc_stale_false_then_true_after_doc_change(self, tmp_path: Any) -> None:
+        import os
+
+        store = self._ready_store(tmp_path, {"guide.md": "# Guide\n\nInstall with cargo.\n"})
+        result = _run_search_docs(query="install", store=store)
+        assert result["status"] == STATUS_OK
+        assert result["doc_stale"] is False
+
+        doc = tmp_path / "corpus" / "guide.md"
+        mtime = doc.stat().st_mtime_ns + 1_000_000_000
+        doc.write_text("# Guide\n\nInstall with cargo, edited.\n", encoding="utf-8")
+        os.utime(doc, ns=(mtime, mtime))
+        result = _run_search_docs(query="install", store=store)
+        assert result["status"] == STATUS_OK
+        assert result["doc_stale"] is True
+
+    def test_not_found_carries_doc_stale(self, tmp_path: Any) -> None:
+        store = self._ready_store(tmp_path, {})
+        result = _run_search_docs(query="install", store=store)
+        assert result["status"] == STATUS_NOT_FOUND
+        assert "doc_stale" in result
+        assert result["doc_stale"] is False
+
+    def test_not_ready_and_error_carry_no_doc_stale(self) -> None:
+        assert "doc_stale" not in _run_search_docs(store=_make_not_ready_store())
+        assert "doc_stale" not in _run_search_docs(store=_make_error_store())

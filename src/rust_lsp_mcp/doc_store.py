@@ -70,6 +70,15 @@ Inter-process start lock (SW-02, KI-13):
     the first).  A ``rebuild()`` called on a live store (``refresh``) takes
     the store's ``_build_lock`` first and then its own flock.
 
+    A ``refresh`` in one container deletes the collection another container
+    on the same volume is serving (KI-13).  When ``search()`` or
+    ``chunk_count()`` gets ``NotFoundError`` from the snapshotted collection,
+    the store re-opens the live collection by name and serves it when it
+    carries ``build_complete``.  Otherwise it probes the flock without
+    blocking: held means a rebuild is mid-swap, so the call reads not ready
+    and the state is unchanged; free means the collection is gone, so the
+    store reads ``"error"`` with a message naming ``refresh``.
+
 Doc index freshness (SW-04):
     :func:`doc_store_files` is the one place that selects the files to index
     (the glob patterns, de-duplication, ``doc_exclude_patterns``, and the
@@ -184,6 +193,12 @@ class DocStoreNotReady(Exception):
 # (SW-02).  Created next to the ChromaDB files and never deleted: the kernel
 # drops the flock when the holder's descriptor closes or the process exits.
 _LOCK_FILENAME = ".rlm-doc-store.lock"
+
+# error_message set when the live collection was deleted by another process
+# on the volume and no rebuild is bringing it back (KI-13).
+_DELETED_COLLECTION_ERROR = (
+    "the doc index collection was deleted by another process on this volume; call refresh"
+)
 
 # A wait on the lock longer than this is logged once at info.
 _LOCK_WAIT_LOG_SECONDS = 2.0
@@ -528,6 +543,10 @@ class DocStore:
             settings=ChromaSettings(anonymized_telemetry=False),
         )
         self._collection: Any = None
+        # Name of the live collection last published by a build or an adopt,
+        # so search()/chunk_count() can re-open it after another process on
+        # the volume swapped it (KI-13) without a git call.
+        self._live_name: str | None = None
         self._state: str = DOC_STATE_BUILDING
         self._error: str | None = None
         # Two distinct locks (DS-12):
@@ -641,6 +660,26 @@ class DocStore:
             if self._state != DOC_STATE_READY or self._collection is None:
                 return None
             collection = self._collection
+        try:
+            return collection.count()
+        except NotFoundError:
+            pass
+        except Exception:
+            return None
+        # KI-13: another process on the volume deleted the collection.  The
+        # re-open and the publish run under _read_lock; the count after it
+        # runs outside, as above.
+        with self._read_lock:
+            if self._collection is not collection:
+                # Another thread already replaced (or cleared) the snapshot.
+                if self._state != DOC_STATE_READY or self._collection is None:
+                    return None
+                collection = self._collection
+            else:
+                try:
+                    collection = self._recover_collection_locked()
+                except DocStoreNotReady:
+                    return None
         try:
             return collection.count()
         except Exception:
@@ -864,6 +903,9 @@ class DocStore:
         unchanged = 0
         reembedded = 0
         junk_lines = 0
+        # Backlog line 63: files whose read raised OSError; the count is
+        # stamped as unreadable_files so status reports what is missing.
+        unreadable: list[pathlib.Path] = []
 
         def _flush() -> None:
             # Embedding happens inside add(); one file's chunks at a time, in
@@ -888,7 +930,8 @@ class DocStore:
             try:
                 data = filepath.read_bytes()
             except OSError as exc:
-                _log.warning("doc_store: could not read %s: %s", filepath, exc)
+                _log.debug("doc_store: could not read %s: %s", filepath, exc)
+                unreadable.append(filepath)
                 self._set_progress(files_done=done)
                 continue
             file_sha = hashlib.sha256(data).hexdigest()
@@ -925,6 +968,14 @@ class DocStore:
         _flush()
         self._check_cancelled()
 
+        build_metadata["unreadable_files"] = len(unreadable)
+        if unreadable:
+            _log.warning(
+                "doc_store: %d doc files could not be read and are not indexed: %s",
+                len(unreadable),
+                ", ".join(str(f) for f in unreadable[:5]),
+            )
+
         # --- Swap (SW-10): under _read_lock, briefly -----------------------
         # Delete the live collection, rename staging to the live name with the
         # completion sentinel and stamps (modify() replaces metadata
@@ -946,6 +997,7 @@ class DocStore:
                 self._state = DOC_STATE_BUILDING
                 raise
             self._collection = staging
+            self._live_name = live_name
             self._state = DOC_STATE_READY
             self._error = None
 
@@ -1022,23 +1074,26 @@ class DocStore:
                 interleave with this method mid-query — it either happens
                 entirely before this call starts, or waits for this call to
                 finish.  Callers (``search_docs``) must translate this into a
-                ``not_ready`` envelope, not treat it as "no results".
+                ``not_ready`` envelope, not treat it as "no results".  Also
+                raised when another process on the volume deleted the
+                collection and it cannot be re-opened (KI-13, see
+                :meth:`_recover_collection_locked`); ``state`` then reads
+                ``"error"`` unless a rebuild holds the doc-store flock.
         """
         with self._read_lock:
             if self._state != DOC_STATE_READY or self._collection is None:
                 raise DocStoreNotReady()
-            collection = self._collection
-            count = collection.count()
-            if count == 0:
+            try:
+                result = self._query_locked(self._collection, query, n_results)
+            except NotFoundError:
+                # KI-13: another process on the volume deleted the collection.
+                # Recovery runs inside this _read_lock region (the lock is not
+                # reentrant, and nothing it calls takes it again); it raises
+                # DocStoreNotReady when the collection cannot be served.
+                recovered = self._recover_collection_locked()
+                result = self._query_locked(recovered, query, n_results)
+            if result is None:
                 return []
-
-            # Clamp n_results to the number of available documents.
-            effective_n = min(n_results, count)
-
-            result = collection.query(
-                query_texts=[query],
-                n_results=effective_n,
-            )
 
         # Map row 0 of each list-of-lists into the documented shape — pure
         # dict work, done OUTSIDE the lock.
@@ -1068,6 +1123,92 @@ class DocStore:
             )
 
         return output
+
+    @staticmethod
+    def _query_locked(collection: Any, query: str, n_results: int) -> Any:
+        """Run ``count()`` and ``query()`` on *collection*; ``None`` when it is empty.
+
+        Called by :meth:`search` while it holds ``_read_lock``.
+        """
+        count = collection.count()
+        if count == 0:
+            return None
+        # Clamp n_results to the number of available documents.
+        return collection.query(query_texts=[query], n_results=min(n_results, count))
+
+    def _open_live_complete(self) -> Any | None:
+        """Re-open the live collection by ``_live_name``; ``None`` unless it is complete.
+
+        Returns the collection only when it exists and carries
+        ``build_complete``.  Takes no lock and runs no git call.
+        """
+        if self._live_name is None:
+            return None
+        get_kwargs: dict[str, Any] = {}
+        if self._ef is not None:
+            get_kwargs["embedding_function"] = self._ef
+        try:
+            collection = self._client.get_collection(self._live_name, **get_kwargs)
+        except NotFoundError:
+            return None
+        except Exception as exc:
+            _log.warning("doc_store: re-opening %s failed (%r)", self._live_name, exc)
+            return None
+        if not (collection.metadata or {}).get("build_complete"):
+            return None
+        return collection
+
+    def _recover_collection_locked(self) -> Any:
+        """Recover from a live collection another process deleted (KI-13).
+
+        Must be called while holding ``_read_lock``; takes no lock of its
+        own besides a non-blocking probe of the inter-process flock.  Returns
+        the re-opened collection, published as ``_collection``, when it
+        exists with ``build_complete``.  Otherwise probes
+        ``<chroma_path>/.rlm-doc-store.lock`` with ``LOCK_EX | LOCK_NB``: a
+        held flock means a rebuild is mid-swap, so ``_state``, ``_error`` and
+        ``_collection`` stay as they are.  A free flock means nothing will
+        bring the collection back: after one more re-open under the flock,
+        ``_state`` becomes ``"error"`` with a message naming ``refresh`` and
+        ``_collection`` is cleared.
+
+        Raises:
+            DocStoreNotReady: no collection can be served now.
+        """
+        collection = self._open_live_complete()
+        if collection is not None:
+            _log.info("doc_store: re-opened %s after another process replaced it", self._live_name)
+            self._collection = collection
+            return collection
+        lock_dir = pathlib.Path(self._settings.chroma_path)
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_dir / _LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o666)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                _log.info(
+                    "doc_store: collection %s is missing while another rebuild holds the"
+                    " doc-store lock; reporting not ready",
+                    self._live_name,
+                )
+                raise DocStoreNotReady() from None
+            try:
+                collection = self._open_live_complete()
+            finally:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+        if collection is not None:
+            _log.info("doc_store: re-opened %s after another process replaced it", self._live_name)
+            self._collection = collection
+            return collection
+        _log.warning("doc_store: %s (collection %s)", _DELETED_COLLECTION_ERROR, self._live_name)
+        self._state = DOC_STATE_ERROR
+        self._error = _DELETED_COLLECTION_ERROR
+        self._collection = None
+        raise DocStoreNotReady()
 
 
 # ---------------------------------------------------------------------------
@@ -1254,40 +1395,81 @@ def start_doc_rebuild(work: Callable[[], None]) -> bool:
     return True
 
 
+def _ready_collection() -> tuple[DocStore, Any] | None:
+    """Return ``(store, collection)`` for the ready singleton, else ``None``.
+
+    The readiness check and the snapshot are taken under ``_read_lock``.
+    Never raises: a store double without the lock reads as not ready.
+    """
+    store = _doc_store
+    if store is None:
+        return None
+    try:
+        with store._read_lock:
+            if store._state != DOC_STATE_READY or store._collection is None:
+                return None
+            return store, store._collection
+    except Exception:
+        _log.debug("doc_store: ready-collection snapshot failed", exc_info=True)
+        return None
+
+
 def doc_store_freshness() -> tuple[str | None, bool | None]:
     """Return ``(doc_indexed_commit, doc_stale)`` for the doc index (SW-04).
 
     ``(None, None)`` when there is no store or it is not ``"ready"``.
     Otherwise the ``indexed_commit`` stamped on the ready collection (``None``
     when an adopted pre-stamp collection lacks it) and ``doc_stale``:
-    ``True`` when the stamped commit differs from the current ``HEAD`` or the
-    stamped ``doc_digest`` differs from :func:`doc_store_digest` now (a
-    missing stamp compares unequal), else ``False``.
+    ``True`` when the stamped ``doc_digest`` differs from
+    :func:`doc_store_digest` now (a Markdown file the index covers was added,
+    removed or changed since the build; a missing stamp compares unequal),
+    else ``False``.  The commit is reported but not compared: a code-only
+    branch switch with byte-identical docs leaves ``doc_stale`` ``False``,
+    and no git call runs here.
 
-    Synchronous: the digest walk and the git call run on the caller's thread,
-    so async callers (``status``) run it through ``asyncio.to_thread``, never
-    on the event loop.  Never raises; an unexpected failure reads as
+    Synchronous: the digest walk runs on the caller's thread, so async
+    callers (``status``, ``search_docs``) run it on a worker thread, never on
+    the event loop.  Never raises; an unexpected failure reads as
     ``(None, None)``.
     """
-    store = _doc_store
-    if store is None:
+    snapshot = _ready_collection()
+    if snapshot is None:
         return None, None
-    with store._read_lock:
-        if store._state != DOC_STATE_READY or store._collection is None:
-            return None, None
-        collection = store._collection
+    store, collection = snapshot
     try:
         meta = collection.metadata or {}
         stamped_commit = meta.get("indexed_commit")
         stamped_digest = meta.get("doc_digest")
-        current_commit = _doc_head_commit(store._settings.project_root)
         current_digest = doc_store_digest(store._settings)
     except Exception:
         _log.debug("doc_store: freshness check failed", exc_info=True)
         return None, None
     indexed_commit = stamped_commit if isinstance(stamped_commit, str) else None
-    stale = stamped_commit != current_commit or stamped_digest != current_digest
-    return indexed_commit, stale
+    return indexed_commit, stamped_digest != current_digest
+
+
+def doc_store_unreadable() -> int | None:
+    """Return the ``unreadable_files`` stamp of the ready doc collection (backlog line 63).
+
+    The number of matched doc files whose read raised ``OSError`` during the
+    build that produced the ready collection, so they are absent from the
+    index.  ``None`` when there is no store, it is not ``"ready"``, the
+    collection carries no stamp (built before the stamp existed) or the read
+    fails.  Synchronous (a ChromaDB metadata read); async callers run it on a
+    worker thread.
+    """
+    snapshot = _ready_collection()
+    if snapshot is None:
+        return None
+    _store, collection = snapshot
+    try:
+        value = (collection.metadata or {}).get("unreadable_files")
+    except Exception:
+        _log.debug("doc_store: unreadable-files read failed", exc_info=True)
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _try_adopt(
@@ -1300,7 +1482,9 @@ def _try_adopt(
 
     Cheap (no embedding work): a single ``get_collection`` metadata check,
     plus one ``git rev-parse HEAD`` and one ``stat`` walk over
-    :func:`doc_store_files` for the freshness stamp.
+    :func:`doc_store_files` for the freshness stamp.  When the git call fails
+    (current commit ``"none"``) and the stamp is a real commit, the commit
+    compare is skipped and the digest decides (backlog line 45).
     "Build once" persistence: if the ChromaDB collection was built for the
     SAME project (its ``project_root`` fingerprint and its
     ``project_identity`` both equal the current values — DS-05, SW-01), from
@@ -1378,8 +1562,22 @@ def _try_adopt(
                     return False
             # SW-04: refuse an index built from another tree state.  Logged at
             # info with the key that differed; the caller rebuilds.
+            # Backlog line 45: _doc_head_commit returns "none" on any git
+            # failure.  A current "none" against a real stamp is unknown, not
+            # a mismatch, so the digest alone decides; a stamped "none"
+            # against a real current commit still refuses.
             current_commit = _doc_head_commit(settings.project_root)
-            if meta.get("indexed_commit") != current_commit:
+            stamped_commit = meta.get("indexed_commit")
+            if (
+                current_commit == _NO_COMMIT
+                and isinstance(stamped_commit, str)
+                and stamped_commit != _NO_COMMIT
+            ):
+                _log.info(
+                    "doc_store: current commit unknown (git failed);"
+                    " deciding adoption on doc_digest"
+                )
+            elif stamped_commit != current_commit:
                 _log.info(
                     "doc_store: not adopting: %s differs (stamped %r, current %r) — rebuilding",
                     "indexed_commit",
@@ -1409,6 +1607,7 @@ def _try_adopt(
             # under-GIL.
             with store._read_lock:
                 store._collection = existing
+                store._live_name = existing.name
                 store._state = DOC_STATE_READY
             return True
         if build_complete:

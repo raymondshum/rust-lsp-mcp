@@ -15,7 +15,9 @@ Exit codes (D8, docs/planning/cli-frontend.md):
         matches the skill's "empty is not an error" doctrine).
     1 - envelope status ``error``.
     2 - envelope status ``not_ready``, including a ``--wait`` window that
-        expired while the daemon was reachable but never became ready.
+        expired while the daemon was reachable but never became ready, and a
+        ``--wait`` that stopped because the daemon reported a doc index
+        error (``doc_index_state == "error"``; run ``rust-lsp refresh``).
     3 - the daemon was never reachable at all (connection refused, handshake
         failure, timeout), including a ``--wait`` window that expired
         without ever connecting.
@@ -177,8 +179,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Before running the command, poll `status` every 2s until the "
             "daemon reports both state=ready and doc_index_state=ready, i.e. "
             "the code index and the doc index (or SECS elapses). Rides through "
-            "daemon boot (connection-refused -> not_ready -> ready). Must be "
-            "given BEFORE the subcommand, e.g. `rust-lsp --wait 180 status`."
+            "daemon boot (connection-refused -> not_ready -> ready). Stops at "
+            "once, exit 2, when the daemon reports doc_index_state=error, and "
+            "prints that error. Must be given BEFORE the subcommand, e.g. "
+            "`rust-lsp --wait 180 status`."
         ),
     )
 
@@ -387,8 +391,15 @@ def main(argv: list[str] | None = None) -> int:
     from rust_lsp_cli import client
 
     if args.wait is not None:
-        ready, ever_connected = client.wait_for_ready(base_url, args.wait)
+        ready, ever_connected, doc_error = client.wait_for_ready(base_url, args.wait)
         if not ready:
+            if doc_error is not None:
+                print(
+                    f"rust-lsp: the daemon at {base_url} reports a doc index error: "
+                    f"{doc_error}; run rust-lsp refresh to rebuild it.",
+                    file=sys.stderr,
+                )
+                return EXIT_NOT_READY
             if not ever_connected:
                 print(_unreachable_hint(base_url), file=sys.stderr)
                 return EXIT_UNREACHABLE

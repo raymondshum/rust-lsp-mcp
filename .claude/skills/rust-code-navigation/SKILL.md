@@ -148,14 +148,20 @@ project's source changed underneath it); don't call it speculatively or to
   switch reaches the code index within seconds, with no `refresh`.
 - **`status` reports both indexes.** `stale` covers committed code changes
   (the indexed commit against the current `HEAD`); `doc_stale` covers the doc
-  index (its stamped commit and its Markdown files against the tree now).
+  index, and its only input is the doc files: it reads `true` when a Markdown
+  file the index covers was added, removed or changed since the build. A
+  branch switch or commit that leaves the doc files byte-identical keeps it
+  `false`. A non-zero `doc_unreadable_files` means that many matched doc
+  files could not be read and are missing from the index.
 - **After a commit or a branch switch,** poll `status` until `stale` is
   `false`. It returns to `false` on the next `status` call once rust-analyzer
   is quiescent, a switch that changes no Rust or Cargo file included. Call
   `refresh` once only if `stale` still reads `true` after 60 seconds.
 - **`search_docs` answers from the doc index, which no running server
-  rebuilds on its own.** After a change, `doc_stale` reads `true` until the
-  next `refresh` or server restart. During a rebuild over an existing index,
+  rebuilds on its own.** After a Markdown file the index covers was added,
+  removed or changed, `doc_stale` reads `true`, in `status` and in the
+  `search_docs` reply itself, until the next `refresh` or server restart;
+  call `refresh` when it reads `true` and the answer depends on current docs. During a rebuild over an existing index,
   `doc_index_state` stays `"ready"`, `search_docs` keeps answering from the
   old index, and `status`'s `doc_index_progress` shows the rebuild's
   progress; `doc_index_state` reads `"building"` only for the first build on

@@ -10,7 +10,13 @@ from anyio.to_thread import run_sync
 from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import mcp
-from rust_lsp_mcp.doc_store import DOC_STATE_ERROR, DocStoreNotReady, doc_store_state, get_doc_store
+from rust_lsp_mcp.doc_store import (
+    DOC_STATE_ERROR,
+    DocStoreNotReady,
+    doc_store_freshness,
+    doc_store_state,
+    get_doc_store,
+)
 from rust_lsp_mcp.envelope import (
     RECOVERY_FIX_INPUT,
     RECOVERY_REFRESH,
@@ -78,7 +84,11 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
             "distance":   float,  # cosine distance (0 = identical, lower = closer)
           }
 
-      Results are ordered best-first (ascending distance).
+      Results are ordered best-first (ascending distance).  Also carries
+      ``doc_stale``: ``true`` when a Markdown file the index covers was
+      added, removed or changed since the index was built (the results may
+      be out of date; ``refresh`` rebuilds it), ``false`` when none was, or
+      ``null`` when unknown (same value as ``status.doc_stale``).
 
     - ``not_ready`` — the doc index is absent or is currently being built
       (``doc_index_state == "building"``, see ``status``).  This is a
@@ -104,7 +114,7 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
       genuinely found nothing.  The message enumerates the possible causes of
       an empty corpus (no Markdown matched, all matched files excluded, matched
       files empty, or the project simply ships no docs) without asserting
-      misconfiguration.
+      misconfiguration.  Carries ``doc_stale`` as ``ok`` does.
 
     Invariant (load-bearing):
         ``not_ready``/``error`` is returned whenever ``is_ready`` is ``False``,
@@ -162,12 +172,20 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
         _log.exception("search_docs: store.search raised for query %r", query)
         return error(f"Documentation search error: {exc}", recovery=RECOVERY_UNKNOWN)
 
-    if not hits:
-        return not_found(
-            "The documentation index is ready but contains 0 chunks. Possible causes: "
-            "no Markdown files matched RLM_DOC_GLOB_PATTERNS; all matches were excluded "
-            "by RLM_DOC_EXCLUDE_PATTERNS; the matched files were empty; or this project "
-            "simply ships no Markdown docs."
-        )
+    # Backlog line 85: tell the client whether the docs it answers from are
+    # stale (a covered Markdown file changed since the build).  The digest
+    # walk runs on a worker thread; null when unknown.
+    _, doc_stale = await run_sync(doc_store_freshness)
 
-    return ok(results=hits)
+    if not hits:
+        return {
+            **not_found(
+                "The documentation index is ready but contains 0 chunks. Possible causes: "
+                "no Markdown files matched RLM_DOC_GLOB_PATTERNS; all matches were excluded "
+                "by RLM_DOC_EXCLUDE_PATTERNS; the matched files were empty; or this project "
+                "simply ships no Markdown docs."
+            ),
+            "doc_stale": doc_stale,
+        }
+
+    return ok(results=hits, doc_stale=doc_stale)

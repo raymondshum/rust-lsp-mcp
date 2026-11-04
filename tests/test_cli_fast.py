@@ -158,7 +158,7 @@ def test_wait_for_ready_rides_through_boot_sequence() -> None:
         return result
 
     _clock, monotonic, sleep = _fake_clock()
-    ready, ever_connected = client_mod.wait_for_ready(
+    ready, ever_connected, doc_error = client_mod.wait_for_ready(
         "http://x/mcp",
         timeout_seconds=30,
         status_check=fake_check,
@@ -167,6 +167,7 @@ def test_wait_for_ready_rides_through_boot_sequence() -> None:
     )
     assert ready is True
     assert ever_connected is True
+    assert doc_error is None
     assert calls["n"] == 4
 
 
@@ -186,14 +187,14 @@ def test_wait_for_ready_keeps_polling_while_doc_index_building() -> None:
         return result
 
     _clock, monotonic, sleep = _fake_clock()
-    ready, ever_connected = client_mod.wait_for_ready(
+    ready, ever_connected, doc_error = client_mod.wait_for_ready(
         "http://x/mcp",
         timeout_seconds=30,
         status_check=fake_check,
         sleep=sleep,
         monotonic=monotonic,
     )
-    assert (ready, ever_connected) == (True, True)
+    assert (ready, ever_connected, doc_error) == (True, True, None)
     assert calls["n"] == 3
 
 
@@ -204,14 +205,14 @@ def test_wait_for_ready_times_out_when_doc_index_never_ready() -> None:
         return ({"status": "ok", "state": "ready", "doc_index_state": "building"}, None)
 
     _clock, monotonic, sleep = _fake_clock()
-    ready, ever_connected = client_mod.wait_for_ready(
+    ready, ever_connected, doc_error = client_mod.wait_for_ready(
         "http://x/mcp",
         timeout_seconds=5,
         status_check=fake_check,
         sleep=sleep,
         monotonic=monotonic,
     )
-    assert (ready, ever_connected) == (False, True)
+    assert (ready, ever_connected, doc_error) == (False, True, None)
 
 
 def test_wait_help_names_doc_index_state(capsys: pytest.CaptureFixture[str]) -> None:
@@ -225,7 +226,7 @@ def test_wait_for_ready_timeout_never_connected() -> None:
         return (None, ConnectionRefusedError("refused"))
 
     _clock, monotonic, sleep = _fake_clock()
-    ready, ever_connected = client_mod.wait_for_ready(
+    ready, ever_connected, doc_error = client_mod.wait_for_ready(
         "http://x/mcp",
         timeout_seconds=5,
         status_check=fake_check,
@@ -234,6 +235,7 @@ def test_wait_for_ready_timeout_never_connected() -> None:
     )
     assert ready is False
     assert ever_connected is False
+    assert doc_error is None
 
 
 def test_wait_for_ready_timeout_reachable_but_not_ready() -> None:
@@ -241,7 +243,7 @@ def test_wait_for_ready_timeout_reachable_but_not_ready() -> None:
         return ({"status": "ok", "state": "indexing"}, None)
 
     _clock, monotonic, sleep = _fake_clock()
-    ready, ever_connected = client_mod.wait_for_ready(
+    ready, ever_connected, doc_error = client_mod.wait_for_ready(
         "http://x/mcp",
         timeout_seconds=5,
         status_check=fake_check,
@@ -250,17 +252,162 @@ def test_wait_for_ready_timeout_reachable_but_not_ready() -> None:
     )
     assert ready is False
     assert ever_connected is True
+    assert doc_error is None
+
+
+_DOC_ERROR_TEXT = "RuntimeError: embedding model missing"
+
+
+def _scripted(
+    responses: list[tuple[dict[str, Any] | None, Exception | None]],
+) -> tuple[dict[str, int], Callable[[str], tuple[dict[str, Any] | None, Exception | None]]]:
+    """Return (calls, status_check) replaying *responses*, repeating the last one."""
+    calls = {"n": 0}
+
+    def fake_check(_url: str) -> tuple[dict[str, Any] | None, Exception | None]:
+        result = responses[min(calls["n"], len(responses) - 1)]
+        calls["n"] += 1
+        return result
+
+    return calls, fake_check
+
+
+def test_wait_for_ready_stops_at_doc_index_error() -> None:
+    """Backlog line 68: a doc ``error`` envelope ends the wait at once with
+    the error text, instead of polling out the whole window."""
+    calls, fake_check = _scripted(
+        [
+            ({"status": "ok", "state": "indexing", "doc_index_state": "building"}, None),
+            (
+                {
+                    "status": "ok",
+                    "state": "ready",
+                    "doc_index_state": "error",
+                    "doc_index_error": _DOC_ERROR_TEXT,
+                },
+                None,
+            ),
+        ]
+    )
+    sleeps: list[float] = []
+    clock, monotonic, sleep = _fake_clock()
+
+    def counting_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        sleep(seconds)
+
+    ready, ever_connected, doc_error = client_mod.wait_for_ready(
+        "http://x/mcp",
+        timeout_seconds=600,
+        status_check=fake_check,
+        sleep=counting_sleep,
+        monotonic=monotonic,
+    )
+    assert (ready, ever_connected, doc_error) == (False, True, _DOC_ERROR_TEXT)
+    assert calls["n"] == 2
+    assert len(sleeps) == 1
+    assert clock[0] < 600
+
+
+def test_wait_for_ready_doc_error_without_message_reads_unknown() -> None:
+    _calls, fake_check = _scripted(
+        [({"status": "ok", "state": "ready", "doc_index_state": "error"}, None)]
+    )
+    _clock, monotonic, sleep = _fake_clock()
+    result = client_mod.wait_for_ready(
+        "http://x/mcp",
+        timeout_seconds=30,
+        status_check=fake_check,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
+    assert result == (False, True, "unknown error")
+
+
+def test_wait_for_ready_ready_doc_with_error_text_keeps_waiting() -> None:
+    """A failed rebuild while the old index serves reads ``ready`` with
+    ``doc_index_error`` set: not a stop, the wait goes on until ready."""
+    calls, fake_check = _scripted(
+        [
+            (
+                {
+                    "status": "ok",
+                    "state": "indexing",
+                    "doc_index_state": "ready",
+                    "doc_index_error": _DOC_ERROR_TEXT,
+                },
+                None,
+            ),
+            (
+                {
+                    "status": "ok",
+                    "state": "ready",
+                    "doc_index_state": "ready",
+                    "doc_index_error": _DOC_ERROR_TEXT,
+                },
+                None,
+            ),
+        ]
+    )
+    _clock, monotonic, sleep = _fake_clock()
+    result = client_mod.wait_for_ready(
+        "http://x/mcp",
+        timeout_seconds=30,
+        status_check=fake_check,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
+    assert result == (True, True, None)
+    assert calls["n"] == 2
 
 
 # ---------------------------------------------------------------------------
-# --wait (D9): cli.main()'s wiring of wait_for_ready's three outcomes.
+# --wait (D9): cli.main()'s wiring of wait_for_ready's outcomes.
 # ---------------------------------------------------------------------------
+
+
+def test_wait_flag_doc_index_error_prints_diagnostic_and_exits_2(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``main(["--wait", "5", "status"])`` over a building-then-error
+    sequence prints the doc error and exits 2 without running the command."""
+    _calls, fake_check = _scripted(
+        [
+            ({"status": "ok", "state": "indexing", "doc_index_state": "building"}, None),
+            (
+                {
+                    "status": "ok",
+                    "state": "ready",
+                    "doc_index_state": "error",
+                    "doc_index_error": _DOC_ERROR_TEXT,
+                },
+                None,
+            ),
+        ]
+    )
+    real_wait = client_mod.wait_for_ready
+    monkeypatch.setattr(
+        client_mod,
+        "wait_for_ready",
+        lambda url, secs: real_wait(url, secs, status_check=fake_check, sleep=lambda _s: None),
+    )
+    tool_calls: list[str] = []
+    monkeypatch.setattr(
+        client_mod, "call_tool_sync", lambda _u, name, _a: (tool_calls.append(name), None)[1]
+    )
+    code = cli.main(["--wait", "5", "status"])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "reports a doc index error: " + _DOC_ERROR_TEXT in captured.err
+    assert "run rust-lsp refresh to rebuild it." in captured.err
+    assert tool_calls == []
 
 
 def test_wait_flag_never_connected_exits_3(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (False, False))
+    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (False, False, None))
     code = cli.main(["--wait", "10", "status"])
     assert code == 3
     captured = capsys.readouterr()
@@ -271,7 +418,7 @@ def test_wait_flag_never_connected_exits_3(
 def test_wait_flag_reachable_but_not_ready_exits_2(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (False, True))
+    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (False, True, None))
     code = cli.main(["--wait", "10", "status"])
     assert code == 2
     captured = capsys.readouterr()
@@ -282,7 +429,7 @@ def test_wait_flag_reachable_but_not_ready_exits_2(
 def test_wait_flag_ready_proceeds_to_command(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (True, True))
+    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (True, True, None))
     envelope = {"status": "ok", "state": "ready"}
     monkeypatch.setattr(client_mod, "call_tool_sync", lambda *a, **k: (envelope, None))
     code = cli.main(["--wait", "10", "status"])

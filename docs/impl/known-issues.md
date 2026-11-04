@@ -69,61 +69,6 @@ Check this list at these lifecycle checkpoints (see
   Reference: docs/audit/2026-07-02-usability-review.md,
   Cross-cutting findings, completeness critic (CC-2).
 
-### KI-13 — ChromaDB cross-process single-writer hazard on a shared `/data` volume
-- **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
-  (`PersistentClient` at `chroma_path`) · [docker-compose.yml](../../docker-compose.yml)
-  (both services share the `rust-lsp-mcp-data` volume).
-- **What:** the guarded one-client-per-path invariant (regression test in
-  `tests/test_doc_store.py`) is **intra-process only**. Two OS processes opening
-  the same on-disk Chroma SQLite concurrently — two `docker run` sessions on one
-  volume today, or (post-CLI-frontend) the HTTP daemon plus a `docker exec …
-  rust-lsp-mcp` stdio *server* in the same container — are unguarded and risk
-  `database is locked` errors or store corruption, especially during a
-  `refresh`-driven rebuild.
-- **Why it matters:** silent doc-index corruption; the CLI-frontend daemon
-  ([cli-frontend.md](../planning/cli-frontend.md) D12) makes the concurrent-
-  process scenario more likely because a long-lived writer now always exists.
-  Note the import-light CLI itself never opens Chroma — the hazard is a second
-  *server* process, not `rust-lsp`.
-- **Status:** decided: D12's single-writer mandate (documented in the
-  CLI-frontend Phase 4 compose/README rewrite: one process per Chroma path;
-  separate volume names if two servers are truly needed). Entry stays open
-  until a stronger guard (e.g. an on-disk lock or per-mode volumes by default)
-  is decided.
-  **2026-07-03 (CLI-frontend Phase 4):** the compose flip landed —
-  [docker-compose.yml](../../docker-compose.yml)'s entrypoint now runs the
-  daemon directly (`RLM_TRANSPORT=streamable-http`), the old `sleep infinity`
-  + `docker exec … rust-lsp-mcp` stdio warm-start path is retired, and the
-  single-writer mandate is spelled out in the compose header comment, the
-  README's [CLI access](../../README.md#cli-access-for-agents-without-mcp)
-  section, and [docs/guide/cli.md](../guide/cli.md)'s troubleshooting table.
-  Entry remains open per the stronger-guard note above.
-  **2026-11-03 (defect sweep SW-02, remediation T01):** the hazard was shown on
-  the very first start, in the README's documented config. Two containers started
-  together on a fresh shared volume: the first built its doc index normally, and
-  the second reported `doc_index_state: "error"` with `InternalError: error
-  returned from database: (code: 1) table collections already exists`, its
-  `search_docs` returning an error envelope that recommended `refresh`. Fix: one
-  exclusive `fcntl.flock` on `<chroma_path>/.rlm-doc-store.lock` now covers
-  `PersistentClient` construction, the adopt check and any rebuild
-  (`_prepare_store`), and a `rebuild()` on a live store (`refresh`) takes the same
-  flock, so two servers on one volume serialise their first builds (the second
-  waits, then adopts) and never rebuild concurrently. Per-project collections
-  (SW-01, below) keep different projects on one volume apart. Entry stays open
-  only for the cross-process read of a collection another process deletes: a
-  `refresh` in one server still deletes and recreates the collection another
-  server on the same volume is serving, and that server's doc search fails until
-  it restarts. The one-server-per-volume guidance above still holds for serving.
-  **2026-11-04 (remediation T05, daemon):** under `rlm-connect`
-  ([docs/guide/daemon.md](../guide/daemon.md)) every IDE window on a project
-  attaches through `rust-lsp mcp-bridge` to that project's one daemon
-  container, `rlm-<ID>`, on its own volume, `rlm-<ID>-data`. The bridge opens no
-  Chroma client, and no offline ingest command exists, so the daemon is the
-  only writer on each project volume; the cross-process read above cannot
-  arise between windows that use `rlm-connect`. It still applies to the
-  per-session `docker run` config and to any second server started by hand on
-  the same volume.
-
 ### KI-14 — `refresh` blast radius on a shared daemon
 - **Where:** `refresh` MCP tool ([src/rust_lsp_mcp/tools/refresh.py](../../src/rust_lsp_mcp/tools/refresh.py))
   and the `rust-lsp refresh` CLI subcommand
@@ -236,6 +181,86 @@ Check this list at these lifecycle checkpoints (see
 ---
 
 ## Resolved
+
+### KI-13 — ChromaDB cross-process single-writer hazard on a shared `/data` volume
+- **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
+  (`PersistentClient` at `chroma_path`) · [docker-compose.yml](../../docker-compose.yml)
+  (both services share the `rust-lsp-mcp-data` volume).
+- **What:** the guarded one-client-per-path invariant (regression test in
+  `tests/test_doc_store.py`) is **intra-process only**. Two OS processes opening
+  the same on-disk Chroma SQLite concurrently — two `docker run` sessions on one
+  volume today, or (post-CLI-frontend) the HTTP daemon plus a `docker exec …
+  rust-lsp-mcp` stdio *server* in the same container — are unguarded and risk
+  `database is locked` errors or store corruption, especially during a
+  `refresh`-driven rebuild.
+- **Why it matters:** silent doc-index corruption; the CLI-frontend daemon
+  ([cli-frontend.md](../planning/cli-frontend.md) D12) makes the concurrent-
+  process scenario more likely because a long-lived writer now always exists.
+  Note the import-light CLI itself never opens Chroma — the hazard is a second
+  *server* process, not `rust-lsp`.
+- **Status:** decided: D12's single-writer mandate (documented in the
+  CLI-frontend Phase 4 compose/README rewrite: one process per Chroma path;
+  separate volume names if two servers are truly needed). Entry stays open
+  until a stronger guard (e.g. an on-disk lock or per-mode volumes by default)
+  is decided.
+  **2026-07-03 (CLI-frontend Phase 4):** the compose flip landed —
+  [docker-compose.yml](../../docker-compose.yml)'s entrypoint now runs the
+  daemon directly (`RLM_TRANSPORT=streamable-http`), the old `sleep infinity`
+  + `docker exec … rust-lsp-mcp` stdio warm-start path is retired, and the
+  single-writer mandate is spelled out in the compose header comment, the
+  README's [CLI access](../../README.md#cli-access-for-agents-without-mcp)
+  section, and [docs/guide/cli.md](../guide/cli.md)'s troubleshooting table.
+  Entry remains open per the stronger-guard note above.
+  **2026-11-03 (defect sweep SW-02, remediation T01):** the hazard was shown on
+  the very first start, in the README's documented config. Two containers started
+  together on a fresh shared volume: the first built its doc index normally, and
+  the second reported `doc_index_state: "error"` with `InternalError: error
+  returned from database: (code: 1) table collections already exists`, its
+  `search_docs` returning an error envelope that recommended `refresh`. Fix: one
+  exclusive `fcntl.flock` on `<chroma_path>/.rlm-doc-store.lock` now covers
+  `PersistentClient` construction, the adopt check and any rebuild
+  (`_prepare_store`), and a `rebuild()` on a live store (`refresh`) takes the same
+  flock, so two servers on one volume serialise their first builds (the second
+  waits, then adopts) and never rebuild concurrently. Per-project collections
+  (SW-01, below) keep different projects on one volume apart. Entry stays open
+  only for the cross-process read of a collection another process deletes: a
+  `refresh` in one server still deletes and recreates the collection another
+  server on the same volume is serving, and that server's doc search fails until
+  it restarts. The one-server-per-volume guidance above still holds for serving.
+  **2026-11-04 (remediation T05, daemon):** under `rlm-connect`
+  ([docs/guide/daemon.md](../guide/daemon.md)) every IDE window on a project
+  attaches through `rust-lsp mcp-bridge` to that project's one daemon
+  container, `rlm-<ID>`, on its own volume, `rlm-<ID>-data`. The bridge opens no
+  Chroma client, and no offline ingest command exists, so the daemon is the
+  only writer on each project volume; the cross-process read above cannot
+  arise between windows that use `rlm-connect`. It still applies to the
+  per-session `docker run` config and to any second server started by hand on
+  the same volume.
+- **Resolved:** 2026-11-04 (remediation-2 T02). Live reproduction first, on
+  the pre-fix image with the ripgrep fixture: two daemons, `r2-t02-a` and
+  `r2-t02-b`, on one volume (`RLM_PROJECT_ID=r2probe`); `b` adopted `a`'s
+  collection, then `rust-lsp refresh` on `b` swapped it. `a`'s `search-docs
+  "regex syntax"` then returned `error` with `Documentation search error:
+  Collection [e05a22ef-…] does not exist.` and `recovery: "unknown"` (the
+  traceback ends in `chromadb.errors.NotFoundError` from `collection.count()`
+  in `DocStore.search`), while `a`'s `status` read `doc_index_state: "ready"`
+  with `doc_index_chunk_count: null`. Fix: the store keeps the live collection
+  name from its last build or adopt, and when `search()` or `chunk_count()`
+  gets `NotFoundError` from the snapshotted collection it re-opens the
+  collection by that name and serves it if it carries `build_complete`.
+  Otherwise it probes `<chroma_path>/.rlm-doc-store.lock` without blocking: a
+  held flock (a rebuild mid-swap) reads not ready with the state unchanged; a
+  free flock with the collection still gone sets `doc_index_state: "error"`
+  with `the doc index collection was deleted by another process on this
+  volume; call refresh`, so `search_docs` returns `error` with `recovery:
+  "refresh"`. The same probe on the fixed image: `a`'s search after `b`'s
+  `refresh` returned `ok` with 5 results, and `a` logged `doc_store: re-opened
+  project_docs_ab332e26137a after another process replaced it`. Guarded by
+  `TestCollectionDeletedByAnotherProcess` in
+  [tests/test_doc_store.py](../../tests/test_doc_store.py), which runs the
+  second client in a subprocess. Two servers on one volume still serialise
+  their builds through the flock, and the one-writer guidance for serving
+  stands; nothing in this entry remains open.
 
 ### SW-10 — `refresh` blocked on the doc re-embed after deleting the old index
 - **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
