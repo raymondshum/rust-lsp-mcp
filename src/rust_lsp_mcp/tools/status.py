@@ -58,8 +58,9 @@ async def status() -> dict[str, Any]:
                            reach the index until ``refresh``; ``"ok"`` once
                            ``state == "ready"`` with no such failure;
                            ``null`` with no manager, before the run is
-                           ready, after ``refresh`` and after rust-analyzer
-                           exits.
+                           ready unless a watch failure was already seen in
+                           this run (then ``"error"``), after ``refresh``
+                           and after rust-analyzer exits.
     - ``watcher_message`` — the stderr line of the run's first watch
                            failure, or ``null``.
     - ``analyzer_exit_code`` — exit code of a rust-analyzer process that died
@@ -96,6 +97,10 @@ async def status() -> dict[str, Any]:
                            matches HEAD on disk and was last modified more
                            than ``HEAD_SETTLE_SECONDS`` (2 s) ago.  Either
                            way ``stale`` returns to ``false`` without
+                           ``refresh``.  ``status`` makes no such
+                           re-capture while ``watcher_health == "error"``
+                           (an edit on disk may never have reached the
+                           index), so ``stale`` then stays ``true`` until
                            ``refresh``.
     - ``indexing_started_at`` — ISO 8601 UTC time the current analyzer
                            indexing run began (reset by every ``refresh``),

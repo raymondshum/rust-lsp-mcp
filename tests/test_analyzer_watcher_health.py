@@ -177,3 +177,41 @@ class TestStatusWatcherFields:
         mgr = _make_manager(STATE_ERROR)
         result = _call_status(mgr, subprocess_run_return=_completed_process(0, "a" * 40))
         assert result["watcher_health"] is None
+
+
+def test_failure_before_ready_survives_readiness() -> None:
+    """T-b: readiness sets "ok" only when no failure was seen in the run."""
+    from rust_lsp_mcp import analyzer as analyzer_module
+    from tests.test_analyzer_death import DyingLsp
+    from tests.test_lifecycle_races import (
+        _await_first_instance,
+        _cancel_leaked_tasks,
+        _factory,
+        _make_manager,
+        _wait_until,
+    )
+
+    instances: list[DyingLsp] = []
+
+    async def _fake_capture(self: AnalyzerManager) -> None:
+        self._indexed_commit = "f" * 40
+
+    async def _scenario() -> str | None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(analyzer_module, "PatchedRustAnalyzer", _factory(DyingLsp, instances))
+            mp.setattr(AnalyzerManager, "_capture_head_commit", _fake_capture)
+            mgr = _make_manager()
+            await mgr.start()
+            lsp = await _await_first_instance(instances)
+            await asyncio.wait_for(lsp.entered.wait(), 2)
+            # What the stderr reader records for a failure line before ready.
+            mgr.watcher_health = "error"
+            mgr.watcher_message = LIMIT_LINE
+            lsp.quiesce_gate.set()
+            await _wait_until(lambda: mgr.state == STATE_READY)
+            health = mgr.watcher_health
+            await mgr.shutdown()
+            await _cancel_leaked_tasks()
+            return health
+
+    assert asyncio.run(_scenario()) == "error"

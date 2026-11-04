@@ -397,13 +397,18 @@ class FakeGit:
         if self.raises is not None:
             raise self.raises
         if args[:2] == ("diff", "--name-only"):
-            return _completed(self.diff_rc, "\n".join(self.changed))
+            return _completed(self.diff_rc, _sep(args).join(self.changed))
         if args[0] == "ls-tree":
             asked = set(args[args.index("--") + 1 :])
-            return _completed(0, "\n".join(p for p in self.in_head if p in asked))
+            return _completed(0, _sep(args).join(p for p in self.in_head if p in asked))
         if args[:2] == ("diff", "--quiet"):
             return _completed(self.quiet_rc)
         raise AssertionError(f"unexpected git call {args}")
+
+
+def _sep(args: tuple[str, ...]) -> str:
+    """The record separator git prints for *args*: NUL with ``-z``, else newline."""
+    return "\0" if "-z" in args else "\n"
 
 
 def _completed(rc: int, stdout: str = "") -> subprocess.CompletedProcess[str]:
@@ -658,3 +663,149 @@ def test_status_passes_snapshot_generation() -> None:
         result = _call_status(mgr, subprocess_run_return=_completed_process(0, NEW))
     assert result["stale"] is True
     assert calls == [(NEW, mgr._generation)]
+
+
+# ---------------------------------------------------------------------------
+# R-gate round 1 regressions
+# ---------------------------------------------------------------------------
+
+C1 = "1" * 40
+C2 = "2" * 40
+
+
+def test_failed_watcher_blocks_reconcile(tmp_path: pathlib.Path) -> None:
+    """D1: with the watcher failed, a checkout that edits an indexed file sends
+    rust-analyzer no event, so quiescence says nothing about the tree."""
+    _write(tmp_path, EDITED, age=10)
+    mgr = _quiescent_manager(tmp_path)
+    mgr.watcher_health = "error"
+    git = FakeGit([EDITED])
+    assert _reconcile(mgr, git) is None
+    assert mgr.indexed_commit == OLD
+    assert git.calls == []
+
+
+def test_reconcile_does_not_drop_a_newer_quiescent_recapture(tmp_path: pathlib.Path) -> None:
+    """D2: reconcile_head(C1) is in its git check when a re-index of C2 ends
+    and the quiescent re-capture starts reading C2; the C2 read must win."""
+    import threading
+
+    mgr = _quiescent_manager(tmp_path)
+    progress = mgr._make_progress_handler(mgr._generation)
+    status = mgr._make_status_handler(mgr._generation)
+    entered, gate = threading.Event(), threading.Event()
+
+    def _blocking_match(root: str, old: str, new: str, now: float) -> bool:
+        entered.set()
+        gate.wait(5)
+        return True
+
+    async def _scenario() -> str | None:
+        read_release = asyncio.Event()
+
+        async def _read_c2() -> str | None:
+            await read_release.wait()
+            return C2
+
+        with (
+            patch.object(analyzer_mod, "_tree_matches_head", _blocking_match),
+            patch.object(mgr, "_read_head_commit", _read_c2),
+        ):
+            reconcile = asyncio.create_task(mgr.reconcile_head(C1, mgr._generation))
+            await asyncio.to_thread(entered.wait, 5)
+            await progress(BEGIN)
+            await status("ok", None, False)
+            await progress(END)
+            recapture = asyncio.create_task(status("ok", None, True))
+            await asyncio.sleep(0)  # the quiescent re-capture is now reading C2
+            gate.set()
+            result = await reconcile
+            read_release.set()
+            await recapture
+        return result
+
+    result = asyncio.run(_scenario())
+    assert result is None
+    assert mgr.indexed_commit == C2
+
+
+def test_reconcile_skipped_while_a_quiescent_read_is_in_flight(tmp_path: pathlib.Path) -> None:
+    """D2: a quiescent HEAD read already in flight reads the newer HEAD."""
+    mgr = _quiescent_manager(tmp_path)
+    progress = mgr._make_progress_handler(mgr._generation)
+    status = mgr._make_status_handler(mgr._generation)
+    git = FakeGit([])
+
+    async def _scenario() -> str | None:
+        read_release = asyncio.Event()
+
+        async def _read_c2() -> str | None:
+            await read_release.wait()
+            return C2
+
+        with (
+            patch.object(analyzer_mod, "_run_git", git),
+            patch.object(mgr, "_read_head_commit", _read_c2),
+        ):
+            await status("ok", None, False)
+            await progress(END)
+            recapture = asyncio.create_task(status("ok", None, True))
+            await asyncio.sleep(0)
+            result = await mgr.reconcile_head(C1, mgr._generation)
+            read_release.set()
+            await recapture
+        return result
+
+    assert asyncio.run(_scenario()) is None
+    assert git.calls == []
+    assert mgr.indexed_commit == C2
+
+
+def test_non_ascii_rust_path_is_an_index_input(tmp_path: pathlib.Path) -> None:
+    """D3: with core.quotePath on, git prints ``"na\\303\\257ve.rs"``; the path
+    must still be checked against the disk and the settle interval."""
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@invalid", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    rel = "crates/x/src/naïve.rs"
+    git("init", "-q")
+    _write(tmp_path, rel, age=10)
+    git("add", ".")
+    git("commit", "-qm", "base")
+    old = git("rev-parse", "HEAD")
+    (tmp_path / rel).write_text("fn naive() {}\n", encoding="utf-8")
+    git("commit", "-qam", "edit")
+    new = git("rev-parse", "HEAD")
+    now = time.time()
+    assert analyzer_mod._tree_matches_head(str(tmp_path), old, new, now) is False  # just saved
+    stamp = now - 10
+    os.utime(tmp_path / rel, (stamp, stamp))
+    assert analyzer_mod._tree_matches_head(str(tmp_path), old, new, now) is True
+    (tmp_path / rel).write_text("fn naive() { dirty(); }\n", encoding="utf-8")
+    os.utime(tmp_path / rel, (stamp, stamp))
+    assert analyzer_mod._tree_matches_head(str(tmp_path), old, new, now) is False
+
+
+def test_run_resets_reindex_inflight() -> None:
+    """T-a: a token left in flight by a run torn down mid cache priming must
+    not block reconcile_head for the whole next run."""
+
+    def _factory(**kwargs: Any) -> Any:
+        raise RuntimeError("stop after construction")
+
+    async def _scenario() -> AnalyzerManager:
+        mgr = AnalyzerManager(rust_analyzer_bin="/nonexistent", repository_root="/nonexistent")
+        mgr._reindex_inflight = frozenset({TOKEN})
+        with contextlib.suppress(RuntimeError):
+            await mgr._run(mgr._generation)
+        return mgr
+
+    with patch.object(analyzer_mod, "PatchedRustAnalyzer", _factory):
+        mgr = asyncio.run(_scenario())
+    assert mgr._reindex_inflight == frozenset()

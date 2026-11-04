@@ -217,8 +217,9 @@ def _tree_matches_head(repo_root: str, old_commit: str, new_commit: str, now: fl
     """Return whether the code-index inputs on disk are settled at *new_commit*.
 
     Worker-thread body of :meth:`AnalyzerManager.reconcile_head`.  Takes the
-    Rust and Cargo paths in ``git diff --name-only --no-renames <old> <new>``
-    (relative to *repo_root*); an empty list matches, because no file the
+    Rust and Cargo paths in ``git diff --name-only -z --no-renames <old>
+    <new>`` (relative to *repo_root*; ``-z`` so no path is C-quoted); an
+    empty list matches, because no file the
     code index reads changed.  Otherwise every such path must match
     *new_commit* on disk: ``git diff --quiet <new> -- <paths>`` exits 0 for
     the tracked ones, a path absent from *new_commit* must be absent on disk
@@ -227,18 +228,28 @@ def _tree_matches_head(repo_root: str, old_commit: str, new_commit: str, now: fl
     git failure, a timeout included, returns False.
     """
     try:
+        # -z: with the default core.quotePath, a non-ASCII or quote-holding
+        # path prints C-quoted ("na\303\257ve.rs") and would slip past the
+        # index-input filter; NUL-separated output prints it verbatim.
         diff = _run_git(
-            repo_root, "diff", "--name-only", "--no-renames", "--relative", old_commit, new_commit
+            repo_root,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--relative",
+            old_commit,
+            new_commit,
         )
         if diff.returncode != 0:
             return False
-        paths = sorted({p for p in diff.stdout.splitlines() if p and _is_index_input(p)})
+        paths = sorted({p for p in diff.stdout.split("\0") if p and _is_index_input(p)})
         if not paths:
             return True
-        tree = _run_git(repo_root, "ls-tree", "-r", "--name-only", new_commit, "--", *paths)
+        tree = _run_git(repo_root, "ls-tree", "-r", "-z", "--name-only", new_commit, "--", *paths)
         if tree.returncode != 0:
             return False
-        in_head = set(tree.stdout.splitlines())
+        in_head = {p for p in tree.stdout.split("\0") if p}
         settled_before = now - HEAD_SETTLE_SECONDS
         for path in paths:
             try:
@@ -550,6 +561,7 @@ class AnalyzerManager:
     _recapture_pending: bool = False
     _quiescent: bool | None = None
     _reindex_inflight: frozenset[Any] = frozenset()
+    _quiescent_reads: int = 0
     _generation: int = 0
 
     def __init__(self, rust_analyzer_bin: str, repository_root: str) -> None:
@@ -599,6 +611,9 @@ class AnalyzerManager:
         self._quiescent: bool | None = None
         # Re-index progress tokens with a begin and no end yet, current run.
         self._reindex_inflight: frozenset[Any] = frozenset()
+        # Quiescent HEAD reads of the status callback now in flight;
+        # reconcile_head does not run while one is.
+        self._quiescent_reads: int = 0
         # The last STDERR_TAIL_LINES lines of the current run's rust-analyzer
         # stderr; replaced with an empty deque at the top of every _run.
         self._stderr_lines: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
@@ -761,8 +776,13 @@ class AnalyzerManager:
         None and leaves ``indexed_commit`` unchanged:
 
         - *gen* is current and ``state == "ready"``;
-        - no re-index token is in flight (``_reindex_inflight`` is empty) and
-          the latest ``serverStatus`` read ``quiescent: true``;
+        - ``watcher_health`` is not ``"error"``: with a failed watcher a
+          change on disk reaches rust-analyzer as no event, so its quiescence
+          says nothing about which tree the index holds;
+        - no re-index token is in flight (``_reindex_inflight`` is empty), no
+          quiescent HEAD read of the status callback is in flight
+          (``_quiescent_reads``; it reads a HEAD at least as new), and the
+          latest ``serverStatus`` read ``quiescent: true``;
         - *current_commit* differs from ``indexed_commit`` (which is known);
         - every Rust or Cargo path (``*.rs``, ``Cargo.toml``, ``Cargo.lock``)
           that differs between the two commits matches *current_commit* on
@@ -774,22 +794,25 @@ class AnalyzerManager:
         file counts as settled when its mtime is older than the settle
         interval while the server reports quiescent with no re-index token
         in flight.  The git calls run in a worker thread; any git failure
-        returns None.  The conditions are re-checked after the await.
+        returns None.  The conditions are re-checked after the await, and a
+        quiescent re-capture that took a read ticket meanwhile wins: this
+        returns None rather than write an older HEAD over it.
         """
         if not self._head_reconcilable(current_commit, gen):
             return None
         old_commit = self._indexed_commit
         assert old_commit is not None  # _head_reconcilable checked it
+        seq0 = self._head_read_seq
         matches = await asyncio.to_thread(
             _tree_matches_head, self._repository_root, old_commit, current_commit, time.time()
         )
         if not matches or not self._head_reconcilable(current_commit, gen):
             return None
-        if self._indexed_commit != old_commit:
+        # A quiescent re-capture that took a ticket during the git check read
+        # HEAD after *current_commit* was read, so its value is the newer
+        # one: yield to it rather than write over it.
+        if self._indexed_commit != old_commit or self._head_read_seq != seq0:
             return None
-        # A HEAD read already in flight (status callback) read this HEAD or
-        # an older one; bump the ticket so it cannot land after this write.
-        self._head_read_seq += 1
         self._indexed_commit = current_commit
         _log.info(
             "indexed_commit re-captured after HEAD moved over an indexed tree: %s -> %s",
@@ -803,7 +826,9 @@ class AnalyzerManager:
         return (
             gen == self._generation
             and self.state == STATE_READY
+            and self.watcher_health != "error"
             and not self._reindex_inflight
+            and not self._quiescent_reads
             and self._quiescent is True
             and self._indexed_commit is not None
             and current_commit != self._indexed_commit
@@ -930,7 +955,11 @@ class AnalyzerManager:
             self._recapture_pending = False
             self._head_read_seq += 1
             ticket = self._head_read_seq
-            new_commit = await self._read_head_commit()
+            self._quiescent_reads += 1
+            try:
+                new_commit = await self._read_head_commit()
+            finally:
+                self._quiescent_reads -= 1
             if gen != self._generation or ticket != self._head_read_seq:
                 return
             old_commit = self._indexed_commit
