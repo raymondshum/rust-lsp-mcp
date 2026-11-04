@@ -14,7 +14,14 @@ from rust_lsp_mcp.analyzer import (
     AnalyzerNotReadyError,
     AnalyzerTornDownError,
 )
-from rust_lsp_mcp.core import cap_list_results, get_manager, mcp, require_ready, symbol_to_external
+from rust_lsp_mcp.core import (
+    MAX_LIST_RESULTS,
+    cap_list_results,
+    get_manager,
+    mcp,
+    require_ready,
+    symbol_to_external,
+)
 from rust_lsp_mcp.envelope import lsp_failure, not_found, not_ready, ok
 
 _log = logging.getLogger(__name__)
@@ -25,7 +32,9 @@ async def find_symbol(name: str) -> dict[str, Any]:
     """Resolve a Rust symbol name to its workspace position(s).
 
     Runs a workspace-symbol query (fuzzy) against the live rust-analyzer index
-    and returns all matching candidates.  Positions are 1-indexed (line and
+    and returns all matching candidates of every symbol kind: functions,
+    methods, constants and modules as well as types (rust-analyzer's
+    ``all_symbols`` search kind, SW-05).  Positions are 1-indexed (line and
     character), workspace-relative file paths.
 
     Args:
@@ -34,11 +43,17 @@ async def find_symbol(name: str) -> dict[str, Any]:
 
     Returns a ``{status, ...}`` envelope:
 
-    - ``ok`` + ``results`` list — one or more candidates found.  Also always
-      carries ``total`` (the full candidate count, before any cap) and
-      ``truncated`` (``true`` only when the list exceeded ``MAX_LIST_RESULTS``
-      == 200, in which case only the first 200 candidates, in existing order,
-      are returned).  Each candidate::
+    - ``ok`` + ``results`` list — one or more candidates found, at most
+      ``MAX_LIST_RESULTS`` == 200.  Also always carries ``total`` and
+      ``truncated``.  ``total`` counts the in-workspace candidates: the items
+      rust-analyzer returned, minus any that resolve outside the workspace
+      (dependency and std symbols), before the 200 cap.  ``truncated`` is
+      ``true`` when rust-analyzer returned more than 200 items, counted before
+      that filter; only the first 200 in-workspace candidates, in existing
+      order, are returned.  The server is asked for at most 201 items, one
+      past the cap, so when ``truncated`` is ``true`` ``total`` is a lower
+      bound (at most 201, and less when some items were dropped as outside
+      the workspace).  Each candidate::
 
           {
             "name":      str,          # symbol name as declared
@@ -94,7 +109,10 @@ async def find_symbol(name: str) -> dict[str, Any]:
         guard = require_ready()
         return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
     except AnalyzerTornDownError:
-        return not_ready(TORN_DOWN_RETRY_MESSAGE)
+        # A death mid-request also tears the run down (SW-06): re-consult
+        # require_ready() so state == "error" maps to the refresh envelope.
+        guard = require_ready()
+        return guard if guard is not None else not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("find_symbol: LSP error for query %r", name)
         return lsp_failure(exc)
@@ -129,4 +147,8 @@ async def find_symbol(name: str) -> dict[str, Any]:
     # at MAX_LIST_RESULTS (preserving order) rather than silently dumping an
     # unbounded list.
     capped, total, truncated = cap_list_results(results)
+    # SW-05: rust-analyzer stops at MAX_LIST_RESULTS + 1 items, and the
+    # workspace filter above can drop some of them, so the cap alone can miss
+    # that rust-analyzer had more than 200 matches.  Count the server's items.
+    truncated = truncated or len(raw) > MAX_LIST_RESULTS
     return ok(results=capped, total=total, truncated=truncated)

@@ -12,6 +12,8 @@ Test coverage:
       ``state == STATE_ERROR`` and ``error_message`` carries the exception text.
     - ``status`` / ``analyzer_status`` surface the error via their ``state`` /
       ``analyzer_error`` fields.
+    - ``status`` surfaces ``analyzer_health == "error"`` (SW-07) while
+      ``state`` stays ``ready``.
     - ``core.require_ready()`` returns an ``error`` envelope (not ``not_ready``)
       when the manager is errored, mentioning the reason and the ``refresh``
       recovery path.
@@ -178,6 +180,40 @@ class TestStatusReportsAnalyzerError:
         assert result["status"] == "ok"
         assert result["state"] == STATE_ERROR
         assert result["analyzer_error"] == "RuntimeError: boom"
+
+
+class TestStatusReportsHealthErrorWhileReady:
+    def test_health_error_surfaces_while_state_stays_ready(self) -> None:
+        """SW-07: a failed workspace load reports health "error" through
+        ``status`` but leaves ``state`` at ``ready`` (the server still answers
+        queries) and the gate open."""
+        import rust_lsp_mcp.core as core_mod
+        import rust_lsp_mcp.tools.status as status_mod
+
+        mgr = _errored_manager_stub()
+        mgr.state = STATE_READY
+        mgr._error = None
+        mgr._lsp = object()  # ty: ignore[invalid-assignment]
+
+        async def _record() -> None:
+            mgr._generation = 0
+            await mgr._make_status_handler(0)("error", "Failed to load workspaces")
+
+        asyncio.run(_record())
+        with (
+            patch.object(core_mod, "_manager", mgr),
+            patch.object(status_mod, "doc_store_state", return_value=("building", None)),
+        ):
+            result = asyncio.run(status_mod.status())
+            guard = core_mod.require_ready()
+
+        assert result["status"] == "ok"
+        assert result["state"] == STATE_READY
+        assert result["analyzer_health"] == "error"
+        assert result["analyzer_health_message"] == "Failed to load workspaces"
+        assert result["analyzer_error"] is None
+        assert result["analyzer_exit_code"] is None
+        assert guard is None
 
 
 class TestAnalyzerStatusReportsError:

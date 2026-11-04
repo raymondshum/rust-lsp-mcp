@@ -35,6 +35,18 @@ async def status() -> dict[str, Any]:
                            ``refresh`` to retry.
     - ``analyzer_error``  — diagnostic message when ``state == "error"``, else
                            ``null``.
+    - ``analyzer_health`` — rust-analyzer's own health report from its
+                           latest ``experimental/serverStatus`` notification:
+                           ``"ok"``, ``"warning"`` or ``"error"`` (e.g. a
+                           failed workspace load), or ``null`` before the
+                           first report.  ``"error"`` can coexist with
+                           ``state == "ready"``: the server answers queries,
+                           but over an incomplete workspace.
+    - ``analyzer_health_message`` — the message of that report, or ``null``.
+    - ``analyzer_exit_code`` — exit code of a rust-analyzer process that died
+                           without a shutdown request (``state`` is then
+                           ``"error"``), else ``null``.  Cleared by
+                           ``refresh``.
     - ``indexed_commit`` — git HEAD hash captured at analyzer start and
                            re-captured when a watcher-driven re-index
                            completes, or ``null`` if not yet captured or git
@@ -132,6 +144,9 @@ async def status() -> dict[str, Any]:
     indexing_started_at: str | None = mgr.indexing_started_at if mgr is not None else None
     analyzer_progress: str | None = mgr.progress_message if mgr is not None else None
     analyzer_progress_at: str | None = mgr.progress_at if mgr is not None else None
+    analyzer_health: str | None = mgr.analyzer_health if mgr is not None else None
+    analyzer_health_message: str | None = mgr.analyzer_health_message if mgr is not None else None
+    analyzer_exit_code: int | None = mgr.analyzer_exit_code if mgr is not None else None
     # Package versions are cheap to resolve (importlib.metadata reads
     # installed distribution metadata, no I/O beyond that) — compute fresh
     # per call rather than caching, unlike rust_analyzer_version's subprocess.
@@ -160,6 +175,9 @@ async def status() -> dict[str, Any]:
     return ok(
         state=state,
         analyzer_error=analyzer_error,
+        analyzer_health=analyzer_health,
+        analyzer_health_message=analyzer_health_message,
+        analyzer_exit_code=analyzer_exit_code,
         indexed_commit=indexed_commit,
         current_commit=current_commit,
         stale=stale,

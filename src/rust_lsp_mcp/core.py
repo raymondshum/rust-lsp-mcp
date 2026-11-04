@@ -36,7 +36,13 @@ from rust_lsp_mcp.analyzer import (
     analyzer_lifespan,
 )
 from rust_lsp_mcp.doc_store import clear_doc_store, init_doc_store_background
-from rust_lsp_mcp.envelope import RECOVERY_FIX_INPUT, RECOVERY_REFRESH, error, not_ready
+from rust_lsp_mcp.envelope import (
+    RECOVERY_FIX_INPUT,
+    RECOVERY_REFRESH,
+    analyzer_not_running,
+    error,
+    not_ready,
+)
 from rust_lsp_mcp.positions import lsp_to_external
 from rust_lsp_mcp.settings import Settings, get_settings
 
@@ -234,11 +240,20 @@ def require_ready() -> dict[str, Any] | None:
     Returns:
         An ``error`` envelope (``recovery: "refresh"``) if the analyzer's
         background run failed (``state == "error"`` — permanent until
-        ``refresh`` recovers it), a ``not_ready`` envelope
+        ``refresh`` recovers it): ``rust-analyzer is not running (exited with
+        code <n>); call refresh`` when the process died, else the "failed to
+        start" message, a ``not_ready`` envelope
         (``recovery: "poll_status"``) if it is still indexing or the manager
         has not started, else ``None`` once ready.
     """
     if _manager is not None and _manager.state == STATE_ERROR:
+        # SW-06: a recorded exit code means the launched process exited
+        # (a missing binary included: multilspy runs it through /bin/sh -c,
+        # so that is the shell exiting 127); without one the run raised
+        # before any process existed.
+        exit_code = _manager.analyzer_exit_code
+        if exit_code is not None:
+            return analyzer_not_running(exit_code)
         return error(
             "The analyzer failed to start and cannot serve navigation queries: "
             f"{_manager.error_message or 'unknown error'}. "

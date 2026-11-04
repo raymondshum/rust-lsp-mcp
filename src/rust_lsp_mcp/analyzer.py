@@ -11,8 +11,12 @@ Responsibilities:
        - Spawns ``start_server()`` as a background asyncio Task so the MCP server
          remains responsive while indexing is in progress.
        - Maintains a ``state`` flag (``"indexing"`` → ``"ready"``, or ``"error"``
-         if the background run raises) that flips to ``"ready"`` only after the
-         context is live (i.e. rust-analyzer reports quiescent).
+         if the background run raises or rust-analyzer exits on its own) that
+         flips to ``"ready"`` only after the context is live (i.e.
+         rust-analyzer reports quiescent).
+       - Records rust-analyzer's own health report (``analyzer_health``), its
+         exit code after a death (``analyzer_exit_code``) and its last stderr
+         lines.
        - Exposes narrow LSP delegate methods (Phase 2 / Phase 3-4) so tools
          can call the live analyzer without accessing the raw LSP object.
        - Provides a clean ``shutdown()`` coroutine for teardown.
@@ -64,16 +68,20 @@ Instantiation note (verified against multilspy 0.0.15 source):
 """
 
 import asyncio
+import collections
 import contextlib
 import logging
+import pathlib
 import subprocess
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import PurePath
 from typing import Any, TypeVar, cast
 
 from multilspy.language_servers.rust_analyzer.rust_analyzer import RustAnalyzer
 from multilspy.lsp_protocol_handler.lsp_types import InitializeParams
+from multilspy.lsp_protocol_handler.server import StopLoopException
 from multilspy.multilspy_config import Language, MultilspyConfig
 from multilspy.multilspy_logger import MultilspyLogger
 from multilspy.multilspy_types import Hover, Location, UnifiedSymbolInformation
@@ -97,6 +105,48 @@ _T = TypeVar("_T")
 # ``PatchedRustAnalyzer``: multilspy awaits notification handlers with the
 # notification's ``params`` (``lsp_protocol_handler/server.py`` line 557).
 ProgressHandler = Callable[[Any], Coroutine[Any, Any, None]]
+
+# Signature of the health callback a manager hands to ``PatchedRustAnalyzer``
+# as ``status_handler``: awaited with the ``health`` (``"ok"``, ``"warning"``
+# or ``"error"``) and ``message`` fields of each ``experimental/serverStatus``
+# notification.
+StatusHandler = Callable[[Any, Any], Coroutine[Any, Any, None]]
+
+# How many rust-analyzer stderr lines the manager keeps, and how many of the
+# newest ones go into the error message after the process dies.
+STDERR_TAIL_LINES = 200
+STDERR_MESSAGE_LINES = 20
+
+# Poll interval while waiting for multilspy to assign ``lsp.server.process``
+# (None until ``LanguageServerHandler.start()`` spawns the process,
+# ``lsp_protocol_handler/server.py`` line 217).
+PROCESS_POLL_SECONDS: float = 0.05
+
+# Interval at which the exit watch reads ``process.returncode`` beside
+# ``process.wait()``.  On CPython 3.12 (the image) ``wait()`` resolves only
+# after every pipe closes, and a proc-macro-srv child holding rust-analyzer's
+# inherited stderr pipe keeps it open after rust-analyzer dies; the child
+# watcher sets ``returncode`` as soon as the process exits.
+EXIT_POLL_SECONDS: float = 0.5
+
+# Exit status /bin/sh reports when it cannot find the command.  multilspy
+# launches rust-analyzer through ``create_subprocess_shell``, so a missing
+# binary is the shell exiting 127, not an exception from the entry.
+SHELL_COMMAND_NOT_FOUND = 127
+
+# How long the death path waits for the stderr reader to reach EOF, so the
+# error message carries the dying process's last lines.  Module-level so
+# tests can shorten it.
+STDERR_DRAIN_SECONDS: float = 1.0
+
+
+class _AnalyzerProcessExited(Exception):
+    """Raised inside the ready context to leave it after rust-analyzer died.
+
+    Leaving by exception skips multilspy's own exit path (a ``shutdown``
+    request to a dead process); ``_run``'s ``finally`` force-stops instead.
+    Never escapes ``_run``.
+    """
 
 
 # rust-analyzer work-done progress tokens whose ``end`` means the index now
@@ -195,12 +245,15 @@ class PatchedRustAnalyzer(RustAnalyzer):
         repository_root_path: str,
         rust_analyzer_bin: str,
         progress_handler: ProgressHandler | None = None,
+        status_handler: StatusHandler | None = None,
     ) -> None:
         # Store binary path before super().__init__ so the override can see it.
         # RustAnalyzer.__init__ calls setup_runtime_dependencies immediately.
         self._rust_analyzer_bin = rust_analyzer_bin
         # Registered for ``$/progress`` by _get_initialize_params (see there).
         self._progress_handler = progress_handler
+        # Called by _on_server_status with each health report (SW-07).
+        self._status_handler = status_handler
         super().__init__(config, logger, repository_root_path)
 
     def setup_runtime_dependencies(  # type: ignore[override]
@@ -211,7 +264,7 @@ class PatchedRustAnalyzer(RustAnalyzer):
         return self._rust_analyzer_bin
 
     def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
-        """Override three things in multilspy's initialize parameters.
+        """Override multilspy's initialize parameters and two notification handlers.
 
         **Position encoding.** Advertise UTF-32 to ensure Unicode codepoint offsets.
 
@@ -245,18 +298,113 @@ class PatchedRustAnalyzer(RustAnalyzer):
         indexing progress event reaches the handler.  Rebinding after
         ``start_server()`` yields would be too late: the yield comes after the
         ready wait, so all indexing progress would already be lost.
+
+        **Symbol search (SW-05).** Set ``workspace.symbol.search.kind`` to
+        ``"all_symbols"`` (multilspy bundles ``"only_types"``, so a
+        ``find_symbol`` query never returned a function) and ``limit`` to
+        ``MAX_LIST_RESULTS + 1``: one item past the tool's cap, so
+        ``cap_list_results`` can see that rust-analyzer had more than 200
+        matches and set ``truncated``.
+
+        **No ``cargo check`` on load (SW-09).** Set ``checkOnSave`` to
+        ``False``.  The server exposes no diagnostics from that check, and the
+        check holds the cargo lock on the shared target directory.
+
+        **``cargo.cfgs`` removed.** multilspy bundles it as ``{}``, which
+        current rust-analyzer rejects ("invalid type: map, expected a
+        sequence") with a ``"warning"`` health report on every load; that
+        masked the health signal below.
+
+        **Health report (SW-07).** Bind ``experimental/serverStatus`` to
+        :meth:`_on_server_status` in place of multilspy's
+        ``check_experimental_status`` closure (registered at line 155, before
+        this method runs; same timing argument as ``$/progress`` above).
         """
+        # Deferred import: core imports this module at load time.
+        from rust_lsp_mcp.core import MAX_LIST_RESULTS
+
         params = super()._get_initialize_params(repository_absolute_path)
         # The bundled JSON always carries capabilities.general and
-        # initializationOptions.files; assert-fail loudly rather than silently
-        # no-op if multilspy ever restructures them.
+        # initializationOptions.files / .workspace.symbol.search; assert-fail
+        # loudly rather than silently no-op if multilspy ever restructures them.
         raw = cast(dict[str, Any], params)
         general = raw["capabilities"]["general"]
         general["positionEncodings"] = ["utf-32", "utf-16"]
-        raw["initializationOptions"]["files"]["watcher"] = "server"
+        options = raw["initializationOptions"]
+        options["files"]["watcher"] = "server"
+        search = options["workspace"]["symbol"]["search"]
+        search["kind"] = "all_symbols"
+        search["limit"] = MAX_LIST_RESULTS + 1
+        options["checkOnSave"] = False
+        # multilspy bundles cargo.cfgs as {}; rust-analyzer wants a list and
+        # reports health "warning" on every load, masking real warnings.
+        options["cargo"].pop("cfgs", None)
         if self._progress_handler is not None:
             self.server.on_notification("$/progress", self._progress_handler)
+        self.server.on_notification("experimental/serverStatus", self._on_server_status)
         return params
+
+    async def _on_server_status(self, params: Any) -> None:
+        """Handle rust-analyzer's ``experimental/serverStatus`` notification.
+
+        Re-implements multilspy's ``check_experimental_status`` (a closure
+        inside ``start_server()``, so it cannot be called from here): a
+        ``quiescent: true`` report sets ``server_ready``, which releases
+        ``start_server()``'s ready wait.  Then passes the report's ``health``
+        and ``message`` to the ``status_handler`` given to the constructor.
+        """
+        if not isinstance(params, dict):
+            return
+        if params.get("quiescent") is True:
+            self.server_ready.set()
+        if self._status_handler is not None:
+            await self._status_handler(params.get("health"), params.get("message"))
+
+    @contextlib.contextmanager
+    def open_file(self, relative_file_path: str) -> Iterator[None]:
+        """Wrap multilspy's ``open_file`` so a failed request releases its buffer (SW-08).
+
+        multilspy's ``open_file`` (``language_server.py`` lines 198 to 249)
+        counts the users of one file in ``open_file_buffers[uri].ref_count``
+        and sends ``didClose`` when the count reaches zero, but has no
+        ``try/finally`` around its ``yield``: a request that raised (or was
+        cancelled) left the count above zero, so the file stayed open and its
+        buffer never refreshed from disk again.
+
+        On any exception from the body, ``asyncio.CancelledError`` included,
+        this decrements the count by one; only when it reaches zero does it
+        send ``didClose`` and remove the entry.  Then it re-raises.  While the
+        count is above zero another request still holds the buffer, and
+        multilspy's exit path for that request decrements the entry (it would
+        raise ``KeyError`` if the entry were gone).  The success path is
+        multilspy's, unchanged.
+        """
+        # Same URI derivation as multilspy's open_file.
+        absolute_file_path = str(PurePath(self.repository_root_path, relative_file_path))
+        uri = pathlib.Path(absolute_file_path).as_uri()
+        inner = super().open_file(relative_file_path)
+        inner.__enter__()
+        try:
+            yield
+        except BaseException as exc:
+            # Close multilspy's suspended generator.  The exception re-raises
+            # at its yield, before its decrement, so this changes nothing; the
+            # cleanup below is the decrement it skipped.
+            inner.__exit__(type(exc), exc, exc.__traceback__)
+            # multilspy's buffer dictionary is LanguageServer.open_file_buffers
+            # (language_server.py line 175), keyed by file URI.
+            buffer = self.open_file_buffers.get(uri)
+            if buffer is not None:
+                buffer.ref_count -= 1
+                if buffer.ref_count <= 0:
+                    # Remove the entry first: a close that raises (a broken
+                    # pipe to a dead process) must not strand a zero-count
+                    # entry that a later open would reuse without didOpen.
+                    del self.open_file_buffers[uri]
+                    self.server.notify.did_close_text_document({"textDocument": {"uri": uri}})
+            raise
+        else:
+            inner.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +441,10 @@ class AnalyzerManager:
     _progress_message: str | None = None
     _progress_at: str | None = None
     _head_read_seq: int = 0
+    # Health and process-death fields (SW-06, SW-07), same reason.
+    analyzer_health: str | None = None
+    analyzer_health_message: str | None = None
+    analyzer_exit_code: int | None = None
 
     def __init__(self, rust_analyzer_bin: str, repository_root: str) -> None:
         self._rust_analyzer_bin = rust_analyzer_bin
@@ -319,6 +471,17 @@ class AnalyzerManager:
         # ticket is still the latest, so of two overlapping re-captures the
         # older read can never land last.
         self._head_read_seq: int = 0
+        # rust-analyzer's own health report from experimental/serverStatus
+        # ("ok", "warning" or "error") and its message; None until the first
+        # report of a run.  Reset by restart().
+        self.analyzer_health: str | None = None
+        self.analyzer_health_message: str | None = None
+        # Exit code of a rust-analyzer process that died without a shutdown
+        # request; None while it runs, before it starts, and after restart().
+        self.analyzer_exit_code: int | None = None
+        # The last STDERR_TAIL_LINES lines of the current run's rust-analyzer
+        # stderr; replaced with an empty deque at the top of every _run.
+        self._stderr_lines: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
         # rust-analyzer `--version` output, captured once by start();
         # None until captured, or if capture fails.  Never re-captured by
         # restart() — the binary underlying rust_analyzer_bin cannot change
@@ -381,8 +544,10 @@ class AnalyzerManager:
         """Human-readable ``"{ExceptionType}: {message}"`` if the last run failed.
 
         ``None`` while indexing/ready, or after ``restart()`` has cleared it.
-        Only set (gen-guarded) by ``_run``'s ``except Exception`` branch — never
-        by ``asyncio.CancelledError``, since cancellation is not a failure.
+        Set (gen-guarded) by ``_run``'s ``except Exception`` branch, or by
+        ``_record_process_exit`` as ``rust-analyzer exited with code <n>; last
+        stderr: <lines>`` when the process dies — never by
+        ``asyncio.CancelledError``, since cancellation is not a failure.
         """
         return self._error
 
@@ -531,6 +696,146 @@ class AnalyzerManager:
 
         return _on_progress
 
+    def _make_status_handler(self, gen: int) -> StatusHandler:
+        """Build the health callback for the run spawned under *gen* (SW-07).
+
+        ``_run`` passes the result to ``PatchedRustAnalyzer`` as
+        ``status_handler``; its ``_on_server_status`` awaits it with the
+        ``health`` and ``message`` of every ``experimental/serverStatus``
+        notification.  The callback records both as ``analyzer_health`` and
+        ``analyzer_health_message`` and logs a change of health at warning as
+        ``rust-analyzer health <value>: <message>`` (the first report of a run
+        is logged only when it is not ``"ok"``).  A superseded run
+        (``gen != self._generation``) records nothing.
+        """
+
+        async def _on_status(health: Any, message: Any) -> None:
+            if gen != self._generation:
+                return
+            new_health = str(health) if health is not None else None
+            new_message = str(message) if message is not None else None
+            previous = self.analyzer_health
+            self.analyzer_health = new_health
+            self.analyzer_health_message = new_message
+            if new_health != previous and not (previous is None and new_health == "ok"):
+                _log.warning("rust-analyzer health %s: %s", new_health, new_message or "")
+
+        return _on_status
+
+    def _make_stderr_reader(
+        self,
+        lsp: PatchedRustAnalyzer,
+        lines: collections.deque[str],
+        started: asyncio.Event,
+        done: asyncio.Event,
+    ) -> Callable[[], Coroutine[Any, Any, None]]:
+        """Build the replacement for multilspy's ``run_forever_stderr``.
+
+        multilspy's reader (``lsp_protocol_handler/server.py`` lines 391 to
+        400) passes each stderr line to the handler's logger, which
+        ``RustAnalyzer`` leaves unset, so the lines were dropped.  ``_run``
+        binds this reader on ``lsp.server`` as ``run_forever_stderr`` before
+        ``start_server()``; ``LanguageServerHandler.start()`` spawns it as a
+        task right after it assigns ``process`` (line 230).  It keeps each
+        line in *lines* (the run's ``deque``, last ``STDERR_TAIL_LINES``
+        lines), logs it at debug as ``rust-analyzer stderr: <line>`` (at info,
+        ``RA_LOG=info`` grew the log to 271 MB and stalled indexing).  A line
+        past the stream limit makes ``readline()`` discard the buffered data and
+        raise ``ValueError``; the reader records a marker line and keeps
+        draining.  It sets
+        *started* on entry and *done* when it stops (EOF, or the process
+        handle cleared by ``stop()``).
+        """
+        server = lsp.server
+
+        async def run_forever_stderr() -> None:
+            started.set()
+            try:
+                while (
+                    server.process is not None
+                    and server.process.stderr is not None
+                    and not server.process.stderr.at_eof()
+                ):
+                    try:
+                        raw = await server.process.stderr.readline()
+                    except ValueError:
+                        # A line past the stream limit (64 KiB): readline()
+                        # has already discarded the buffered data and raises.
+                        # Note it and keep draining so the pipe never fills.
+                        raw = b"<over-long stderr line discarded>"
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    lines.append(line)
+                    _log.debug("rust-analyzer stderr: %s", line)
+            except (BrokenPipeError, ConnectionResetError, StopLoopException):
+                pass
+            finally:
+                done.set()
+
+        return run_forever_stderr
+
+    @staticmethod
+    async def _await_process_exit(lsp: PatchedRustAnalyzer) -> int:
+        """Return the exit code of *lsp*'s rust-analyzer process once it exits.
+
+        ``lsp.server.process`` is None until multilspy's
+        ``LanguageServerHandler.start()`` assigns the ``asyncio`` subprocess
+        handle (``lsp_protocol_handler/server.py`` line 217, inside
+        ``start_server()``'s entry), so this polls for the handle every
+        ``PROCESS_POLL_SECONDS``.  Then it awaits ``process.wait()`` and, every
+        ``EXIT_POLL_SECONDS``, reads ``process.returncode`` directly: on
+        CPython 3.12 ``wait()`` resolves only after every pipe closes, so a
+        proc-macro-srv child still holding the inherited stderr pipe would
+        hide the death.  Runs until cancelled if no process is ever assigned.
+        """
+        while (process := lsp.server.process) is None:
+            await asyncio.sleep(PROCESS_POLL_SECONDS)
+        wait_task = asyncio.ensure_future(process.wait())
+        try:
+            while not wait_task.done():
+                if process.returncode is not None:
+                    return process.returncode
+                await asyncio.wait({wait_task}, timeout=EXIT_POLL_SECONDS)
+            return wait_task.result()
+        finally:
+            if not wait_task.done():
+                wait_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wait_task
+
+    async def _record_process_exit(
+        self, gen: int, code: int, stderr_started: asyncio.Event, stderr_done: asyncio.Event
+    ) -> None:
+        """Publish a rust-analyzer death for the run spawned under *gen* (SW-06).
+
+        Waits up to ``STDERR_DRAIN_SECONDS`` for the stderr reader to reach EOF
+        (only if it started), so the message carries the dying process's last
+        lines.  Then, if *gen* is still current and no shutdown was requested,
+        sets ``state = "error"``, ``analyzer_exit_code`` and ``_error`` (``rust-analyzer
+        exited with code <n>; last stderr: <up to 20 lines>``), logs at error,
+        and sets ``_shutdown_event`` so a request already in flight on the dead
+        process ends (``_race_teardown``) instead of awaiting a reply forever.
+        """
+        if stderr_started.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stderr_done.wait(), STDERR_DRAIN_SECONDS)
+        if gen != self._generation or self._shutdown_event.is_set():
+            return
+        tail = list(self._stderr_lines)[-STDERR_MESSAGE_LINES:]
+        stderr_text = "\n".join(tail) if tail else "(none)"
+        self.state = STATE_ERROR
+        self.analyzer_exit_code = code
+        if code == SHELL_COMMAND_NOT_FOUND:
+            self._error = (
+                f"rust-analyzer binary not found (shell exit code {code}); "
+                f"last stderr: {stderr_text}"
+            )
+        else:
+            self._error = f"rust-analyzer exited with code {code}; last stderr: {stderr_text}"
+        _log.error("AnalyzerManager: %s", self._error)
+        self._shutdown_event.set()
+
     async def _capture_rust_analyzer_version(self) -> None:
         """Capture ``<rust_analyzer_bin> --version`` into ``_rust_analyzer_version``.
 
@@ -579,23 +884,44 @@ class AnalyzerManager:
                 races ahead of this run reaching quiescence, ``gen`` no longer
                 matches ``self._generation`` by the time we get there.  A
                 superseded run writes nothing (no ``state``/``_lsp``/
-                ``_ready_event``) and exits the ``async with`` immediately —
-                which drives multilspy's own clean shutdown()/stop() sequence
-                for that (doomed) run.
+                ``_ready_event``) and exits the ``start_server()`` context
+                immediately — which drives multilspy's own clean
+                shutdown()/stop() sequence for that (doomed) run.
+
+        Process death (SW-06): the ``start_server()`` entry runs as a task
+        raced against :meth:`_await_process_exit` with
+        ``asyncio.wait(..., return_when=FIRST_COMPLETED)``, and after
+        readiness the run races ``_shutdown_event`` against the same process
+        wait.  When rust-analyzer exits and no shutdown was requested, before
+        or after readiness, :meth:`_record_process_exit` sets ``state =
+        "error"`` and ``analyzer_exit_code`` and the run falls through to the
+        teardown below.  A start failure that raises out of the entry
+        before ``lsp.server.process`` is set stays on the ``except
+        Exception`` "failed to start" path.  A missing binary is not such a
+        failure: multilspy launches through ``/bin/sh -c``, so it is the
+        shell exiting 127, recorded on the death path as "rust-analyzer
+        binary not found".
+
+        Stderr: ``lsp.server.run_forever_stderr`` is rebound to
+        :meth:`_make_stderr_reader`'s reader before the entry, so the run's
+        stderr lands in ``_stderr_lines`` and the log.
 
         Teardown: on any exit path, ``finally`` clears ``_lsp`` (identity-
         guarded — only if it still points at *this* run's ``lsp``) and then
         unconditionally, idempotently force-stops the subprocess via
         ``lsp.server.stop()``.  This is required because multilspy 0.0.15's
         ``start_server()`` has no try/finally around its ``yield``: a
-        cancellation (e.g. a drain timeout) or a pre-yield failure would
-        otherwise skip multilspy's own teardown and leak the rust-analyzer
-        process.  ``server.stop()`` is a no-op on an already-clean exit
-        (multilspy already called it; the process handle is already None).
+        cancellation (e.g. a drain timeout), a pre-yield failure or a dead
+        process would otherwise skip multilspy's own teardown and leak the
+        rust-analyzer process.  ``server.stop()`` is a no-op on an
+        already-clean exit (multilspy already called it; the process handle
+        is already None).
         """
         self._indexing_started_at = _utc_now_iso()
         self._progress_message = None
         self._progress_at = None
+        stderr_lines: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
+        self._stderr_lines = stderr_lines
         _log.info("AnalyzerManager: analyzer start (gen %d)", gen)
         # Capture the commit being indexed before starting the server.
         await self._capture_head_commit()
@@ -615,6 +941,7 @@ class AnalyzerManager:
         # ``except Exception`` and sets ``state = STATE_ERROR`` instead of
         # leaving the manager stuck in ``"indexing"`` forever.
         lsp: PatchedRustAnalyzer | None = None
+        exit_watch: asyncio.Task[int] | None = None
         try:
             config = MultilspyConfig(code_language=Language.RUST)
             logger = MultilspyLogger()
@@ -624,26 +951,65 @@ class AnalyzerManager:
                 repository_root_path=self._repository_root,
                 rust_analyzer_bin=self._rust_analyzer_bin,
                 progress_handler=self._make_progress_handler(gen),
+                status_handler=self._make_status_handler(gen),
+            )
+            stderr_started = asyncio.Event()
+            stderr_done = asyncio.Event()
+            # Instance attribute shadows the method; start() looks it up on
+            # the instance (``self.run_forever_stderr()``, server.py line 230).
+            cast(Any, lsp.server).run_forever_stderr = self._make_stderr_reader(
+                lsp, stderr_lines, stderr_started, stderr_done
             )
             _log.info("AnalyzerManager: workspace load begun (%s)", self._repository_root)
-            async with lsp.start_server():
-                # We are now inside the context: indexing is complete (quiescent).
+            server_cm = lsp.start_server()
+            exit_watch = asyncio.create_task(self._await_process_exit(lsp))
+            enter_task = asyncio.ensure_future(server_cm.__aenter__())
+            try:
+                await asyncio.wait({enter_task, exit_watch}, return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                enter_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await enter_task
+                raise
+            if not enter_task.done():
+                # rust-analyzer died before quiescence: the entry would wait
+                # on server_ready forever.
+                enter_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await enter_task
+                await self._record_process_exit(
+                    gen, exit_watch.result(), stderr_started, stderr_done
+                )
+                return
+            if enter_task.exception() is not None and exit_watch.done():
+                # The entry failed because the process died under it (e.g. a
+                # broken pipe on initialize): report the death, not the
+                # symptom.
+                await self._record_process_exit(
+                    gen, exit_watch.result(), stderr_started, stderr_done
+                )
+                return
+            enter_task.result()  # re-raise an entry failure -> except Exception
+
+            # We are now inside the context: indexing is complete (quiescent).
+            # The block below mirrors ``async with``'s exit protocol (it has
+            # no ``return``: a ``try`` body that returns skips ``else``).
+            try:
                 if gen != self._generation:
                     _log.info(
                         "AnalyzerManager: superseded run (gen %d != current %d); tearing down",
                         gen,
                         self._generation,
                     )
-                    return
-                # Gen-check and the three writes below are one synchronous
-                # block with no await between them — inserting an await here
-                # would reopen the race this check exists to close.
-                self._lsp = lsp
-                self.state = STATE_READY
-                self._ready_event.set()
-                _log.info("AnalyzerManager: rust-analyzer ready (state=ready)")
-                # Hold the context open until shutdown is requested.
-                await self._shutdown_event.wait()
+                else:
+                    await self._hold_ready(gen, lsp, exit_watch, stderr_started, stderr_done)
+            except BaseException as body_exc:
+                if not await server_cm.__aexit__(type(body_exc), body_exc, body_exc.__traceback__):
+                    raise
+            else:
+                await server_cm.__aexit__(None, None, None)
+        except _AnalyzerProcessExited:
+            pass
         except asyncio.CancelledError:
             _log.info("AnalyzerManager: background task cancelled")
             raise
@@ -657,6 +1023,10 @@ class AnalyzerManager:
                 self._error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            if exit_watch is not None:
+                exit_watch.cancel()
+                with contextlib.suppress(BaseException):
+                    await exit_watch
             # If construction failed, lsp is still None — there is no LSP object
             # to clear or subprocess to stop, so skip the whole teardown.
             if lsp is not None:
@@ -668,16 +1038,51 @@ class AnalyzerManager:
                     self._lsp = None
                 # DS-04: multilspy's start_server() has no try/finally around
                 # its yield; on cancellation mid-__aenter__ (or a pre-yield
-                # failure) its shutdown()/stop() never run and the
-                # rust-analyzer process leaks. server.stop() is multilspy's own
-                # idempotent teardown (a no-op after a normal exit — the
-                # process handle is already None). Covers every cancel window
-                # where a process handle exists; the one residual gap is a
-                # cancel landing *inside* multilspy's create_subprocess_shell
-                # before it assigns self.process, which is not reachable from
-                # here (no handle to terminate yet).
+                # failure, or a dead process) its shutdown()/stop() never run
+                # and the rust-analyzer process leaks. server.stop() is
+                # multilspy's own idempotent teardown (a no-op after a normal
+                # exit — the process handle is already None). Covers every
+                # cancel window where a process handle exists; the one
+                # residual gap is a cancel landing *inside* multilspy's
+                # create_subprocess_shell before it assigns self.process, which
+                # is not reachable from here (no handle to terminate yet).
                 with contextlib.suppress(Exception):
                     await lsp.server.stop()
+
+    async def _hold_ready(
+        self,
+        gen: int,
+        lsp: PatchedRustAnalyzer,
+        exit_watch: asyncio.Task[int],
+        stderr_started: asyncio.Event,
+        stderr_done: asyncio.Event,
+    ) -> None:
+        """Publish readiness for *gen*'s run and hold it until shutdown or process exit.
+
+        Called by ``_run`` inside the ``start_server()`` context once the
+        generation check passed.  Races ``_shutdown_event`` against
+        *exit_watch* with ``FIRST_COMPLETED``.  When the process exited and no
+        shutdown was requested, records the death and raises
+        ``_AnalyzerProcessExited`` so ``_run`` leaves the context without
+        multilspy's shutdown request to a dead process.
+        """
+        # The three writes below are one synchronous block with no await
+        # between them and the caller's gen-check — inserting an await here
+        # would reopen the race that check exists to close.
+        self._lsp = lsp
+        self.state = STATE_READY
+        self._ready_event.set()
+        _log.info("AnalyzerManager: rust-analyzer ready (state=ready)")
+        shutdown_wait = asyncio.create_task(self._shutdown_event.wait())
+        try:
+            await asyncio.wait({shutdown_wait, exit_watch}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            shutdown_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await shutdown_wait
+        if exit_watch.done() and not self._shutdown_event.is_set():
+            await self._record_process_exit(gen, exit_watch.result(), stderr_started, stderr_done)
+            raise _AnalyzerProcessExited
 
     async def _race_teardown(self, coro: Coroutine[Any, Any, _T], op: str) -> _T:
         """Await *coro*, aborting with AnalyzerTornDownError if this run is torn down.
@@ -1049,7 +1454,11 @@ class AnalyzerManager:
 
         Sequence:
             1. Acquire ``_lifecycle_lock``; if ``_closed``, log and return.
-            2. Set ``self.state = STATE_INDEXING`` (must be first after 1).
+            2. Set ``self.state = STATE_INDEXING`` (must be first after 1),
+               and clear ``_error``, ``analyzer_exit_code``,
+               ``analyzer_health`` and ``analyzer_health_message`` to None, so
+               a new run that fails before its process starts reports "failed
+               to start", not the previous run's exit code.
             3. Clear ``_indexed_commit`` to None so ``status`` reports an honest
                "unknown" during the re-index window instead of the *previous*
                cycle's commit (which would let ``stale`` read ``false`` mid-reindex).
@@ -1057,7 +1466,9 @@ class AnalyzerManager:
                bumps ``_generation``, which is the primary defence against a
                stale run publishing readiness after this point.
             5. Re-assert ``state = STATE_INDEXING`` and re-clear
-               ``_indexed_commit`` — defense-in-depth: the old run's
+               ``_error``, ``analyzer_exit_code``, ``analyzer_health``,
+               ``analyzer_health_message`` and ``_indexed_commit`` —
+               defense-in-depth: the old run's
                in-flight ``_capture_head_commit()`` may have landed during the
                drain window in step 4.  This is race-free because the old
                task is now provably done.
@@ -1077,8 +1488,11 @@ class AnalyzerManager:
             self.state = STATE_INDEXING
             # refresh (restart()) is the recovery path from an errored
             # analyzer — clear any stale failure the moment we commit to
-            # re-indexing.
+            # re-indexing.  The death and health fields go with it (SW-06).
             self._error = None
+            self.analyzer_exit_code = None
+            self.analyzer_health = None
+            self.analyzer_health_message = None
 
             # Step 3: forget the old indexed commit — during the re-index window
             # the previous value is no longer what's indexed; None → status
@@ -1094,6 +1508,9 @@ class AnalyzerManager:
             # state write) could otherwise have landed during the drain above.
             self.state = STATE_INDEXING
             self._error = None
+            self.analyzer_exit_code = None
+            self.analyzer_health = None
+            self.analyzer_health_message = None
             self._indexed_commit = None
 
             # Step 6: fresh events — old ones are spent.

@@ -117,6 +117,10 @@ class _FakeManager:
         self.indexing_started_at: str | None = None
         self.progress_message: str | None = None
         self.progress_at: str | None = None
+        # SW-06 / SW-07 health and exit fields read by status() and require_ready().
+        self.analyzer_health: str | None = None
+        self.analyzer_health_message: str | None = None
+        self.analyzer_exit_code: int | None = None
 
 
 def _fake_analyzer_lifespan_factory(manager: _FakeManager) -> Any:

@@ -164,7 +164,10 @@ async def hover(
         guard = require_ready()
         return guard if guard is not None else not_ready(INDEXING_RETRY_MESSAGE)
     except AnalyzerTornDownError:
-        return not_ready(TORN_DOWN_RETRY_MESSAGE)
+        # A death mid-request also tears the run down (SW-06): re-consult
+        # require_ready() so state == "error" maps to the refresh envelope.
+        guard = require_ready()
+        return guard if guard is not None else not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("hover: LSP error at %s:%d:%d", file, line, character)
         return lsp_failure(exc)

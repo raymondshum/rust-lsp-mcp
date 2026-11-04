@@ -111,7 +111,10 @@ def lsp_failure(exc: Exception, context: str = "") -> dict[str, Any]:
 
     Shared by every tool's catch-all ``except Exception`` fallback (reached
     only after ``require_ready()`` has already passed, i.e. the analyzer is
-    healthy). Preserves the existing ``"LSP error: ..."`` prefix — tests
+    healthy). When the analyzer is in ``state == "error"`` by the time the
+    exception arrives (rust-analyzer died during the request), it returns
+    ``require_ready()``'s ``refresh`` envelope instead, because the text below
+    would claim a running analyzer. Preserves the existing ``"LSP error: ..."`` prefix — tests
     assert on it (e.g. ``tests/test_goto_definition.py``,
     ``tests/test_document_symbols.py``) — and appends neutral guidance: this
     is an unexpected internal error, the analyzer is still running, retry the
@@ -127,9 +130,42 @@ def lsp_failure(exc: Exception, context: str = "") -> dict[str, Any]:
             call under ``include_declaration=True``), mirroring the existing
             ``"LSP error (definition): ..."`` distinction.
     """
+    # The analyzer can fail between require_ready() and here (the process
+    # died mid-request, SW-06): then the "still running, retry" text would be
+    # false, so return require_ready()'s refresh envelope instead.  Deferred
+    # import: core imports this module at load time.
+    from rust_lsp_mcp import core
+    from rust_lsp_mcp.analyzer import STATE_ERROR
+
+    manager = core.get_manager()
+    if manager is not None and manager.state == STATE_ERROR:
+        guard = core.require_ready()
+        if guard is not None:
+            return guard
     prefix = f"LSP error ({context})" if context else "LSP error"
     return error(
         f"{prefix}: {exc}. This is an unexpected internal error; the analyzer "
         "is still running. Retry the request once.",
         recovery=RECOVERY_UNKNOWN,
+    )
+
+
+def analyzer_not_running(exit_code: int) -> dict[str, Any]:
+    """Return the ``error`` envelope for a rust-analyzer process that exited (SW-06).
+
+    ``require_ready()`` returns it while ``state == "error"`` and the manager
+    recorded an ``analyzer_exit_code``: the process died without a shutdown
+    request, before or after readiness. Recovery is ``refresh``.
+    """
+    if exit_code == 127:
+        # multilspy launches through /bin/sh -c: 127 is the shell's "command
+        # not found", so refresh alone cannot help.
+        return error(
+            "rust-analyzer binary not found (shell exit code 127); check "
+            "RLM_RUST_ANALYZER_BIN, then call refresh",
+            recovery=RECOVERY_REFRESH,
+        )
+    return error(
+        f"rust-analyzer is not running (exited with code {exit_code}); call refresh",
+        recovery=RECOVERY_REFRESH,
     )

@@ -271,3 +271,40 @@ def test_container_name_finding(settings, capsys) -> None:
         assert container is None or isinstance(container, str), (
             f"container for {name!r} has unexpected type {type(container)}: {container!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# SW-05: all symbol kinds, and truncation past the 200 cap
+# ---------------------------------------------------------------------------
+
+
+async def _run_all_symbols_queries(settings) -> tuple[dict, dict]:
+    async def _inner(manager: AnalyzerManager) -> tuple[dict, dict]:
+        search = await _find_symbol_live(manager, "search")
+        one_letter = await _find_symbol_live(manager, "s")
+        return search, one_letter
+
+    return await _with_warm_manager(settings, _inner)
+
+
+@pytest.mark.integration
+def test_find_symbol_returns_functions_and_truncates(settings) -> None:
+    """SW-05: with ``workspace.symbol.search.kind = "all_symbols"`` a query
+    returns functions, not only types; with ``limit = 201`` a one-letter prefix
+    reports ``truncated: true`` even when the workspace filter drops some of
+    the 201 items before the cap.
+    """
+    search, one_letter = anyio.run(_run_all_symbols_queries, settings)
+
+    assert search["status"] == STATUS_OK, f"find_symbol('search') returned {search!r}"
+    kinds = {r["kind"] for r in search["results"]}
+    assert kinds & {"Function", "Method"}, f"No function-kind result; kinds: {sorted(kinds)!r}"
+
+    assert one_letter["status"] == STATUS_OK, f"find_symbol('s') returned {one_letter!r}"
+    # rust-analyzer returns 201 items; the tool drops the ones outside the
+    # workspace (on ripgrep 14.1.1, two dependency crate roots) before the
+    # cap, so `total` and the page can be a little under 200, but
+    # `truncated` counts the server's items (R-gate break 1).
+    assert one_letter["truncated"] is True, one_letter.get("total")
+    assert 0 < one_letter["total"] <= 201
+    assert len(one_letter["results"]) == min(one_letter["total"], 200)
