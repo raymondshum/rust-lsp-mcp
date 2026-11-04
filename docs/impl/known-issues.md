@@ -142,6 +142,15 @@ Check this list at these lifecycle checkpoints (see
   warning. No stronger guard (e.g. per-caller index isolation) is planned —
   it would undercut the "one warm analyzer" design the daemon exists for.
 
+  **2026-11-04 (defect sweep SW-10, remediation T04):** the shared daemon's
+  `refresh` still restarts the one analyzer, so every caller's navigation
+  calls still return `not_ready` until it re-indexes. Doc search no longer
+  blocks: `refresh` returns once the doc rebuild thread has started, the
+  rebuild builds into a staging collection while `search_docs` keeps
+  answering from the old index for every caller, and a second `refresh`
+  during a rebuild queues nothing (`doc_rebuild_started: false`). Entry
+  stays open for the analyzer half.
+
 ### KI-15 — Benign `ClosedResourceError` log noise in stateless HTTP mode
 - **Where:** the streamable-HTTP daemon's per-request teardown, inside the
   pinned `mcp` SDK (1.12.4) — not this project's code. Surfaces in
@@ -193,6 +202,31 @@ Check this list at these lifecycle checkpoints (see
 ---
 
 ## Resolved
+
+### SW-10 — `refresh` blocked on the doc re-embed after deleting the old index
+- **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
+  (`_rebuild_locked`, `start_doc_rebuild`, `clear_doc_store`) ·
+  [src/rust_lsp_mcp/tools/refresh.py](../../src/rust_lsp_mcp/tools/refresh.py) ·
+  [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py).
+- **What:** the 2026-11-03 defect sweep (SW-10, medium) timed `refresh` on ripgrep
+  at 17.5 seconds, almost all of it the re-embed of every doc chunk, while the
+  docstring called the rebuild fast. The rebuild deleted the live collection
+  first, so `search_docs` returned `not_ready` for the whole pass and a failed or
+  interrupted rebuild lost a good index.
+- **Resolved:** 2026-11-04 (remediation T04). The rebuild writes
+  `<live name>_staging` and, on success, deletes the live collection and renames
+  staging to the live name (`collection.modify(name=...)`) under the read lock,
+  carrying the `build_complete`, identity, `indexed_commit` and `doc_digest`
+  stamps; on failure or a shutdown cancel it deletes staging and the live index
+  keeps answering. Each chunk stores `file_sha256`, and a file whose hash matches
+  the live collection has its chunks and embeddings copied, not re-embedded.
+  `refresh` starts the rebuild on a background thread and returns
+  (`doc_rebuild_started`); `status` reports `doc_index_progress`.
+  `clear_doc_store()` cancels a running rebuild and waits up to 10 seconds
+  (SW-L14). Guarded by `TestBuildAndSwap`, `TestIncrementalReembed` and
+  `TestShutdownCancelsRebuild` in [tests/test_doc_store.py](../../tests/test_doc_store.py)
+  and `TestRefreshDocRebuildNonBlocking` in
+  [tests/test_refresh.py](../../tests/test_refresh.py).
 
 ### SW-05 — `find_symbol` returned no functions
 - **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)

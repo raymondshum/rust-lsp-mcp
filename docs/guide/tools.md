@@ -74,7 +74,7 @@ it directly instead of parsing `message` text. Exactly four values:
 | `recovery` | Meaning | Typical next action |
 |---|---|---|
 | `fix_input` | The request itself was malformed (bad position, bad path, empty query). Retrying unchanged will fail identically. | Correct the argument(s) and call again. |
-| `refresh` | The analyzer or documentation index has **permanently** failed (`state`/`doc_index_state` == `"error"`), or a doc-index rebuild failed mid-`refresh`. | Call the `refresh` tool (see below), then retry once `status` reports readiness. |
+| `refresh` | The analyzer or documentation index has **permanently** failed (`state`/`doc_index_state` == `"error"`), or the doc-index rebuild thread could not be started. | Call the `refresh` tool (see below), then retry once `status` reports readiness. |
 | `poll_status` | The server is transiently not ready (still indexing/building). This is the *only* value `not_ready` ever carries. | Poll `status` or `analyzer_status` and retry once ready. |
 | `unknown` | An unexpected/unclassified failure (e.g. the catch-all LSP-exception fallback), or a rare server-side condition that isn't a client input mistake. The default for `error()` when no more specific hint applies. | Surface the message; retrying once is reasonable, but there is no guaranteed fix. |
 
@@ -439,7 +439,7 @@ exact words do not appear.
 | Status | Fields |
 |---|---|
 | `ok` | `results`: list of chunk objects, best match first (see below). |
-| `not_ready` | `message`, `recovery: "poll_status"` — the documentation index is still building (transient — the initial build, or a `refresh`-triggered rebuild, is in flight). Do not interpret this as "no matching docs". Retry once the index is ready (poll `status`, or wait for `refresh` to return). |
+| `not_ready` | `message`, `recovery: "poll_status"` — the documentation index is still building (transient — the first build on an empty store is in flight; a `refresh`-triggered rebuild over an existing index does not cause this, because the old index keeps answering). Do not interpret this as "no matching docs". Retry once `status` reports `doc_index_state: "ready"`. |
 | `not_found` | `message` — the index is ready and the collection is genuinely empty. |
 | `error` | `message`, `recovery` — either (a) `query` is empty or whitespace-only (rejected immediately, before any readiness check or search — no index round-trip; `recovery: "fix_input"`), (b) the documentation index **failed to build or initialise** (permanent until recovered — unlike `not_ready`, retrying immediately will not help; the message includes the underlying reason; `recovery: "refresh"`), or (c) an unexpected failure from the search layer itself (`recovery: "unknown"`). For (b), call `refresh` to rebuild the index and clear the failure. |
 
@@ -514,8 +514,9 @@ Always `ok`, with these fields:
 | `indexing_started_at` | string or `null` | ISO 8601 UTC time the current analyzer indexing run began; reset by every `refresh`. `null` before the first run. |
 | `analyzer_progress` | string or `null` | The latest rust-analyzer progress title and message (for example `"Indexing 120/512 (serde)"`). `null` before the first progress report of the run. |
 | `analyzer_progress_at` | string or `null` | ISO 8601 UTC time of that progress report, or `null`. |
-| `doc_index_state` | `"building"`, `"ready"`, or `"error"` | Whether the documentation search index (used by `search_docs`) has finished building. Independent of `state` above. |
-| `doc_index_error` | string or `null` | Diagnostic message when `doc_index_state` is `"error"`, else `null`. |
+| `doc_index_state` | `"building"`, `"ready"`, or `"error"` | Whether the documentation search index (used by `search_docs`) can answer. Independent of `state` above. Stays `"ready"` while a rebuild runs over an existing index, because `search_docs` keeps answering from the old index; reads `"building"` only for the first build on an empty store. |
+| `doc_index_error` | string or `null` | Diagnostic message when `doc_index_state` is `"error"`. Also set while `doc_index_state` is `"ready"` when the last rebuild failed and the old index is still being served. `null` otherwise. |
+| `doc_index_progress` | object or `null` | Progress of a running doc index rebuild, `null` when none is running: `files_total`, `files_done`, `started_at` (ISO 8601 UTC) and `phase` (`"starting"` while it waits for its locks, then `"scanning"`, `"embedding"` and `"swapping"`). |
 | `doc_index_chunk_count` | integer or `null` | Number of indexed Markdown chunks (a live `collection.count()`), or `null` when `doc_index_state != "ready"`. `0` is a valid, meaningful reading — a completed index over zero matching Markdown files (e.g. wrong `RLM_DOC_GLOB_PATTERNS`, empty/un-mounted project, or a project that genuinely ships no docs) — and is distinct from `null` ("not ready yet / no store"). Works whether the index was just rebuilt or adopted from a prior run. |
 | `doc_indexed_commit` | string or `null` | The git commit hash stamped on the doc index when it was built (`"none"` if git failed then). `null` when `doc_index_state != "ready"`. |
 | `doc_stale` | boolean or `null` | `true` if the current commit differs from `doc_indexed_commit` or a Markdown file the index covers was added, removed or changed (size or modification time) since the build; `false` if neither changed; `null` when `doc_index_state != "ready"`. No running server rebuilds the doc index on its own: this stays `true` until the next `refresh` or server restart. |
@@ -546,6 +547,7 @@ means "no committed changes since indexing began," not a freshness guarantee.
   "analyzer_progress_at": "2026-11-04T07:28:59+00:00",
   "doc_index_state": "ready",
   "doc_index_error": null,
+  "doc_index_progress": null,
   "doc_index_chunk_count": 42,
   "doc_indexed_commit": "a3f1c9d",
   "doc_stale": false,
@@ -588,17 +590,17 @@ Always `ok`, with one field:
 
 ### `refresh`
 
-Rebuild everything from scratch: restart the code analyzer and rebuild the
-documentation index. This is also the **recovery path** for either index
-having failed permanently (`state == "error"` on the analyzer,
-`doc_index_state == "error"` on the doc index) — a fresh `refresh` clears
-both failures and starts over.
+Restart the code analyzer process and rebuild the documentation index in the
+background. This is also the **recovery path** for either index having failed
+permanently (`state == "error"` on the analyzer, `doc_index_state == "error"`
+on the doc index) — a fresh `refresh` clears both failures and starts over.
 
 **Blast radius:** this tears down and re-indexes the single global analyzer
-shared by the whole server. Every other tool returns `not_ready` for every
-caller until re-indexing completes, which can take minutes on large projects.
-Do not invoke `refresh` mid-task unless the index is actually stale or broken
-— check `status`/`analyzer_status` first.
+shared by the whole server. Every navigation tool returns `not_ready` for
+every caller until re-indexing completes, which can take minutes on large
+projects. `search_docs` keeps answering from the old doc index while the doc
+rebuild runs. Do not invoke `refresh` mid-task unless the index is actually
+stale or broken — check `status`/`analyzer_status` first.
 
 **Inputs:** none.
 
@@ -606,23 +608,30 @@ Do not invoke `refresh` mid-task unless the index is actually stale or broken
 
 | Status | Fields |
 |---|---|
-| `ok` | `state`: `"indexing"` (the code re-index has started in the background); `message`: a polling hint. |
-| `error` | `message`, `recovery` — one of two cases: (1) the analyzer is not running, in which case nothing is started (`recovery: "unknown"` — a rare startup-ordering condition); or (2) the documentation rebuild/re-init failed, in which case the code re-index has *already* started and continues in the background (`recovery: "refresh"` — fix the doc-index cause, e.g. the embedding model or Chroma path, then call `refresh` again). |
+| `ok` | `state`: `"indexing"` (the code re-index has started in the background); `doc_index_state`: the doc index state at return (`"ready"` while the old index is served during the rebuild); `doc_rebuild_started`: `true` when this call started the doc rebuild, `false` when a doc build or rebuild was already running (none is queued); `doc_index_progress`: the running rebuild's progress, or `null`; `message`: a polling hint. |
+| `error` | `message`, `recovery` — one of two cases: (1) the analyzer is not running, in which case nothing is started (`recovery: "unknown"` — a rare startup-ordering condition); or (2) the doc rebuild thread could not be started, in which case the code re-index has *already* started and continues in the background (`recovery: "refresh"`). |
 
 After `refresh` returns `ok`, the code analyzer continues indexing in the
 background. Poll `status` or `analyzer_status` until `state` is `"ready"`
 before issuing navigation queries.
 
-**Doc-index recovery detail:** if the documentation index was never
-initialised, or is currently in the `"error"` state, `refresh` re-runs its
-full startup sequence (construct + adopt-or-build) rather than calling
-rebuild on a store that may not exist or is known-broken. Otherwise (a
-healthy index already present) it rebuilds that index in place. Either way
-the doc-index half completes before `refresh` returns.
+**What happens:** the rust-analyzer process restarts and re-reads the
+workspace, and the doc index rebuilds in the background. `refresh` returns
+once the doc rebuild thread has started; it does not wait for the rebuild.
+The rebuild writes a staging collection and swaps it in when it succeeds, so
+`search_docs` serves the old index meanwhile. Only Markdown files whose
+content changed since the last build are re-embedded; unchanged files keep
+their stored embeddings. Follow the rebuild through `status`'s
+`doc_index_progress`.
 
-**Note on speed:** `refresh` does not wipe rust-analyzer's saved on-disk cargo
-cache. Only the in-process LSP context is torn down and respawned. Re-indexing
-is therefore fast — rust-analyzer reuses its prior work.
+**Doc-index recovery detail:** if the documentation index was never
+initialised, or is currently in the `"error"` state, the rebuild worker
+re-runs the full startup sequence (construct + adopt-or-build) rather than
+calling rebuild on a store that may not exist or is known-broken. Otherwise
+(a healthy index already present) it rebuilds that index in place. A doc
+rebuild failure cannot appear in the `refresh` envelope, because `refresh`
+has already returned: `status` reports it in `doc_index_error`, and
+`doc_index_state` reads `"error"` only when no old index is left to serve.
 
 **Example response**
 
@@ -630,7 +639,10 @@ is therefore fast — rust-analyzer reuses its prior work.
 {
   "status": "ok",
   "state": "indexing",
-  "message": "Re-index started; poll status until state is 'ready'."
+  "doc_index_state": "ready",
+  "doc_rebuild_started": true,
+  "doc_index_progress": null,
+  "message": "Re-index started; poll status until state is 'ready'. The doc index rebuilds in the background (status.doc_index_progress); search_docs keeps answering from the old index meanwhile."
 }
 ```
 

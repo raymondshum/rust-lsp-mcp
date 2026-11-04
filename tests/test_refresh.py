@@ -10,14 +10,21 @@ Test coverage:
           state == "indexing".
         - Non-blocking: refresh returns even though the fake manager's state
           stays "indexing" after restart() (i.e. it does not wait for "ready").
-    Doc-store wiring (DS-14 recovery path):
+    Doc-store wiring (DS-14 recovery path), on the background worker:
         - store present, healthy → store.rebuild() is called (after restart());
           init_doc_store is NOT called.
         - store None → graceful re-init via init_doc_store; still returns ok.
         - store in "error" state → re-init via init_doc_store (rebuild() is
           NOT called on the known-broken store).
         - rebuild()/init_doc_store is called after restart(), not before.
-        - re-init failure → error envelope; restart() still awaited once.
+        - a rebuild or re-init failure is logged at error; the envelope is
+          still ok (refresh returned before the work ran).
+    Non-blocking doc rebuild (T04, SW-10):
+        - refresh returns before a slow stub rebuild finishes, with
+          doc_rebuild_started: true.
+        - a second refresh during a rebuild reports doc_rebuild_started: false
+          and starts nothing.
+        - SW-L22 end to end: a failed re-init's new error reaches status.
     End-to-end doc-store recovery (real DocStore, fake embedding function,
     tmp chroma path): a failed rebuild followed by a successful refresh
     recovers search_docs from error to ok/not_found.
@@ -25,7 +32,10 @@ Test coverage:
 
 import asyncio
 import hashlib
+import logging
 import pathlib
+import threading
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,6 +43,7 @@ import chromadb
 import numpy as np
 import pytest
 
+import rust_lsp_mcp.doc_store as doc_store_mod
 from rust_lsp_mcp.analyzer import STATE_INDEXING, STATE_READY
 from rust_lsp_mcp.doc_store import DOC_STATE_ERROR
 from rust_lsp_mcp.envelope import STATUS_ERROR, STATUS_OK
@@ -56,6 +67,24 @@ class _FakeManager:
         self.restart = AsyncMock()
 
 
+def _join_doc_worker(timeout: float = 10.0) -> None:
+    """Wait for the background doc rebuild thread refresh() started, if any."""
+    thread = doc_store_mod._rebuild_thread
+    if thread is not None:
+        thread.join(timeout=timeout)
+        assert not thread.is_alive(), "doc rebuild worker did not finish"
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_doc_worker() -> Iterator[None]:
+    """Start each test with no doc rebuild in flight and join any it started."""
+    _join_doc_worker()
+    doc_store_mod._rebuild_thread = None
+    yield
+    _join_doc_worker()
+    doc_store_mod._rebuild_thread = None
+
+
 def _run_refresh(manager: Any) -> dict[str, Any]:
     """Patch core._manager with *manager* and call refresh(); return the envelope.
 
@@ -74,7 +103,9 @@ def _run_refresh(manager: Any) -> dict[str, Any]:
             patch.object(refresh_mod, "get_doc_store", return_value=None),
             patch.object(refresh_mod, "init_doc_store", MagicMock()),
         ):
-            return await refresh_mod.refresh()
+            result = await refresh_mod.refresh()
+            _join_doc_worker()
+            return result
 
     return asyncio.run(_inner())
 
@@ -124,7 +155,7 @@ class TestRefreshHappyPath:
 
 class TestRefreshReturnedStateIsSnapshot:
     """The returned ``state`` is snapshotted right after ``restart()`` — it must
-    not reflect a live analyzer that readied *during* the blocking doc rebuild.
+    not reflect a live analyzer that readied *during* the doc rebuild.
 
     Regression for the integration flakiness where a fast warm analyzer re-index
     reached ``"ready"`` while a cold doc-store embed was still running, so the
@@ -143,7 +174,7 @@ class TestRefreshReturnedStateIsSnapshot:
         store = MagicMock()
         store.state = "ready"
 
-        def _rebuild_that_readies_analyzer() -> int:
+        def _rebuild_that_readies_analyzer(**_kw: Any) -> int:
             mgr.state = STATE_READY
             return 0
 
@@ -154,7 +185,9 @@ class TestRefreshReturnedStateIsSnapshot:
                 patch.object(core, "_manager", mgr),
                 patch.object(refresh_mod, "get_doc_store", return_value=store),
             ):
-                return await refresh_mod.refresh()
+                result = await refresh_mod.refresh()
+                _join_doc_worker()
+                return result
 
         result = asyncio.run(_inner())
         assert result["status"] == STATUS_OK
@@ -211,7 +244,9 @@ def _run_refresh_with_store(
             patch.object(refresh_mod, "get_doc_store", return_value=store),
             patch.object(refresh_mod, "init_doc_store", init_doc_store_mock),
         ):
-            return await refresh_mod.refresh()
+            result = await refresh_mod.refresh()
+            _join_doc_worker()
+            return result
 
     return asyncio.run(_inner())
 
@@ -290,7 +325,7 @@ class TestRefreshDocStoreWiring:
             call_log.append("restart")
 
         mgr.restart = AsyncMock(side_effect=_fake_restart)
-        store.rebuild.side_effect = lambda: call_log.append("rebuild")
+        store.rebuild.side_effect = lambda **_kw: call_log.append("rebuild")
 
         _run_refresh_with_store(mgr, store)
 
@@ -298,27 +333,24 @@ class TestRefreshDocStoreWiring:
             f"Expected restart before rebuild, got: {call_log}"
         )
 
-    def test_rebuild_raises_returns_error_envelope(self) -> None:
-        """When rebuild() raises, refresh must return an error envelope (not propagate).
-
-        The analyzer restart has already fired by the time rebuild() runs, so the
-        error message must make clear that re-indexing is underway even though the
-        doc-store rebuild failed.  refresh() must NOT raise; the exception must be
-        caught and surfaced as a structured error envelope.
-        """
+    def test_rebuild_raises_is_logged_and_envelope_stays_ok(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """When rebuild() raises on the worker, refresh has already returned ok;
+        the failure is logged at error (``status`` reports it on the store)."""
         mgr = _FakeManager()
         store = MagicMock()
         store.rebuild.side_effect = RuntimeError("embedding model unavailable")
 
-        result = _run_refresh_with_store(mgr, store)
+        with caplog.at_level(logging.ERROR, logger="rust_lsp_mcp.tools.refresh"):
+            result = _run_refresh_with_store(mgr, store)
 
-        assert result["status"] == STATUS_ERROR
-        assert "message" in result
-        # Message must mention the doc rebuild failure
-        assert "documentation rebuild failed" in result["message"].lower() or (
-            "doc" in result["message"].lower() and "rebuild" in result["message"].lower()
-        )
-        # restart() must still have been called before the failure
+        assert result["status"] == STATUS_OK
+        assert result["doc_rebuild_started"] is True
+        store.rebuild.assert_called_once()
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("doc-store rebuild failed" in r.getMessage() for r in errors)
+        assert any("embedding model unavailable" in (r.exc_text or "") for r in errors)
         mgr.restart.assert_awaited_once()
 
     def test_errored_store_triggers_reinit(self) -> None:
@@ -347,20 +379,171 @@ class TestRefreshDocStoreWiring:
         store.rebuild.assert_called_once()
         init_mock.assert_not_called()
 
-    def test_reinit_failure_returns_error_envelope(self) -> None:
-        """init_doc_store raising must produce an error envelope, not propagate.
+    def test_reinit_failure_is_logged_and_envelope_stays_ok(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """init_doc_store raising on the worker is logged at error, never propagated.
 
-        restart() must still have been awaited exactly once before the failure —
-        the analyzer re-index is not rolled back by a doc-store failure.
+        restart() must still have been awaited exactly once — the analyzer
+        re-index is not rolled back by a doc-store failure.
         """
         mgr = _FakeManager()
         init_mock = MagicMock(side_effect=RuntimeError("chroma path unwritable"))
 
-        result = _run_refresh_with_store(mgr, None, init_doc_store_mock=init_mock)
+        with caplog.at_level(logging.ERROR, logger="rust_lsp_mcp.tools.refresh"):
+            result = _run_refresh_with_store(mgr, None, init_doc_store_mock=init_mock)
 
-        assert result["status"] == STATUS_ERROR
-        assert "chroma path unwritable" in result["message"]
+        assert result["status"] == STATUS_OK
+        init_mock.assert_called_once()
+        assert any(
+            "chroma path unwritable" in (r.exc_text or "")
+            for r in caplog.records
+            if r.levelno == logging.ERROR
+        )
         mgr.restart.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# T04 (SW-10): refresh returns once the doc rebuild has started.
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshDocRebuildNonBlocking:
+    """refresh() starts the doc rebuild on a worker thread and returns."""
+
+    def test_refresh_returns_before_slow_rebuild_finishes(self) -> None:
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        mgr = _FakeManager()
+        store = MagicMock()
+        store.state = "ready"
+        rebuild_started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def _slow_rebuild(**_kw: Any) -> int:
+            rebuild_started.set()
+            assert release.wait(timeout=5), "test deadlocked waiting for release"
+            finished.set()
+            return 3
+
+        store.rebuild = _slow_rebuild
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(refresh_mod, "get_doc_store", return_value=store),
+            ):
+                return await asyncio.wait_for(refresh_mod.refresh(), timeout=5)
+
+        try:
+            result = asyncio.run(_inner())
+            assert result["status"] == STATUS_OK
+            assert result["doc_rebuild_started"] is True
+            assert "doc_index_state" in result
+            assert "doc_index_progress" in result
+            assert rebuild_started.wait(timeout=5)
+            assert not finished.is_set(), "refresh waited for the doc rebuild"
+        finally:
+            release.set()
+            _join_doc_worker()
+        assert finished.is_set()
+
+    def test_second_refresh_during_rebuild_does_not_start_another(self) -> None:
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        mgr = _FakeManager()
+        store = MagicMock()
+        store.state = "ready"
+        release = threading.Event()
+        rebuild_calls: list[None] = []
+
+        def _slow_rebuild(**_kw: Any) -> int:
+            rebuild_calls.append(None)
+            assert release.wait(timeout=5), "test deadlocked waiting for release"
+            return 1
+
+        store.rebuild = _slow_rebuild
+        progress = {
+            "files_total": 10,
+            "files_done": 4,
+            "started_at": "2026-11-04T10:00:00+00:00",
+            "phase": "embedding",
+        }
+
+        async def _inner() -> tuple[dict[str, Any], dict[str, Any]]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(refresh_mod, "get_doc_store", return_value=store),
+                patch.object(refresh_mod, "doc_index_progress", return_value=progress),
+            ):
+                first = await refresh_mod.refresh()
+                second = await refresh_mod.refresh()
+                return first, second
+
+        try:
+            first, second = asyncio.run(_inner())
+        finally:
+            release.set()
+            _join_doc_worker()
+
+        assert first["doc_rebuild_started"] is True
+        assert second["status"] == STATUS_OK
+        assert second["doc_rebuild_started"] is False
+        assert second["doc_index_progress"] == progress
+        assert len(rebuild_calls) == 1
+        assert mgr.restart.await_count == 2
+
+    def test_sw_l22_failed_reinit_error_reaches_status(self, tmp_path: pathlib.Path) -> None:
+        """SW-L22 end to end: with the store in ``error`` and ``DocStore``
+        construction patched to raise a new message, ``refresh`` starts the
+        re-init worker; once it finishes, ``status`` reports the NEW error."""
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+        from rust_lsp_mcp.settings import Settings
+        from rust_lsp_mcp.tools.status import status
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "guide.md").write_text("# Guide\n\nBody.\n", encoding="utf-8")
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md",
+        )
+        doc_store_mod.clear_doc_store()
+        with (
+            patch.object(doc_store_mod, "chunk_markdown", side_effect=RuntimeError("old failure")),
+            pytest.raises(RuntimeError, match="old failure"),
+        ):
+            doc_store_mod.init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_mod.doc_store_state() == (DOC_STATE_ERROR, "RuntimeError: old failure")
+
+        mgr = _FakeManager()
+
+        async def _scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(refresh_mod, "get_settings", return_value=settings),
+                patch.object(doc_store_mod, "DocStore", side_effect=RuntimeError("new failure")),
+            ):
+                refreshed = await refresh_mod.refresh()
+                _join_doc_worker()
+            with patch.object(core, "_manager", None):
+                reported = await status()
+            return refreshed, reported
+
+        try:
+            refreshed, reported = asyncio.run(_scenario())
+        finally:
+            doc_store_mod.clear_doc_store()
+
+        assert refreshed["status"] == STATUS_OK
+        assert refreshed["doc_rebuild_started"] is True
+        assert reported["doc_index_state"] == DOC_STATE_ERROR
+        assert reported["doc_index_error"] == "RuntimeError: new failure"
 
 
 # ---------------------------------------------------------------------------
@@ -453,8 +636,8 @@ class TestRefreshEndToEndDocStoreRecovery:
         # recovery branch runs for real against the same tmp chroma/corpus.
         mgr = _FakeManager()
 
-        def _init_with_fake_ef(s: Settings) -> doc_store_mod.DocStore:
-            return doc_store_mod.init_doc_store(s, embedding_function=ef)
+        def _init_with_fake_ef(s: Settings, **kw: Any) -> doc_store_mod.DocStore:
+            return doc_store_mod.init_doc_store(s, embedding_function=ef, **kw)
 
         async def _do_refresh() -> dict[str, Any]:
             with (
@@ -463,10 +646,13 @@ class TestRefreshEndToEndDocStoreRecovery:
                 patch.object(refresh_mod, "get_settings", return_value=settings),
                 patch.object(refresh_mod, "init_doc_store", _init_with_fake_ef),
             ):
-                return await refresh_mod.refresh()
+                result = await refresh_mod.refresh()
+                _join_doc_worker()
+                return result
 
         refresh_result = asyncio.run(_do_refresh())
         assert refresh_result["status"] == STATUS_OK
+        assert refresh_result["doc_rebuild_started"] is True
 
         # The refresh path called init_doc_store, which set a NEW singleton in
         # doc_store module — fetch it directly to confirm recovery.
@@ -487,123 +673,54 @@ class TestRefreshEndToEndDocStoreRecovery:
 
 
 class TestFinding3ConcurrentRefreshSerialized:
-    """Two concurrent refresh() calls with an absent/errored store must
-    serialize their init_doc_store invocations — never overlapping.
+    """Concurrent refresh() calls on an absent/errored store start ONE re-init:
+    the others report ``doc_rebuild_started: false`` and never overlap it.
     """
 
-    def test_concurrent_refresh_init_doc_store_never_overlaps(self) -> None:
-        """Patch init_doc_store to record an in-flight counter and assert it
-        never exceeds 1 — i.e. the two calls never interleave, even though
-        both refresh() calls run "concurrently" (interleaved on the event
-        loop via asyncio.gather).
+    def test_concurrent_refresh_starts_one_reinit(self) -> None:
+        """Three concurrent refresh() calls on an absent store: init_doc_store
+        runs exactly once (it is still running when the others decide), and
+        exactly one envelope reports ``doc_rebuild_started: true``.
 
-        NOTE: all patches are applied ONCE, OUTSIDE the gather — applying
-        ``unittest.mock.patch.object`` as a context manager independently
-        from two coroutines racing on the SAME target attribute is itself
-        racy (save/restore on __enter__/__exit__ isn't safe against
-        interleaved concurrent use), so both calls share one patched
-        environment; that's sufficient to prove serialization since
-        ``core._manager``/``refresh_mod.get_doc_store`` are read-only for
-        this test's purposes and ``init_doc_store`` is the thing under test.
-
-        No lock-swapping needed (#91): the refresh lock is now obtained
-        per-loop via ``_get_doc_store_refresh_lock()``, so this test's own
-        ``asyncio.run()`` loop transparently gets its own fresh lock without
-        any patching, and it never collides with the lock any other test's
-        loop got.
+        All patches are applied ONCE, OUTSIDE the gather — applying
+        ``unittest.mock.patch.object`` independently from racing coroutines
+        on the same target is itself racy.  No lock-swapping needed (#91):
+        the refresh lock is obtained per-loop.
         """
         import rust_lsp_mcp.core as core
         import rust_lsp_mcp.tools.refresh as refresh_mod
 
-        in_flight = 0
-        max_in_flight = 0
+        release = threading.Event()
+        calls: list[None] = []
 
-        def _init_doc_store_sync(settings: Any) -> MagicMock:
-            # init_doc_store is called via anyio.to_thread.run_sync, which
-            # runs it in a worker thread — but the surrounding per-loop lock
-            # (via _get_doc_store_refresh_lock()) is an asyncio.Lock held on
-            # the event loop for the DURATION of that run_sync call, so
-            # overlapping calls are still impossible. We simulate "slow" work with a
-            # blocking sleep here (this runs off-loop, in the thread pool).
-            import time
-
-            nonlocal in_flight, max_in_flight
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-            time.sleep(0.05)
-            in_flight -= 1
+        def _slow_init(settings: Any, **_kw: Any) -> MagicMock:
+            calls.append(None)
+            assert release.wait(timeout=5), "test deadlocked waiting for release"
             return MagicMock()
 
         mgr = _FakeManager()
-
-        async def _one_refresh() -> dict[str, Any]:
-            return await refresh_mod.refresh()
-
-        async def _run_both() -> list[dict[str, Any]]:
-            return list(await asyncio.gather(_one_refresh(), _one_refresh()))
-
-        with (
-            patch.object(core, "_manager", mgr),
-            patch.object(refresh_mod, "get_doc_store", return_value=None),
-            patch.object(refresh_mod, "init_doc_store", _init_doc_store_sync),
-        ):
-            results = asyncio.run(_run_both())
-
-        assert all(r["status"] == STATUS_OK for r in results)
-        assert max_in_flight == 1, (
-            f"init_doc_store overlapped across concurrent refresh() calls "
-            f"(max_in_flight={max_in_flight}); finding-3 serialization failed"
-        )
-
-    def test_concurrent_refresh_calls_init_doc_store_at_most_expected(self) -> None:
-        """Three concurrent refresh() calls on an absent store each still call
-        init_doc_store exactly once apiece (serialized, not skipped or
-        duplicated) — total call count is exactly 3, with no overlap.
-
-        Patches are applied ONCE outside the gather — see the docstring on
-        ``test_concurrent_refresh_init_doc_store_never_overlaps`` for why
-        that's necessary for a hermetic test.  No lock-swapping needed
-        (#91): the refresh lock is obtained per-loop.
-        """
-        import rust_lsp_mcp.core as core
-        import rust_lsp_mcp.tools.refresh as refresh_mod
-
-        call_count = 0
-        in_flight = 0
-        max_in_flight = 0
-
-        def _init_doc_store_sync(settings: Any) -> MagicMock:
-            nonlocal call_count, in_flight, max_in_flight
-            import time
-
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-            time.sleep(0.02)
-            call_count += 1
-            in_flight -= 1
-            return MagicMock()
-
-        mgr = _FakeManager()
-
-        async def _one_refresh() -> dict[str, Any]:
-            return await refresh_mod.refresh()
 
         async def _run_all() -> list[dict[str, Any]]:
-            return list(await asyncio.gather(_one_refresh(), _one_refresh(), _one_refresh()))
+            results = list(
+                await asyncio.gather(
+                    refresh_mod.refresh(), refresh_mod.refresh(), refresh_mod.refresh()
+                )
+            )
+            release.set()
+            _join_doc_worker()
+            return results
 
         with (
             patch.object(core, "_manager", mgr),
             patch.object(refresh_mod, "get_doc_store", return_value=None),
-            patch.object(refresh_mod, "init_doc_store", _init_doc_store_sync),
+            patch.object(refresh_mod, "init_doc_store", _slow_init),
         ):
             results = asyncio.run(_run_all())
 
         assert all(r["status"] == STATUS_OK for r in results)
-        assert call_count == 3
-        assert max_in_flight == 1, (
-            f"init_doc_store overlapped across concurrent refresh() calls "
-            f"(max_in_flight={max_in_flight}); finding-3 serialization failed"
-        )
+        assert sorted(r["doc_rebuild_started"] for r in results) == [False, False, True]
+        assert len(calls) == 1
+        assert mgr.restart.await_count == 3
 
 
 # ---------------------------------------------------------------------------

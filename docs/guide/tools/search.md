@@ -20,6 +20,8 @@ Performs natural-language semantic vector search across the project's Markdown d
 
 The tool uses local embeddings generated via **all-MiniLM-L6-v2** and stored in ChromaDB using cosine distance. It runs entirely offline without calling external APIs.
 
+Results come from the live index. While a `refresh` rebuilds the doc index, the live index is the previous build, so results may be one rebuild behind until the rebuild swaps in its new index (`status` shows `doc_index_progress` meanwhile).
+
 ---
 
 ## Inputs
@@ -38,7 +40,7 @@ Empty or whitespace-only queries return `error` with `recovery: "fix_input"`. Ou
 | Status | Fields |
 |---|---|
 | `ok` | `results`: ranked list of matching documentation passages (closest distance first). |
-| `not_ready` | `message`, `recovery: "poll_status"` — doc store is currently building. |
+| `not_ready` | `message`, `recovery: "poll_status"` — the first doc index build on an empty store is running. |
 | `not_found` | `message` — zero matching passages found, or documentation collection is empty. |
 | `error` | `message`, `recovery` — search failure or permanent store error (`recovery: "refresh"`). |
 

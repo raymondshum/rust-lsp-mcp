@@ -136,10 +136,11 @@ The envelope JSON always goes to stdout; diagnostics/hints go to stderr.
 
 The daemon is one process shared by every caller of this project's tools.
 `refresh` tears down and rebuilds the whole index — every other caller's
-navigation calls will see `not_ready` until it finishes. Only run it when
-you have a specific reason to believe the index is stale (e.g. the project's
-source changed underneath it); don't call it speculatively or to "fix" an
-unrelated error.
+navigation calls will see `not_ready` until it finishes. `search_docs`
+keeps answering from the old doc index while the doc rebuild runs. Only run
+it when you have a specific reason to believe the index is stale (e.g. the
+project's source changed underneath it); don't call it speculatively or to
+"fix" an unrelated error.
 
 ## Freshness
 
@@ -154,8 +155,11 @@ unrelated error.
   `true` until `refresh`.
 - **`search_docs` answers from the doc index, which no running server
   rebuilds on its own.** After a change, `doc_stale` reads `true` until the
-  next `refresh` or server restart, and `doc_index_state` reads `"building"`
-  while that rebuild runs.
+  next `refresh` or server restart. During a rebuild over an existing index,
+  `doc_index_state` stays `"ready"`, `search_docs` keeps answering from the
+  old index, and `status`'s `doc_index_progress` shows the rebuild's
+  progress; `doc_index_state` reads `"building"` only for the first build on
+  an empty store.
 
 ## When NOT to use it
 - **Not a Rust project** → the server can't help; use normal search.

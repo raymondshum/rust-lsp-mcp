@@ -156,7 +156,10 @@ rust-lsp --wait 180 status
 global options ahead of the subcommand).
 
 With `--wait SECS` given, `rust-lsp` polls the daemon's `status` tool every 2
-seconds, for up to `SECS` seconds, before running your actual command. This
+seconds, for up to `SECS` seconds, before running your actual command. The
+wait ends only when **both** indexes are ready: `state == "ready"` (the code
+index) and `doc_index_state == "ready"` (the documentation index), so a
+`search-docs` call right after a successful wait does not exit `2`. This
 is meant to absorb the daemon's first-use indexing window (which can take
 minutes on a large project) in one command instead of a hand-rolled retry
 loop. It rides through the *entire* boot sequence, not just the "already
@@ -172,9 +175,9 @@ The distinction that matters is what happens when the window *does* expire:
   (`docker compose up -d rust-lsp-mcp` — always name the service) or check
   `RLM_HTTP_PORT`/`RLM_CLI_URL`.
 - **Connected but never reported `ready`** (exit `2`) — the daemon is up but
-  stuck indexing (or has permanently failed — check `state` in a plain
-  `rust-lsp status` call). A larger `--wait` won't help a permanently failed
-  index; call `refresh` instead.
+  one of the two indexes is still building (or has permanently failed — check
+  `state` and `doc_index_state` in a plain `rust-lsp status` call). A larger
+  `--wait` won't help a permanently failed index; call `refresh` instead.
 
 `--wait` accepts any finite number of seconds; `nan`/`inf` are rejected at
 the argument-parsing stage (they would make the deadline arithmetic never
@@ -196,7 +199,7 @@ During normal operation, logs may display a per-request `ClosedResourceError` tr
 
 ## `refresh`: shared-daemon blast radius
 
-`refresh` restarts and rebuilds the single analyzer and documentation index inside the container. Because all CLI calls and MCP clients share this instance, running `refresh` causes all concurrent queries to return `not_ready` until indexing finishes.
+`refresh` restarts the single analyzer process and rebuilds the documentation index in the background, inside the container. It returns as soon as both have started. Because all CLI calls and MCP clients share this instance, running `refresh` makes all concurrent navigation queries return `not_ready` until the analyzer finishes indexing; `search-docs` keeps answering from the old doc index while the doc rebuild runs.
 
 Check `rust-lsp status` before refreshing. Only trigger `refresh` when code changes warrant an index rebuild or when `state` reports `"error"`.
 

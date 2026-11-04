@@ -109,6 +109,12 @@ def wait_for_ready(
 ) -> tuple[bool, bool]:
     """Poll ``status`` every ``poll_interval`` seconds until ready, or timeout.
 
+    "Ready" means BOTH indexes are ready (SW-L25): ``state == "ready"`` (the
+    code index) and ``doc_index_state == "ready"`` (the doc index), so a
+    ``search-docs`` call right after a successful wait does not exit 2.  A doc
+    index that stays ``"building"`` or ``"error"`` keeps the wait polling
+    until the window expires.
+
     Implements D9: within the window, a transport-level failure (daemon not
     up yet) is retriable exactly like an ``ok``-but-not-``ready`` status -- a
     daemon booting passes through refused -> not_ready -> ready, and this
@@ -120,7 +126,8 @@ def wait_for_ready(
     no-op ``sleep``); production callers rely on the defaults.
 
     Returns ``(ready, ever_connected)``:
-        - ``(True, True)``   -- reached ``state == "ready"`` within the window.
+        - ``(True, True)``   -- reached ``state == "ready"`` and
+          ``doc_index_state == "ready"`` within the window.
         - ``(False, True)``  -- window expired; the daemon answered at least
           once but never reported ready (D8: caller exits 2).
         - ``(False, False)`` -- window expired without ever getting a
@@ -137,7 +144,11 @@ def wait_for_ready(
         envelope, exc = check(base_url)
         if exc is None and envelope is not None:
             ever_connected = True
-            if envelope.get("status") == "ok" and envelope.get("state") == "ready":
+            if (
+                envelope.get("status") == "ok"
+                and envelope.get("state") == "ready"
+                and envelope.get("doc_index_state") == "ready"
+            ):
                 return True, ever_connected
         if monotonic() >= deadline:
             return False, ever_connected

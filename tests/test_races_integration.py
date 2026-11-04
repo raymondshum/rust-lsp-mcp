@@ -32,7 +32,8 @@ What is reused from existing integration-test conventions (do NOT duplicate):
       several minutes; restart benefits from a warm cargo/target cache).
     - ``test_phase5_integration.py``'s real-``DocStore``-with-real-embedding
       idiom (``DocStore(settings)`` with no ``embedding_function`` override —
-      ChromaDB's bundled ONNX all-MiniLM-L6-v2) for the DS-12 rebuild race.
+      ChromaDB's bundled ONNX all-MiniLM-L6-v2) for the DS-12 / SW-10 rebuild
+      case (the old index answers during a rebuild).
 
 Design constraints (deterministic-or-skip): every race-timing test bounds its
 wait with a deadline and calls ``pytest.skip`` with a clear reason if the race
@@ -304,21 +305,21 @@ def _same_result_set(a: list[dict[str, Any]], b: list[dict[str, Any]], tol: floa
 
 
 @pytest.mark.integration
-def test_search_during_live_rebuild_returns_not_ready_never_partial(
+def test_search_during_live_rebuild_serves_old_index_never_not_ready(
     tmp_path: pathlib.Path,
 ) -> None:
-    """search() concurrent with a REAL ChromaDB rebuild() must never return a
-    partial/inconsistent result: every response observed while a rebuild is
-    genuinely in flight is either ``DocStoreNotReady`` or a complete, correct
-    answer identical to the steady state.
+    """search() concurrent with a REAL ChromaDB rebuild() after one file
+    changed never raises ``DocStoreNotReady`` and always returns the steady
+    state (SW-10, T04): the rebuild writes a staging collection while the old
+    index keeps answering, then swaps.
 
-    This is the live counterpart of ``test_doc_store.py``'s
-    ``TestDS12ReadWriteRace`` — those tests use a deterministic
-    ``FakeEmbeddingFunction`` and manual thread-pausing hooks to force the
-    exact interleaving; this test uses the REAL default ONNX embedding
-    function (no fakes, no instrumentation) against a real on-disk ChromaDB
-    collection, so the race is entered (or not) by genuine timing rather than
-    an artificial pause — hence the deterministic-or-skip design below.
+    The live counterpart of ``test_doc_store.py``'s
+    ``test_old_collection_answers_search_during_rebuild``, with the REAL
+    default ONNX embedding function against an on-disk collection.  The
+    changed file gains an unrelated section at its end, so its existing
+    chunks keep their text and the steady-state answer is unchanged after
+    the swap.  Deterministic-or-skip: when no search lands while the rebuild
+    is in flight, the test skips rather than flakes.
     """
     corpus = tmp_path / "race_corpus"
     _write_race_corpus(corpus)
@@ -328,68 +329,55 @@ def test_search_during_live_rebuild_returns_not_ready_never_partial(
     # ONNX all-MiniLM-L6-v2) — no embedding_function override, matching
     # test_phase5_integration.py's real-corpus idiom.
     store = DocStore(settings)
-
-    # Establish the steady state with an initial, uncontended rebuild.
     store.rebuild()
     assert store.is_ready is True
     query = "race condition handling concurrency"
     steady_state = store.search(query, n_results=5)
     assert steady_state, "expected non-empty steady-state results for the race query"
 
-    async def _scenario() -> bool:
-        rebuild_task: asyncio.Task[int] = asyncio.create_task(asyncio.to_thread(store.rebuild))
-        observed_not_ready = False
-        deadline = time.monotonic() + 60
+    # Change one file that is not in the steady-state answer.
+    hit_files = {r["file"] for r in steady_state}
+    changed = next(p for p in sorted(corpus.glob("*.md")) if p.name not in hit_files)
+    changed.write_text(
+        changed.read_text(encoding="utf-8")
+        + "\n## Baking\n\nKnead the dough, let it rise overnight, bake at 220 degrees.\n",
+        encoding="utf-8",
+    )
 
+    async def _scenario() -> int:
+        rebuild_task: asyncio.Task[int] = asyncio.create_task(asyncio.to_thread(store.rebuild))
+        mid_rebuild_ok = 0
+        deadline = time.monotonic() + 120
         try:
             while not rebuild_task.done() and time.monotonic() < deadline:
+                in_flight = store.progress()["phase"] is not None
                 try:
                     result = await asyncio.to_thread(store.search, query, 5)
                 except DocStoreNotReady:
-                    observed_not_ready = True
-                    continue
-                # An in-loop ok observation is best-effort telemetry only —
-                # deliberately NOT asserted on: both windows that could yield
-                # one are missable under load (the rebuild's start transition
-                # can win the threadpool race before the first search reads
-                # READY, and the loop can see rebuild_task.done() before
-                # issuing another search after the end transition).  The
-                # pre-rebuild ``steady_state`` search above and the post-race
-                # ``final_results`` search below already prove the ok path;
-                # asserting an in-loop ok would reintroduce a load-sensitive
-                # spurious failure.  What IS load-bearing here: any ok that
-                # DOES land mid-loop must equal the steady state.
+                    pytest.fail(
+                        "search() raised DocStoreNotReady during a rebuild over a live index"
+                    )
                 assert _same_result_set(result, steady_state), (
-                    "search() returned a result set during a live rebuild "
-                    "that differs from the steady state — a partial/"
-                    f"inconsistent read (DS-12 regression): {result!r}"
+                    f"search() during a live rebuild differs from the steady state: {result!r}"
                 )
+                if in_flight:
+                    mid_rebuild_ok += 1
         finally:
-            # Always let the rebuild finish (propagates any exception) so the
-            # store is left in a clean, known state for the assertions below
-            # regardless of how the polling loop above exited.
             await rebuild_task
+        return mid_rebuild_ok
 
-        return observed_not_ready
+    mid_rebuild_ok = anyio.run(_scenario)
 
-    observed_not_ready = anyio.run(_scenario)
-
-    if not observed_not_ready:
-        pytest.skip(
-            "the concurrent rebuild completed before any search() call "
-            "landed mid-rebuild — the race window closed too fast to catch "
-            "on this run (real embedding was faster than the polling loop "
-            "could interleave); DS-12 is still guarded by the fake-tier "
-            "TestDS12ReadWriteRace tests in test_doc_store.py"
-        )
-
-    # Final sanity: the store is ready and consistent after the race.
-    assert store.is_ready is True
     final_results = store.search(query, n_results=5)
     assert _same_result_set(final_results, steady_state), (
-        "post-race steady-state search result differs from the pre-race "
-        f"steady state: {final_results!r} vs {steady_state!r}"
+        f"post-rebuild search differs from the steady state: {final_results!r} vs {steady_state!r}"
     )
+    assert store.is_ready is True
+    if mid_rebuild_ok == 0:
+        pytest.skip(
+            "the rebuild finished before any search() landed while it was in flight; "
+            "SW-10 is still guarded by the fake-tier test in test_doc_store.py"
+        )
 
 
 # ---------------------------------------------------------------------------

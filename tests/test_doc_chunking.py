@@ -24,6 +24,7 @@ Coverage:
     - DocChunk is frozen (immutable after creation).
     - rel_path is preserved verbatim in chunk.file.
     - Fence length tracking: 4-backtick fence is not closed by 3-backtick line.
+    - 2026-11-03 sweep rows SW-L16 to SW-L20 (``TestSweepLowRows``).
 """
 
 import math
@@ -33,9 +34,11 @@ import pytest
 from rust_lsp_mcp.doc_chunking import (
     _OVERLAP_PARAGRAPHS,
     BODY_TOKEN_CAP,
+    JUNK_LINE_MIN_CHARS,
     DocChunk,
     _split_into_header_sections,
     chunk_markdown,
+    drop_junk_lines,
     estimate_tokens,
 )
 
@@ -1040,7 +1043,8 @@ class TestDS11FrontmatterPreScan:
         so ``title: X`` is NOT emitted as a bogus setext-H2 breadcrumb, and the
         real header after is found.
         """
-        md = "---\ntitle: X\n--- \n# Header\n"
+        # The header carries a body: a header-only section is not emitted (SW-L19).
+        md = "---\ntitle: X\n--- \n# Header\n\nBody.\n"
         chunks = chunk_markdown(md, "doc.md")
         breadcrumbs = {c.breadcrumb for c in chunks}
         assert not any("title" in bc for bc in breadcrumbs), (
@@ -1479,7 +1483,9 @@ class TestRealTokenizerGate:
     def test_adversarial_base64_run_under_256_real(self) -> None:
         """Round-2 Hole 2 adversarial: base64-ish run (mixed alpha + symbols)."""
         tok = self._load_tok()
-        base64_body = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==" * 80
+        base64_body = (
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ==" * 70
+        )  # 1,960 chars: under the SW-L20 junk-line cut
         md = f"# H\n\n{base64_body}\n"
         self._assert_adversarial_fixture(tok, md, "h.md", "base64_run")
 
@@ -1489,3 +1495,97 @@ class TestRealTokenizerGate:
         body = "中文字符测试" * 200
         md = f"# H\n\n{body}\n"
         self._assert_adversarial_fixture(tok, md, "h.md", "cjk_pure_run")
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-03 defect sweep: SW-L16 to SW-L20 (one test per audit row).
+# ---------------------------------------------------------------------------
+
+
+class TestSweepLowRows:
+    """Regression tests for the doc-chunking rows of the 2026-11-03 sweep."""
+
+    def test_sw_l16_info_string_line_does_not_close_open_fence(self) -> None:
+        """SW-L16: a line opening with three backticks plus an info string closes an
+        open fence.  Only a bare fence line closes it, so the ``#`` line after the
+        ```` ```rust ```` line stays code and the prose after the bare close is prose.
+        """
+        md = (
+            "# Real\n\nIntro.\n\n"
+            "```\n"
+            "```rust\n"
+            "# not a header\n"
+            "```\n\n"
+            "# After\n\nProse after the fence.\n"
+        )
+        sections = _split_into_header_sections(md)
+        titles = [title for _level, title, _body in sections]
+        assert "not a header" not in titles, titles
+        assert titles == ["", "Real", "After"], titles
+        real_body = sections[1][2]
+        assert "```rust\n# not a header" in real_body
+
+    def test_sw_l17_unicode_line_separators_do_not_split_lines(self) -> None:
+        """SW-L17: ``splitlines`` splits on Unicode line separators and form feeds in
+        mid-line, fabricating headers.  Lines split on ``\\n`` only.
+        """
+        for sep in (" ", " ", "\x0c", "\x0b", "\x85"):
+            md = f"# Title\n\nSome text{sep}# fabricated header\n"
+            sections = _split_into_header_sections(md)
+            titles = [title for _level, title, _body in sections]
+            assert "fabricated header" not in titles, (repr(sep), titles)
+            assert titles == ["", "Title"], (repr(sep), titles)
+
+    def test_sw_l18_atx_closing_hashes_stripped_and_empty_header_recognised(self) -> None:
+        """SW-L18: ATX headers keep closing hashes, and an empty ``#`` header is not
+        recognised.  Closing hashes are stripped; a bare ``#`` is a header.
+        """
+        sections = _split_into_header_sections("## Usage ##\n\nBody.\n")
+        assert sections[1][:2] == (2, "Usage")
+        sections = _split_into_header_sections("# C#\n\nBody.\n")
+        assert sections[1][:2] == (1, "C#")
+        sections = _split_into_header_sections("# Title #   \n\nBody.\n")
+        assert sections[1][:2] == (1, "Title")
+        # Empty headers: a bare "#" and "# #" both open a level-1 section.
+        sections = _split_into_header_sections("Intro.\n\n#\n\nUnder empty.\n\n# #\n\nMore.\n")
+        assert [(lvl, t) for lvl, t, _ in sections] == [(0, ""), (1, ""), (1, "")]
+        # "#hashtag" is still not a header.
+        sections = _split_into_header_sections("#hashtag\n")
+        assert [(lvl, t) for lvl, t, _ in sections] == [(0, "")]
+        # An empty header adds no breadcrumb segment.
+        chunks = chunk_markdown("#\n\nUnder empty.\n", "doc.md")
+        assert [c.breadcrumb for c in chunks] == ["doc.md"]
+
+    def test_sw_l19_header_only_section_is_not_indexed(self) -> None:
+        """SW-L19: header-only chunks are indexed and returned with empty text.  A
+        section whose body is empty after its header produces no chunk; its title
+        still reaches the child's breadcrumb.
+        """
+        md = "# Guide\n\n## Ignoring files\n\nUse a .gitignore.\n\n## Empty\n"
+        chunks = chunk_markdown(md, "GUIDE.md")
+        assert [c.breadcrumb for c in chunks] == ["GUIDE.md > Guide > Ignoring files"]
+        for chunk in chunks:
+            body = chunk.text[len(chunk.breadcrumb) :].strip()
+            assert body, f"chunk {chunk.id!r} has an empty body"
+
+    def test_sw_l20_long_whitespace_free_line_is_dropped(self) -> None:
+        """SW-L20: base64, data URIs and minified lines split into thousands of junk
+        chunks.  A line over 2,000 characters with no whitespace is dropped and
+        counted; a 2,000-character line and a long line with spaces are kept.
+        """
+        data_uri = "data:image/png;base64," + "iVBORw0KGgo" * 600
+        md = f"# Logo\n\nThe logo:\n\n{data_uri}\n\nAfter the image.\n"
+        chunks = chunk_markdown(md, "README.md")
+        assert len(chunks) == 1
+        assert "iVBORw0KGgo" not in chunks[0].text
+        assert "After the image." in chunks[0].text
+
+        cleaned, dropped = drop_junk_lines(md)
+        assert dropped == 1
+        assert data_uri not in cleaned
+
+        at_limit = "x" * JUNK_LINE_MIN_CHARS
+        with_spaces = " ".join(["word"] * 1000)
+        cleaned, dropped = drop_junk_lines(f"{at_limit}\n{with_spaces}\n")
+        assert dropped == 0
+        assert cleaned == f"{at_limit}\n{with_spaces}\n"
