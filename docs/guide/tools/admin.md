@@ -36,7 +36,10 @@ Always returns `status: "ok"` with a health envelope:
 | Field | Type | Values / Description |
 |---|---|---|
 | `state` | string | `"indexing"`, `"ready"`, or `"error"`. |
-| `analyzer_error` | string \| null | Diagnostic error string if `state` is `"error"`. |
+| `analyzer_error` | string \| null | Diagnostic error string if `state` is `"error"`. After a rust-analyzer crash: `rust-analyzer exited with code <n>; last stderr: <up to 20 lines>`. |
+| `analyzer_health` | string \| null | rust-analyzer's own health report: `"ok"`, `"warning"` or `"error"` (for example a failed workspace load). `"error"` can appear while `state` is `"ready"`. `null` before the first report and after `refresh`. |
+| `analyzer_health_message` | string \| null | The message of that health report. |
+| `analyzer_exit_code` | integer \| null | Exit code of a rust-analyzer process that exited without a shutdown request; `state` is then `"error"` and gated tools return `rust-analyzer is not running (exited with code <n>); call refresh`. Cleared by `refresh`. |
 | `indexed_commit` | string \| null | Git HEAD commit captured at analyzer start and re-captured when a re-index completes. |
 | `current_commit` | string \| null | Live git HEAD commit on disk. |
 | `stale` | boolean \| null | `true` if `indexed_commit != current_commit`. `null` if git is unavailable. `indexed_commit` is re-captured when a watcher-driven re-index ends, so a branch switch that changes Rust or Cargo files returns this to `false` without `refresh`. |

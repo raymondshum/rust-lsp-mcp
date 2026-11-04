@@ -34,6 +34,9 @@ All navigation tools:
 ## `find_symbol`
 
 Find Rust symbols by name across the workspace. Supports fuzzy prefix matches.
+The server asks rust-analyzer for the `all_symbols` search kind, so results
+cover every symbol kind: functions and methods as well as types, constants and
+modules.
 
 ### Inputs
 
@@ -49,6 +52,15 @@ Find Rust symbols by name across the workspace. Supports fuzzy prefix matches.
 | `not_found` | `message`: confirmation that zero symbols matched the query. |
 | `not_ready` | `message`, `recovery: "poll_status"` — analyzer is indexing. |
 | `error` | `message`, `recovery: "unknown"` — internal LSP failure. |
+
+`results` holds at most 200 symbols. `total` counts the in-workspace matches:
+the items rust-analyzer returned, minus any that resolve outside the project
+(dependency and standard-library symbols), before the 200 cap. `truncated` is
+`true` when rust-analyzer had more than 200 matches, counted before that filter.
+When `truncated` is `true`, `total` is a lower bound on the matches, because the
+server asks rust-analyzer for one item past the cap (201) and so never sees
+more; `total` can then read below 200 when some of those items were outside the
+project. Narrow the query to see the rest.
 
 #### Symbol Object
 ```json

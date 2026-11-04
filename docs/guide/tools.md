@@ -90,6 +90,8 @@ to their `ok` envelope, alongside their list:
 | `total` | integer | Total matching results before capping. `total: 0` confirms a successful search with zero matches. |
 | `truncated` | boolean | `true` when results exceed the 200-item safety cap (`MAX_LIST_RESULTS`). `false` when the list contains all matches. |
 
+For `find_symbol`, rust-analyzer itself stops at 201 matches (one past the cap). `total` counts the in-workspace matches (the items rust-analyzer returned, minus dependency and standard-library symbols the tool drops), and `truncated` is `true` when rust-analyzer returned more than 200 items before that filter. A truncated `total` is therefore a lower bound: at most 201, and below 200 when some returned items were outside the project.
+
 Tools enforce a flat safety cap without pagination. To inspect results beyond the 200-item cap, refine your query with a narrower symbol prefix, specific filename, or declaration filter.
 
 ---
@@ -111,7 +113,9 @@ The server exposes 9 tools categorized into three functional domains:
 ### `find_symbol`
 
 Find Rust symbols by name. Partial names and prefixes work — rust-analyzer
-performs a fuzzy match across the whole workspace.
+performs a fuzzy match across the whole workspace. Results cover every symbol
+kind: functions and methods as well as structs, enums, traits, constants and
+modules.
 
 **Inputs**
 
@@ -123,7 +127,7 @@ performs a fuzzy match across the whole workspace.
 
 | Status | Fields |
 |---|---|
-| `ok` | `results`: list of symbol objects (see below); `total` and `truncated` (see [List caps](#list-caps-total-and-truncated) above). |
+| `ok` | `results`: list of symbol objects (see below), at most 200; `total` (in-workspace matches before the cap) and `truncated` (`true` when rust-analyzer had more than 200 matches; see [List caps](#list-caps-total-and-truncated) above). |
 | `not_found` | `message` — no symbols matched the query, or rust-analyzer returned nothing. |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
 | `error` | `message`, `recovery: "unknown"` — unexpected failure from the LSP layer. |
@@ -500,7 +504,10 @@ Always `ok`, with these fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `state` | `"indexing"`, `"ready"`, or `"error"` | Whether the analyzer has finished indexing. `"error"` means the background indexing run failed permanently — gated tools (via `require_ready`) return an `error` envelope (`recovery: "refresh"`, not `not_ready`) while in this state. Call `refresh` to retry. |
-| `analyzer_error` | string or `null` | Diagnostic message when `state` is `"error"`, else `null`. |
+| `analyzer_error` | string or `null` | Diagnostic message when `state` is `"error"`, else `null`. After a rust-analyzer crash it reads `rust-analyzer exited with code <n>; last stderr: <up to 20 lines>`. |
+| `analyzer_health` | `"ok"`, `"warning"`, `"error"`, or `null` | rust-analyzer's own health report from its latest `experimental/serverStatus` notification. `"error"` (for example a failed workspace load) can appear while `state` is `"ready"`: queries still run, over an incomplete workspace. `null` before the first report and after `refresh`. |
+| `analyzer_health_message` | string or `null` | The message of that health report, or `null`. |
+| `analyzer_exit_code` | integer or `null` | Exit code of a rust-analyzer process that exited without a shutdown request; `state` is then `"error"` and gated tools return `rust-analyzer is not running (exited with code <n>); call refresh` with `recovery: "refresh"`. `null` otherwise; cleared by `refresh`. |
 | `indexed_commit` | string or `null` | The git commit hash captured at analyzer start and re-captured when a re-index completes. `null` if not yet captured or git is unavailable. |
 | `current_commit` | string or `null` | The git commit hash right now. `null` on any failure (non-git directory, git not installed, etc.). |
 | `stale` | boolean or `null` | `true` if the two commit hashes differ; `false` if they match; `null` if either hash is unknown. The server watches the project tree, so after a branch switch or pull that changes Rust or Cargo files, `indexed_commit` is re-captured when the re-index ends and `stale` returns to `false` without `refresh`. A switch that changes no Rust or Cargo file starts no re-index, so `stale` stays `true` until `refresh`. |
@@ -528,6 +535,9 @@ means "no committed changes since indexing began," not a freshness guarantee.
   "status": "ok",
   "state": "ready",
   "analyzer_error": null,
+  "analyzer_health": "ok",
+  "analyzer_health_message": null,
+  "analyzer_exit_code": null,
   "indexed_commit": "a3f1c9d",
   "current_commit": "a3f1c9d",
   "stale": false,

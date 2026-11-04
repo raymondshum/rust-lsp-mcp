@@ -194,6 +194,79 @@ Check this list at these lifecycle checkpoints (see
 
 ## Resolved
 
+### SW-05 — `find_symbol` returned no functions
+- **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`PatchedRustAnalyzer._get_initialize_params`) ·
+  [src/rust_lsp_mcp/tools/find_symbol.py](../../src/rust_lsp_mcp/tools/find_symbol.py).
+- **What:** the 2026-11-03 defect sweep (SW-05, medium) found that multilspy's bundled
+  initialize parameters set `workspace.symbol.search.kind` to `"only_types"` with a
+  limit of 128, so a shared-prefix `find_symbol` query returned types only and never a
+  function, and `truncated` could never become `true`.
+- **Resolved:** 2026-11-04 (remediation T03). `_get_initialize_params` sets the kind to
+  `"all_symbols"` and the limit to `MAX_LIST_RESULTS + 1` (201), one past the tool's
+  cap. `find_symbol` sets `truncated` when rust-analyzer returned more than 200
+  items, counted before it drops symbols outside the workspace (on ripgrep, 2 of
+  the 201 for `"s"` were dependency crate roots, so the cap alone saw 199); `total`
+  counts the in-workspace items and is then a lower bound. Guarded by
+  [tests/test_analyzer_init_params.py](../../tests/test_analyzer_init_params.py) and
+  `test_find_symbol_returns_functions_and_truncates` in
+  [tests/test_phase2_integration.py](../../tests/test_phase2_integration.py).
+
+### SW-06 — A killed rust-analyzer left `status` reading `ready`
+- **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`AnalyzerManager._run`, `_hold_ready`, `_record_process_exit`) ·
+  [src/rust_lsp_mcp/core.py](../../src/rust_lsp_mcp/core.py) (`require_ready`) ·
+  [src/rust_lsp_mcp/envelope.py](../../src/rust_lsp_mcp/envelope.py).
+- **What:** the 2026-11-03 defect sweep (SW-06, medium; also SW-L01) found that nothing
+  watched the rust-analyzer process: after it died `status` kept reading `ready` (or
+  `indexing` forever, for a death before quiescence), and every request failed with
+  the "analyzer is still running, retry" message. Its stderr was dropped.
+- **Resolved:** 2026-11-04 (remediation T03). `_run` races the `start_server()` entry,
+  and after readiness `_shutdown_event`, against `lsp.server.process.wait()` with
+  `FIRST_COMPLETED`; the process wait also reads `process.returncode` every 0.5 s,
+  because on CPython 3.12 `Process.wait()` resolves only after every pipe closes and
+  a proc-macro-srv child holding the inherited stderr pipe hid the death. An exit
+  without a shutdown request sets `state` to `"error"`,
+  `analyzer_exit_code`, and `error_message` to `rust-analyzer exited with code <n>;
+  last stderr: <up to 20 lines>` (a shell exit 127, multilspy's `/bin/sh -c` launch
+  of a missing binary, reads "rust-analyzer binary not found"). A replacement
+  stderr reader keeps the last 200 lines, logs each at debug and survives a line
+  past the 64 KiB stream limit. Gated tools, including a call already in flight
+  at the death, return `rust-analyzer is not running (exited with
+  code <n>); call refresh` (`recovery: "refresh"`), and `lsp_failure` defers to that
+  envelope once `state` is `"error"`. `refresh` clears the exit code. Guarded by
+  [tests/test_analyzer_death.py](../../tests/test_analyzer_death.py).
+
+### SW-07 — A failed workspace load read `ready`
+- **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`PatchedRustAnalyzer._on_server_status`, `AnalyzerManager._make_status_handler`) ·
+  [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py).
+- **What:** the 2026-11-03 defect sweep (SW-07, medium) found that multilspy's
+  `experimental/serverStatus` handler reads only `quiescent` and discards `health` and
+  `message`, so a workspace that failed to load (for example an isolated container
+  with an unprimed cargo cache) reported `ready` with no sign of the failure.
+- **Resolved:** 2026-11-04 (remediation T03). `_get_initialize_params` rebinds the
+  notification to `_on_server_status`, which keeps multilspy's readiness behaviour and
+  passes `health` and `message` to the manager's `status_handler`, and drops
+  multilspy's `cargo.cfgs = {}` (rust-analyzer wants a list and reported
+  `"warning"` on every clean load, masking the signal); `status` reports
+  `analyzer_health` and `analyzer_health_message`, and a change of health is logged at
+  warning. Guarded by [tests/test_analyzer_init_params.py](../../tests/test_analyzer_init_params.py)
+  and [tests/test_analyzer_error_state.py](../../tests/test_analyzer_error_state.py).
+
+### SW-08 — A failed request kept its file open with a stale buffer
+- **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`PatchedRustAnalyzer.open_file`).
+- **What:** the 2026-11-03 defect sweep (SW-08, medium) found that multilspy's
+  `open_file` has no `try/finally` around its `yield`: a request that raised or was
+  cancelled left `open_file_buffers[uri].ref_count` above zero, so the file was never
+  closed and later requests read its old text instead of the file on disk.
+- **Resolved:** 2026-11-04 (remediation T03). The override wraps multilspy's
+  `open_file`; on any exception from the body it decrements the count and sends
+  `didClose` and removes the entry only when the count reaches zero, so a concurrent
+  user of the same file keeps its buffer. Guarded by
+  [tests/test_analyzer_open_file.py](../../tests/test_analyzer_open_file.py).
+
 ### SW-03 — A new file after a branch switch was not found without `refresh`
 - **Where:** [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
   (`PatchedRustAnalyzer._get_initialize_params`, `AnalyzerManager._make_progress_handler`).

@@ -680,3 +680,34 @@ class TestStatusFreshnessFields:
         os.utime(doc, ns=(mtime, mtime))
         after = _call_status(None, subprocess_raises=OSError("no git"))
         assert after["doc_stale"] is True
+
+
+# ---------------------------------------------------------------------------
+# SW-06 / SW-07: analyzer health and exit-code fields
+# ---------------------------------------------------------------------------
+
+_HEALTH_FIELDS = ("analyzer_health", "analyzer_health_message", "analyzer_exit_code")
+
+
+class TestStatusHealthFields:
+    def test_health_fields_null_without_manager(self) -> None:
+        result = _call_status(None, subprocess_raises=OSError("no git"))
+        assert result["status"] == STATUS_OK
+        for field in _HEALTH_FIELDS:
+            assert field in result
+            assert result[field] is None, field
+
+    def test_health_fields_null_on_fresh_manager_stub(self) -> None:
+        result = _call_status(_make_manager(STATE_INDEXING), subprocess_raises=OSError("no git"))
+        for field in _HEALTH_FIELDS:
+            assert result[field] is None, field
+
+    def test_health_fields_read_from_manager(self) -> None:
+        mgr = _make_manager(STATE_INDEXING)
+        mgr.analyzer_health = "warning"
+        mgr.analyzer_health_message = "proc-macro server crashed"
+        mgr.analyzer_exit_code = 101
+        result = _call_status(mgr, subprocess_raises=OSError("no git"))
+        assert result["analyzer_health"] == "warning"
+        assert result["analyzer_health_message"] == "proc-macro server crashed"
+        assert result["analyzer_exit_code"] == 101

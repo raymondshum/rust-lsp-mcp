@@ -121,6 +121,7 @@ Rust build scripts (`build.rs`) and procedural macros run host code during index
    scripts/prime-cache.sh /absolute/path/to/your/rust/project rlm-<project-name>-data
    ```
    Pass the same volume name the isolated config below mounts; without the second argument the script primes the default `rust-lsp-mcp-data` volume instead.
+   The primed cache covers the dependencies at priming time, so re-run the priming script after a branch or a pull changes `Cargo.lock`. With an unprimed or stale cache, `status` reports a non-ok `analyzer_health` (`"warning"` or `"error"`) with its message in `analyzer_health_message`, while `state` stays `"ready"`.
 
 2. **Run in isolated mode** (`--network none`):
    ```json
