@@ -27,6 +27,25 @@
 #       docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp --wait 180 status
 #       docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp find-symbol MyStruct
 #
+#     A second project on the same host needs its own container name and its
+#     own volume name; set three more variables beside RUST_PROJECT (the
+#     defaults are rust-lsp-mcp, rust-lsp-mcp-data and "derive the identity"):
+#
+#       RUST_PROJECT=/abs/path/to/other/project \
+#       RLM_CONTAINER_NAME=rlm-other \
+#       RLM_DATA_VOLUME=rlm-other-data \
+#       RLM_PROJECT_ID=other \
+#         docker compose -p rlm-other up -d rust-lsp-mcp
+#       docker exec rlm-other /app/.venv/bin/rust-lsp --wait 180 status
+#
+#     RLM_CONTAINER_NAME also names the isolated variant
+#     (`${RLM_CONTAINER_NAME}-isolated`). A project with its own
+#     RLM_DATA_VOLUME primes that volume by passing the same name as
+#     scripts/prime-cache.sh's second argument:
+#       scripts/prime-cache.sh /abs/path/to/other/project rlm-other-data
+#     (`-p` gives each project its own compose project, so one project's
+#     `down` never touches another's containers.)
+#
 #     Use the FULL PATH `/app/.venv/bin/rust-lsp` — the image's PATH (see
 #     Dockerfile) only adds /usr/local/cargo/bin, not /app/.venv/bin, so a
 #     bare `rust-lsp` is "command not found" under `docker exec`/`podman exec`.
@@ -52,13 +71,16 @@ services:
       context: .
       dockerfile: Dockerfile
     image: rust-lsp-mcp
-    container_name: rust-lsp-mcp
+    container_name: "${RLM_CONTAINER_NAME:-rust-lsp-mcp}"
     # No entrypoint override: the image ENTRYPOINT (/app/.venv/bin/rust-lsp-mcp)
     # runs directly, reading RLM_TRANSPORT below to start in streamable-HTTP
     # daemon mode instead of the default stdio mode.
     environment:
       RLM_TRANSPORT: streamable-http
       RLM_HTTP_PORT: "8000"
+      # Explicit doc-index identity (empty = derive it from the project path,
+      # git remote and root Cargo.toml). See docs/guide/configuration.md.
+      RLM_PROJECT_ID: "${RLM_PROJECT_ID:-}"
     restart: unless-stopped
     volumes:
       # The target Rust project, read-only. Set RUST_PROJECT to its host path.
@@ -83,7 +105,7 @@ services:
   rust-lsp-mcp-isolated:
     extends:
       service: rust-lsp-mcp
-    container_name: rust-lsp-mcp-isolated
+    container_name: "${RLM_CONTAINER_NAME:-rust-lsp-mcp}-isolated"
     network_mode: none
     environment:
       # RLM_TRANSPORT/RLM_HTTP_PORT are inherited from the base service via
@@ -101,5 +123,7 @@ volumes:
     # Both services above point at this SAME volume/Chroma path. Per KI-13's
     # single-writer mandate, run at most ONE of them (or any other server
     # process against this volume) at a time; use a differently-named volume
-    # if you genuinely need two servers live concurrently.
-    name: rust-lsp-mcp-data
+    # (RLM_DATA_VOLUME) if you genuinely need two servers live concurrently.
+    # The default stays rust-lsp-mcp-data so the prime-cache.sh default keeps
+    # warming the volume this file mounts.
+    name: "${RLM_DATA_VOLUME:-rust-lsp-mcp-data}"

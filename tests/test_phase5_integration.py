@@ -20,7 +20,7 @@ import chromadb
 import pytest
 from chromadb.config import Settings as ChromaSettings
 
-from rust_lsp_mcp.doc_store import DocStore, clear_doc_store
+from rust_lsp_mcp.doc_store import DocStore, clear_doc_store, doc_collection_name
 from rust_lsp_mcp.settings import Settings
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,9 @@ class TestPhase5Integration:
             path=str(tmp_path / "chroma"),
             settings=ChromaSettings(anonymized_telemetry=False),
         )
-        col = client.get_collection("project_docs")
+        # The live name is derived from the project identity (SW-01); read it
+        # through the server's own helper so the test cannot drift.
+        col = client.get_collection(doc_collection_name(settings))
 
         # ChromaDB 1.5.x exposes configuration via col.configuration_json or
         # the collection metadata.  The most reliable check: query two identical
@@ -133,7 +135,9 @@ class TestPhase5Integration:
             path=str(tmp_path / "chroma"),
             settings=ChromaSettings(anonymized_telemetry=False),
         )
-        col = client.get_collection("project_docs")
+        # The live name is derived from the project identity (SW-01); read it
+        # through the server's own helper so the test cannot drift.
+        col = client.get_collection(doc_collection_name(settings))
         assert col.count() == count2, (
             f"Wholesale rebuild should replace, not append: "
             f"col.count()={col.count()}, count2={count2}"

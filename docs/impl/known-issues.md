@@ -98,6 +98,22 @@ Check this list at these lifecycle checkpoints (see
   README's [CLI access](../../README.md#cli-access-for-agents-without-mcp)
   section, and [docs/guide/cli.md](../guide/cli.md)'s troubleshooting table.
   Entry remains open per the stronger-guard note above.
+  **2026-11-03 (defect sweep SW-02, remediation T01):** the hazard was shown on
+  the very first start, in the README's documented config. Two containers started
+  together on a fresh shared volume: the first built its doc index normally, and
+  the second reported `doc_index_state: "error"` with `InternalError: error
+  returned from database: (code: 1) table collections already exists`, its
+  `search_docs` returning an error envelope that recommended `refresh`. Fix: one
+  exclusive `fcntl.flock` on `<chroma_path>/.rlm-doc-store.lock` now covers
+  `PersistentClient` construction, the adopt check and any rebuild
+  (`_prepare_store`), and a `rebuild()` on a live store (`refresh`) takes the same
+  flock, so two servers on one volume serialise their first builds (the second
+  waits, then adopts) and never rebuild concurrently. Per-project collections
+  (SW-01, below) keep different projects on one volume apart. Entry stays open
+  only for the cross-process read of a collection another process deletes: a
+  `refresh` in one server still deletes and recreates the collection another
+  server on the same volume is serving, and that server's doc search fails until
+  it restarts. The one-server-per-volume guidance above still holds for serving.
 
 ### KI-14 — `refresh` blast radius on a shared daemon
 - **Where:** `refresh` MCP tool ([src/rust_lsp_mcp/tools/refresh.py](../../src/rust_lsp_mcp/tools/refresh.py))
@@ -177,6 +193,27 @@ Check this list at these lifecycle checkpoints (see
 ---
 
 ## Resolved
+
+### SW-01 — Every project shared one doc index identity on a shared volume
+- **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
+  (`_project_fingerprint`, `_try_adopt`, the collection name) ·
+  [README.md](../../README.md) (MCP client configs).
+- **What:** the 2026-11-03 defect sweep (SW-01, critical) found that the DS-05
+  fingerprint was only the resolved `project_root`, which is `/project` in every
+  container, and that every container used the same collection name on
+  `/data/chroma`. A container on one project adopted the doc index another project
+  had built on the same volume and answered `search_docs` with that project's docs.
+- **Resolved:** 2026-11-03 (remediation T01). A new `RLM_PROJECT_ID` setting names
+  the project; when it is unset or empty, `project_identity()` derives one from the
+  resolved `project_root`, its git `remote.origin.url` and its root `Cargo.toml`
+  bytes. The identity is part of the fingerprint (`<project_root>|<identity>`),
+  is stamped into the collection metadata as `project_identity` (checked on
+  adopt), and suffixes the collection name (`<RLM_DOC_COLLECTION>_<12 hex>`), so
+  projects sharing one volume keep separate collections. The README's configs now
+  pass `-e RLM_PROJECT_ID=<project-name>` and a per-project volume, and
+  `docker-compose.yml` takes `RLM_CONTAINER_NAME`, `RLM_DATA_VOLUME` and
+  `RLM_PROJECT_ID` (SW-11). Guarded by the one-path-two-contents regression in
+  [tests/test_project_identity.py](../../tests/test_project_identity.py).
 
 ### KI-12 — No version introspection
 - **Where:** [src/rust_lsp_mcp/tools/status.py](../../src/rust_lsp_mcp/tools/status.py)

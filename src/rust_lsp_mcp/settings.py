@@ -56,6 +56,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("RLM_PROJECT_ROOT", "RLM_RIPGREP_SRC"),
     )
 
+    project_id: str | None = None
+    """Explicit identity of the target project for the doc index (env ``RLM_PROJECT_ID``).
+
+    The doc store keys its fingerprint and its ChromaDB collection name on
+    this identity, so two projects that share one ``chroma_path`` never adopt
+    each other's index.  ``None`` and the empty string are equivalent: both
+    mean "unset", and the server then derives the identity from the resolved
+    ``project_root``, its git ``remote.origin.url`` and its root
+    ``Cargo.toml`` bytes (see ``doc_store.project_identity``).  Set it when two
+    different projects are mounted at the same path with no git remote and
+    byte-identical root ``Cargo.toml`` files, the one case the derived
+    identity cannot tell apart.
+    """
+
     # -----------------------------------------------------------------------
     # Rust / cargo caches (§0.2)
     # -----------------------------------------------------------------------
