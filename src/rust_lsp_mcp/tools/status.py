@@ -14,7 +14,12 @@ from typing import Any
 from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, get_preflight_warnings, mcp
-from rust_lsp_mcp.doc_store import doc_index_chunk_count, doc_store_freshness, doc_store_state
+from rust_lsp_mcp.doc_store import (
+    doc_index_chunk_count,
+    doc_index_progress,
+    doc_store_freshness,
+    doc_store_state,
+)
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
 
@@ -76,9 +81,21 @@ async def status() -> dict[str, Any]:
                            notification, or ``null``.
     - ``doc_index_state`` — ``"building"``/``"ready"``/``"error"`` for the
                            documentation search index (independent of
-                           ``state`` above — see ``search_docs``).
+                           ``state`` above — see ``search_docs``).  Stays
+                           ``"ready"`` during a rebuild over an existing
+                           index (``search_docs`` keeps answering from the
+                           old index); ``"building"`` only for the first
+                           build on an empty store.
     - ``doc_index_error`` — diagnostic message when ``doc_index_state ==
-                           "error"``, else ``null``.
+                           "error"``; also set with ``doc_index_state ==
+                           "ready"`` when the last rebuild failed and the old
+                           index is still being served; else ``null``.
+    - ``doc_index_progress`` — progress of a running doc index rebuild, or
+                           ``null`` when none is running: ``files_total``,
+                           ``files_done``, ``started_at`` (ISO 8601 UTC) and
+                           ``phase`` (``"starting"`` while it waits for
+                           its locks, then ``"scanning"``, ``"embedding"``
+                           and ``"swapping"``).
     - ``doc_index_chunk_count`` — number of indexed Markdown chunks
                            (``collection.count()``), or ``null`` when
                            ``doc_index_state != "ready"``. ``0`` is a valid
@@ -139,6 +156,7 @@ async def status() -> dict[str, Any]:
     indexed_commit: str | None = mgr.indexed_commit if mgr is not None else None
     repo_root: str = mgr.repository_root if mgr is not None else get_settings().project_root
     doc_state, doc_err = doc_store_state()
+    doc_progress = doc_index_progress()
     preflight_warnings = get_preflight_warnings()
     rust_analyzer_version: str | None = mgr.rust_analyzer_version if mgr is not None else None
     indexing_started_at: str | None = mgr.indexing_started_at if mgr is not None else None
@@ -186,6 +204,7 @@ async def status() -> dict[str, Any]:
         analyzer_progress_at=analyzer_progress_at,
         doc_index_state=doc_state,
         doc_index_error=doc_err,
+        doc_index_progress=doc_progress,
         doc_index_chunk_count=doc_chunk_count,
         doc_indexed_commit=doc_indexed_commit,
         doc_stale=doc_stale,

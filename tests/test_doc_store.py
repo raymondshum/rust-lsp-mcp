@@ -19,6 +19,7 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import hashlib
 import multiprocessing
@@ -34,6 +35,7 @@ import numpy as np
 import pytest
 from chromadb.config import Settings as ChromaSettings
 
+import rust_lsp_mcp.doc_store as doc_store_mod
 from rust_lsp_mcp.doc_store import (
     DOC_STATE_BUILDING,
     DOC_STATE_READY,
@@ -51,6 +53,9 @@ from rust_lsp_mcp.doc_store import (
     init_doc_store,
     init_doc_store_background,
     project_identity,
+)
+from rust_lsp_mcp.doc_store import (
+    doc_index_progress as doc_index_progress_fn,
 )
 from rust_lsp_mcp.settings import Settings
 
@@ -164,38 +169,36 @@ class TestDocStoreRebuild:
         store.rebuild()
         assert store.is_ready is True
 
-    def test_is_ready_false_at_start_of_rebuild(self, tmp_path: pathlib.Path) -> None:
-        """Verifies the ordering invariant: is_ready is set False BEFORE any work.
+    def test_is_ready_stays_true_during_rebuild_over_live_index(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """SW-10: a rebuild over an existing index keeps ``state == "ready"``.
 
-        We patch create_collection on the client instance to capture is_ready
-        at the moment it is called, which is after the initial False-flip and
-        after delete_collection — i.e. early in the rebuild critical section.
+        The first build on an empty store reads ``"building"`` (captured at
+        create_collection time); the second build, over a published live
+        collection, stays ready throughout and builds into the staging name.
         """
         corpus = tmp_path / "corpus"
         _write_corpus(corpus)
         settings = _make_settings(tmp_path, corpus)
         store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
 
-        # First build to completion so there's something to capture on second rebuild.
-        store.rebuild()
-        assert store.is_ready is True
-
-        # On second rebuild, is_ready should flip to False at the very start.
-        ready_states_during_rebuild: list[bool] = []
+        observed: list[tuple[str, bool]] = []
         orig_create_collection = store._client.create_collection
 
-        def _patched_create_collection(*args: Any, **kwargs: Any) -> Any:
-            # Capture is_ready right when create_collection is called (early in rebuild).
-            ready_states_during_rebuild.append(store.is_ready)
-            return orig_create_collection(*args, **kwargs)
+        def _patched_create_collection(name: str, *args: Any, **kwargs: Any) -> Any:
+            observed.append((name, store.is_ready))
+            return orig_create_collection(name, *args, **kwargs)
 
+        live_name = doc_collection_name(settings)
         with patch.object(store._client, "create_collection", _patched_create_collection):
             store.rebuild()
+            assert store.is_ready is True
+            store.rebuild()
 
-        assert store.is_ready is True  # Back to True after completion.
-        # During rebuild (at create_collection time), is_ready must have been False.
-        assert ready_states_during_rebuild, "create_collection was never called"
-        assert ready_states_during_rebuild[0] is False
+        assert observed == [(f"{live_name}_staging", False), (f"{live_name}_staging", True)]
+        assert store.is_ready is True
+        assert store._collection.name == live_name
 
     def test_rebuild_idempotent_chunk_count(self, tmp_path: pathlib.Path) -> None:
         """Two consecutive rebuilds over the same corpus produce the same count."""
@@ -461,18 +464,15 @@ class TestDocStoreSearch:
             f"Expected a known body text among results, got: {bodies}"
         )
 
-    def test_search_header_only_chunk_yields_empty_text(self, tmp_path: pathlib.Path) -> None:
-        """A header-only chunk (embedded text == breadcrumb verbatim) yields text == "" (UR-14).
+    def test_search_header_only_section_not_indexed(self, tmp_path: pathlib.Path) -> None:
+        """SW-L19: a header-only section is not indexed, so no result has empty text.
 
-        A headed section with no body is embedded as the bare breadcrumb (no
-        ``"\\n\\n"``), so the startswith-guarded strip cannot match — the result
-        must degrade to an empty body, never re-ship the breadcrumb as text.
+        ``# Only A Header`` has no body of its own (the next line is a
+        sub-header); it produces no chunk, and its title still reaches the
+        sub-section's breadcrumb.  The body-only strip (UR-14) still applies.
         """
         corpus = tmp_path / "corpus"
         corpus.mkdir(parents=True, exist_ok=True)
-        # "# Only A Header" has no body of its own (the next line is a
-        # sub-header), producing a chunk whose embedded text is exactly its
-        # breadcrumb — verified against chunk_markdown's else-branch.
         (corpus / "hdr.md").write_text(
             "# Only A Header\n\n## Sub With Body\n\nSome body content here.\n",
             encoding="utf-8",
@@ -480,20 +480,12 @@ class TestDocStoreSearch:
         settings = _make_settings(tmp_path, corpus)
         store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
         count = store.rebuild()
-        assert count == 2  # header-only chunk + sub-section chunk
+        assert count == 1  # the sub-section only
 
         results = store.search("anything", n_results=10)
-        by_breadcrumb = {r["breadcrumb"]: r for r in results}
-
-        # (b) header-only chunk → empty body, breadcrumb field intact.
-        header_only = by_breadcrumb["hdr.md > Only A Header"]
-        assert header_only["text"] == "", (
-            f"Header-only chunk must have empty body text, got: {header_only['text']!r}"
-        )
-
-        # The sibling chunk with a real body keeps it (body-only, no prefix).
-        with_body = by_breadcrumb["hdr.md > Only A Header > Sub With Body"]
-        assert with_body["text"] == "Some body content here."
+        assert [r["breadcrumb"] for r in results] == ["hdr.md > Only A Header > Sub With Body"]
+        assert results[0]["text"] == "Some body content here."
+        assert all(r["text"] for r in results)
 
     def test_search_before_rebuild_raises_not_ready(self, tmp_path: pathlib.Path) -> None:
         """search() before any rebuild raises DocStoreNotReady (collection is None).
@@ -624,14 +616,10 @@ class TestDS12ReadWriteRace:
         assert store._collection is not None
         assert store.is_ready is True
 
-    def test_concurrent_rebuild_pauses_search_sees_not_ready(self, tmp_path: pathlib.Path) -> None:
-        """Real 2-thread transition-visibility test: once a rebuild() has
-        completed its start transition (state=BUILDING, collection=None) and
-        released _read_lock, a concurrent search() OBSERVES that transition and
-        raises DocStoreNotReady rather than returning a misleading
-        empty/partial result.  (The complementary lock-mutual-exclusion
-        property — that search holding _read_lock blocks the start transition —
-        is covered by test_concurrent_search_blocks_rebuild_start_transition.)
+    def test_old_collection_answers_search_during_rebuild(self, tmp_path: pathlib.Path) -> None:
+        """SW-10: while a rebuild is paused mid-build, search() answers from the
+        old (live) collection with the steady-state results, never
+        DocStoreNotReady; after the swap the new collection answers.
         """
         corpus = tmp_path / "corpus"
         _write_corpus(corpus)
@@ -639,40 +627,49 @@ class TestDS12ReadWriteRace:
         store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
         store.rebuild()
         assert store.is_ready is True
+        steady = store.search("ignore files", n_results=3)
+        assert steady
+        old_collection = store._collection
 
         rebuild_paused = threading.Event()
         release_rebuild = threading.Event()
+        orig_chunk = doc_store_mod.chunk_markdown
 
-        orig_create_collection = store._client.create_collection
-
-        def _patched_create_collection(*args: Any, **kwargs: Any) -> Any:
-            # By the time create_collection is called, the start transition
-            # (state=BUILDING, collection=None, delete_collection) has already
-            # completed and _read_lock has been released.
+        def _slow_chunk(text: str, rel_path: str) -> Any:
             rebuild_paused.set()
             assert release_rebuild.wait(timeout=5), "test deadlocked waiting for release"
-            return orig_create_collection(*args, **kwargs)
+            return orig_chunk(text, rel_path)
 
+        # A changed file forces re-chunking, so the rebuild reaches _slow_chunk.
+        (corpus / "guide.md").write_text(
+            "# Guide\n\nThe guide explains how to ignore files, revised.\n", encoding="utf-8"
+        )
         rebuild_result: dict[str, Any] = {}
 
         def _run_rebuild() -> None:
-            with patch.object(store._client, "create_collection", _patched_create_collection):
+            with patch.object(doc_store_mod, "chunk_markdown", _slow_chunk):
                 rebuild_result["count"] = store.rebuild()
 
         rebuild_thread = threading.Thread(target=_run_rebuild)
         rebuild_thread.start()
         try:
             assert rebuild_paused.wait(timeout=5), "rebuild never reached the paused point"
-
-            with pytest.raises(DocStoreNotReady):
-                store.search("anything")
+            assert store.state == DOC_STATE_READY
+            during = store.search("ignore files", n_results=3)
+            assert during == steady
+            assert store._collection is old_collection
+            progress = store.progress()
+            assert progress["phase"] == "embedding"
         finally:
             release_rebuild.set()
             rebuild_thread.join(timeout=5)
             assert not rebuild_thread.is_alive(), "rebuild thread did not finish"
 
-        assert store.is_ready is True
         assert rebuild_result["count"] > 0
+        assert store._collection is not old_collection
+        after = store.search("revised", n_results=5)
+        assert any("revised" in r["text"] for r in after)
+        assert store.progress()["phase"] is None
 
     def test_concurrent_search_blocks_rebuild_start_transition(
         self, tmp_path: pathlib.Path
@@ -1744,3 +1741,675 @@ class TestRebuildTakesFlock:
         assert "error" not in outcome, outcome
         assert outcome["count"] > 0
         assert store.state == DOC_STATE_READY
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-03 remediation T04: build-and-swap (SW-10), incremental re-embed,
+# shutdown (SW-L14) and the doc-search low rows SW-L13, L15, L21 to L24.
+# ---------------------------------------------------------------------------
+
+
+class _CountingEmbeddingFunction(FakeEmbeddingFunction):
+    """FakeEmbeddingFunction that records every document it embeds."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedded: list[str] = []
+
+    def __call__(self, input: chromadb.api.types.Documents) -> chromadb.api.types.Embeddings:
+        self.embedded.extend(input)
+        return super().__call__(input)
+
+
+class _OtherModelEmbeddingFunction(FakeEmbeddingFunction):
+    """Same family (``name()``) as FakeEmbeddingFunction, another model (SW-L13).
+
+    ChromaDB compares only ``name()`` when a collection is reopened, so a
+    model swap inside one embedding-function family passes its check; the
+    ``embedding_model`` stamp is what refuses it.
+    """
+
+    MODEL_NAME = "fake-other-model"
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> _OtherModelEmbeddingFunction:
+        return _OtherModelEmbeddingFunction()
+
+
+def _collection_names(chroma_path: str) -> set[str]:
+    client = chromadb.PersistentClient(
+        path=chroma_path, settings=ChromaSettings(anonymized_telemetry=False)
+    )
+    return {c.name for c in client.list_collections()}
+
+
+def _on_disk_count(chroma_path: str, name: str) -> int:
+    client = chromadb.PersistentClient(
+        path=chroma_path, settings=ChromaSettings(anonymized_telemetry=False)
+    )
+    return client.get_collection(name, embedding_function=FakeEmbeddingFunction()).count()  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+class TestBuildAndSwap:
+    """SW-10: the rebuild builds into ``<live>_staging`` and swaps on success."""
+
+    def test_failed_rebuild_keeps_old_collection_and_count(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        count1 = store.rebuild()
+        old_collection = store._collection
+        steady = store.search("ignore files", n_results=3)
+
+        # A changed file is re-chunked, which is where the failure is injected.
+        (corpus / "intro.md").write_text("# Intro\n\nChanged.\n", encoding="utf-8")
+        with (
+            patch.object(doc_store_mod, "chunk_markdown", side_effect=RuntimeError("chunk boom")),
+            pytest.raises(RuntimeError, match="chunk boom"),
+        ):
+            store.rebuild()
+
+        live_name = doc_collection_name(settings)
+        assert store.state == DOC_STATE_READY
+        assert store.error_message == "RuntimeError: chunk boom"
+        assert store.state_snapshot() == (DOC_STATE_READY, "RuntimeError: chunk boom")
+        assert store._collection is old_collection
+        assert store.chunk_count() == count1
+        assert store.search("ignore files", n_results=3) == steady
+        assert _collection_names(settings.chroma_path) == {live_name}
+        assert _on_disk_count(settings.chroma_path, live_name) == count1
+
+    def test_rename_failure_after_live_delete_reads_error(self, tmp_path: pathlib.Path) -> None:
+        """If the rename fails after the live collection was deleted, the store
+        stops serving the deleted collection and reads ``error``."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+        orig_create = store._client.create_collection
+
+        def _create_with_failing_rename(*args: Any, **kwargs: Any) -> Any:
+            collection = orig_create(*args, **kwargs)
+            orig_modify = collection.modify
+
+            def _modify(*a: Any, **kw: Any) -> Any:
+                if "name" in kw:
+                    raise RuntimeError("rename failed")
+                return orig_modify(*a, **kw)
+
+            collection.modify = _modify  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+            return collection
+
+        with (
+            patch.object(store._client, "create_collection", _create_with_failing_rename),
+            pytest.raises(RuntimeError, match="rename failed"),
+        ):
+            store.rebuild()
+        assert store.state_snapshot() == ("error", "RuntimeError: rename failed")
+        assert store._collection is None
+        with pytest.raises(DocStoreNotReady):
+            store.search("anything")
+
+    def test_leftover_staging_collection_is_replaced(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        live_name = doc_collection_name(settings)
+        leftover = store._client.create_collection(
+            f"{live_name}_staging",
+            embedding_function=FakeEmbeddingFunction(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        )
+        leftover.add(ids=["orphan"], documents=["orphan from an interrupted rebuild"])
+
+        count = store.rebuild()
+
+        assert _collection_names(settings.chroma_path) == {live_name}
+        assert store._collection.count() == count
+        assert store._collection.get(ids=["orphan"])["ids"] == []
+
+    def test_swap_writes_stamps_and_per_chunk_hash(self, tmp_path: pathlib.Path) -> None:
+        """The swapped-in collection carries T02's indexed_commit and doc_digest,
+        the SW-L13 keys, and every chunk carries its file's SHA-256."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+
+        meta = store._collection.metadata or {}
+        assert meta["build_complete"] is True
+        assert meta["doc_digest"] == doc_store_digest(settings)
+        assert "indexed_commit" in meta
+        assert meta["doc_glob_patterns"] == settings.doc_glob_patterns
+        assert meta["doc_exclude_patterns"] == settings.doc_exclude_patterns
+        assert meta["chunker_version"] == doc_store_mod.CHUNKER_VERSION
+        assert meta["embedding_model"] == "fake-deterministic"
+
+        rows = store._collection.get(include=["metadatas"])
+        expected = {
+            "intro.md": hashlib.sha256((corpus / "intro.md").read_bytes()).hexdigest(),
+            "guide.md": hashlib.sha256((corpus / "guide.md").read_bytes()).hexdigest(),
+        }
+        for row in rows["metadatas"]:
+            assert row["file_sha256"] == expected[row["file"]]
+        # The adopt path (T02) still accepts the swapped-in collection.
+        clear_doc_store()
+        adopted = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert adopted.is_ready is True
+        assert adopted._collection.count() == store._collection.count()
+        clear_doc_store()
+
+    def test_progress_idle_shape_and_log_line(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        assert store.progress() == {
+            "files_total": 0,
+            "files_done": 0,
+            "started_at": None,
+            "phase": None,
+        }
+        with caplog.at_level("INFO", logger="rust_lsp_mcp.doc_store"):
+            store.rebuild()
+        assert store.progress()["phase"] is None
+        assert any(
+            "rebuild complete, 0 files unchanged, 2 re-embedded," in r.getMessage()
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+
+class TestIncrementalReembed:
+    """Only new and changed files are embedded on a rebuild."""
+
+    def test_second_rebuild_embeds_only_the_changed_file(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        ef = _CountingEmbeddingFunction()
+        store = DocStore(settings, embedding_function=ef)
+        first = store.rebuild()
+        assert len(ef.embedded) == first
+        guide_rows_before = store._collection.get(
+            where={"file": "guide.md"}, include=["embeddings", "documents"]
+        )
+
+        (corpus / "intro.md").write_text(
+            "# Introduction\n\nRewritten intro.\n\n## Later\n\nMore.\n", encoding="utf-8"
+        )
+        ef.embedded.clear()
+        with caplog.at_level("INFO", logger="rust_lsp_mcp.doc_store"):
+            second = store.rebuild()
+
+        intro_chunks = store._collection.get(where={"file": "intro.md"})["ids"]
+        assert len(ef.embedded) == len(intro_chunks) == 2
+        assert all("intro" in d.lower() or "More." in d for d in ef.embedded), ef.embedded
+        assert not any("guide" in d.lower() for d in ef.embedded)
+        guide_rows_after = store._collection.get(
+            where={"file": "guide.md"}, include=["embeddings", "documents"]
+        )
+        assert guide_rows_after["ids"] == guide_rows_before["ids"]
+        assert guide_rows_after["documents"] == guide_rows_before["documents"]
+        assert np.allclose(guide_rows_after["embeddings"], guide_rows_before["embeddings"])
+        assert second == store._collection.count()
+        assert any(
+            "rebuild complete, 1 files unchanged, 1 re-embedded, " + f"{second} chunks"
+            in r.getMessage()
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_changed_chunker_version_reembeds_everything(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        ef = _CountingEmbeddingFunction()
+        store = DocStore(settings, embedding_function=ef)
+        first = store.rebuild()
+        ef.embedded.clear()
+        with patch.object(doc_store_mod, "CHUNKER_VERSION", "test-next"):
+            second = store.rebuild()
+        assert len(ef.embedded) == second == first
+
+
+class TestShutdownCancelsRebuild:
+    """SW-L14: clear_doc_store() stops a running rebuild and keeps the live index."""
+
+    def test_clear_doc_store_cancels_slow_rebuild(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        for i in range(5):
+            (corpus / f"extra{i}.md").write_text(f"# Extra {i}\n\nBody {i}.\n", encoding="utf-8")
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        count1 = store.rebuild()
+        live_name = doc_collection_name(settings)
+
+        for f in corpus.glob("*.md"):
+            f.write_text(f.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+        in_chunker = threading.Event()
+        orig_chunk = doc_store_mod.chunk_markdown
+
+        def _slow_chunk(text: str, rel_path: str) -> Any:
+            in_chunker.set()
+            time.sleep(0.2)
+            return orig_chunk(text, rel_path)
+
+        outcome: dict[str, Any] = {}
+
+        def _run() -> None:
+            with patch.object(doc_store_mod, "chunk_markdown", _slow_chunk):
+                try:
+                    store.rebuild()
+                except doc_store_mod.DocRebuildCancelled as exc:
+                    outcome["cancelled"] = exc
+
+        thread = threading.Thread(target=_run)
+        thread.start()
+        try:
+            assert in_chunker.wait(timeout=5)
+            t0 = time.monotonic()
+            clear_doc_store()
+            elapsed = time.monotonic() - t0
+            # clear_doc_store returned only once the rebuild had stopped.
+            assert store._rebuild_idle.is_set()
+        finally:
+            thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert elapsed < 5
+        assert store._cancel.is_set()
+        assert "cancelled" in outcome
+        assert store.state == DOC_STATE_READY
+        assert _collection_names(settings.chroma_path) == {live_name}
+        assert _on_disk_count(settings.chroma_path, live_name) == count1
+
+    def test_shutdown_while_worker_waits_on_flock_publishes_nothing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Hold the flock, start the startup worker, call clear_doc_store(),
+        release the flock: get_doc_store() stays None and no rebuild runs."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        lock_dir = pathlib.Path(settings.chroma_path)
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_dir / ".rlm-doc-store.lock", os.O_CREAT | os.O_RDWR, 0o666)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+        rebuild_calls: list[None] = []
+        orig_rebuild = DocStore.rebuild
+
+        def _spy_rebuild(self: DocStore, **kwargs: Any) -> int:
+            rebuild_calls.append(None)
+            return orig_rebuild(self, **kwargs)
+
+        async def _scenario() -> None:
+            clear_doc_store()
+            await init_doc_store_background(settings, embedding_function=FakeEmbeddingFunction())
+            task = doc_store_mod._build_task
+            assert task is not None
+            await asyncio.sleep(0.3)  # the worker is now blocked on the flock
+            assert not task.done()
+            clear_doc_store()
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            await asyncio.wait_for(task, timeout=10)
+
+        try:
+            with patch.object(DocStore, "rebuild", _spy_rebuild):
+                asyncio.run(_scenario())
+        finally:
+            os.close(fd)
+        assert get_doc_store() is None
+        assert rebuild_calls == []
+        assert doc_store_state() == (DOC_STATE_BUILDING, None)
+        assert doc_collection_name(settings) not in _collection_names(settings.chroma_path)
+
+
+class TestSweepLowRowsDocStore:
+    """SW-L13, L15, L21, L22, L23 and L24."""
+
+    @pytest.mark.parametrize(
+        ("key", "change"),
+        [
+            ("doc_glob_patterns", {"doc_glob_patterns": "**/*.md,docs/*.md"}),
+            ("doc_exclude_patterns", {"doc_exclude_patterns": "**/NEVER.md"}),
+            ("chunker_version", {}),
+            ("embedding_model", {}),
+        ],
+    )
+    def test_sw_l13_adopt_refuses_on_each_key(
+        self,
+        tmp_path: pathlib.Path,
+        caplog: pytest.LogCaptureFixture,
+        key: str,
+        change: dict[str, str],
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        clear_doc_store()
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        clear_doc_store()
+
+        probe = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_mod._try_adopt(probe, settings, FakeEmbeddingFunction()) is True
+
+        changed = settings.model_copy(update=change)
+        assert doc_store_files(changed) == doc_store_files(settings)
+        ef: Any = FakeEmbeddingFunction()
+        if key == "embedding_model":
+            ef = _OtherModelEmbeddingFunction()
+        probe = DocStore(changed, embedding_function=ef)
+        with caplog.at_level("INFO", logger="rust_lsp_mcp.doc_store"):
+            if key == "chunker_version":
+                with patch.object(doc_store_mod, "CHUNKER_VERSION", "test-next"):
+                    adopted = doc_store_mod._try_adopt(probe, changed, ef)
+            else:
+                adopted = doc_store_mod._try_adopt(probe, changed, ef)
+        assert adopted is False
+        assert any(f"not adopting: {key} differs" in r.getMessage() for r in caplog.records)
+
+    def test_sw_l15_failing_adopt_logs_warning_and_keeps_collection(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        clear_doc_store()
+        built = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        count = built._collection.count()
+        clear_doc_store()
+        live_name = doc_collection_name(settings)
+
+        probe = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        with (
+            patch.object(
+                probe._client, "get_collection", side_effect=RuntimeError("transient read")
+            ),
+            caplog.at_level("WARNING", logger="rust_lsp_mcp.doc_store"),
+        ):
+            adopted = doc_store_mod._try_adopt(probe, settings, FakeEmbeddingFunction())
+        assert adopted is False
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("transient read" in r.getMessage() for r in warnings)
+        assert _on_disk_count(settings.chroma_path, live_name) == count
+
+    def test_sw_l21_symlinks_and_outside_root_files_are_skipped(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "real.md").write_text("# Real\n\nReal doc.\n", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("# Secret\n\nAPI_KEY=1\n", encoding="utf-8")
+        (corpus / "link.md").symlink_to(corpus / "real.md")
+        (corpus / "linkdir").symlink_to(outside, target_is_directory=True)
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md,linkdir/*.md,*.md",
+            doc_exclude_patterns="",
+        )
+        # The outside file is reachable through the explicit pattern.
+        assert list(corpus.glob("linkdir/*.md"))
+
+        assert doc_store_files(settings) == [corpus / "real.md"]
+        digest = doc_store_digest(settings)
+
+        (outside / "secret.md").write_text("# Secret\n\nAPI_KEY=2 longer\n", encoding="utf-8")
+        (corpus / "link.md").unlink()
+        (corpus / "link.md").symlink_to(outside / "secret.md")
+        assert doc_store_files(settings) == [corpus / "real.md"]
+        assert doc_store_digest(settings) == digest
+
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store.rebuild()
+        files = {m["file"] for m in store._collection.get(include=["metadatas"])["metadatas"]}
+        assert files == {"real.md"}
+
+    def test_sw_l22_failed_reinit_reports_new_construction_error(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        clear_doc_store()
+        with (
+            patch.object(doc_store_mod, "chunk_markdown", side_effect=RuntimeError("old failure")),
+            pytest.raises(RuntimeError, match="old failure"),
+        ):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_state() == ("error", "RuntimeError: old failure")
+
+        with (
+            patch.object(doc_store_mod, "DocStore", side_effect=RuntimeError("new failure")),
+            pytest.raises(RuntimeError, match="new failure"),
+        ):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert get_doc_store() is None
+        assert doc_store_state() == ("error", "RuntimeError: new failure")
+        clear_doc_store()
+
+    def test_sw_l23_state_and_error_written_under_read_lock(self, tmp_path: pathlib.Path) -> None:
+        writes: list[tuple[str, Any, bool]] = []
+
+        class _SpyStore(DocStore):
+            def __setattr__(self, name: str, value: Any) -> None:
+                if name in ("_state", "_error") and "_read_lock" in self.__dict__:
+                    writes.append((name, value, self._read_lock.locked()))
+                super().__setattr__(name, value)
+
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = _SpyStore(settings, embedding_function=FakeEmbeddingFunction())
+        with (
+            patch.object(doc_store_mod, "chunk_markdown", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError),
+        ):
+            store.rebuild()
+        store.rebuild()
+
+        assert writes, "rebuild wrote no state"
+        assert all(locked for _name, _value, locked in writes), writes
+        assert ("_error", "RuntimeError: boom", True) in writes
+        assert ("_state", "error", True) in writes
+        assert store.state_snapshot() == ("ready", None)
+
+    def test_sw_l24_non_ascii_scripts_count_one_token_per_character(self) -> None:
+        from rust_lsp_mcp.doc_chunking import estimate_tokens
+
+        for text in ("привет" * 50, "Καλημέρα" * 40, "مرحبا" * 60, "字" * 300):
+            assert estimate_tokens(text) >= len(text), text[:10]
+        # ASCII is still estimated at two characters per token.
+        assert estimate_tokens("abcd" * 100) == 200
+
+
+# ---------------------------------------------------------------------------
+# T04 R-gate round 1: cancel during embedding (step 5a), progress from
+# registration (step 3), shutdown during store construction (step 5b).
+# ---------------------------------------------------------------------------
+
+
+class _SlowEmbeddingFunction(FakeEmbeddingFunction):
+    """Sleeps per embedded document; signals its first call."""
+
+    def __init__(self, per_doc: float = 0.0) -> None:
+        super().__init__()
+        self.per_doc = per_doc
+        self.first_call = threading.Event()
+        self.docs = 0
+
+    def __call__(self, input: chromadb.api.types.Documents) -> chromadb.api.types.Embeddings:
+        self.first_call.set()
+        self.docs += len(input)
+        time.sleep(self.per_doc * len(input))
+        return super().__call__(input)
+
+
+def _many_files(root: pathlib.Path, n_files: int, sections: int) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    for i in range(n_files):
+        body = "".join(
+            f"## Section {j} of file {i}\n\nBody text {i}-{j} about topic {j}.\n\n"
+            for j in range(sections)
+        )
+        (root / f"doc{i:03d}.md").write_text(f"# File {i}\n\n{body}", encoding="utf-8")
+
+
+def _swallow(fn: Any) -> None:
+    with contextlib.suppress(Exception):
+        fn()
+
+
+class TestRGateRound1:
+    """Regression tests for the two live breaks and the construction-window race."""
+
+    def test_sw_l14_clear_doc_store_stops_rebuild_during_embedding_promptly(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Step 5a: a shutdown during the embedding of a full rebuild (fewer chunks
+        than one add batch) stops it in under 1 s; live intact, no staging left."""
+        corpus = tmp_path / "corpus"
+        _many_files(corpus, n_files=30, sections=8)  # ~270 chunks, below _ADD_BATCH_SIZE
+        settings = _make_settings(tmp_path, corpus)
+        ef = _SlowEmbeddingFunction()
+        clear_doc_store()
+        store = init_doc_store(settings, embedding_function=ef)
+        live = doc_collection_name(settings)
+        before = store.chunk_count()
+        for p in corpus.glob("*.md"):
+            p.write_text(p.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
+        ef.per_doc = 0.015  # ~4 s to embed the whole corpus
+        ef.first_call.clear()
+        thread = threading.Thread(target=lambda: _swallow(store.rebuild), daemon=True)
+        thread.start()
+        assert ef.first_call.wait(10)
+        t0 = time.monotonic()
+        clear_doc_store()
+        elapsed = time.monotonic() - t0
+        thread.join(15)
+        assert not thread.is_alive()
+        assert _collection_names(settings.chroma_path) == {live}
+        assert _on_disk_count(settings.chroma_path, live) == before
+        assert elapsed < 1.0, f"cancel took {elapsed:.2f}s: not checked during embedding"
+
+    def test_progress_not_null_while_rebuild_in_flight(self, tmp_path: pathlib.Path) -> None:
+        """Step 3 amendment: phase is "starting" from registration, before the
+        locks and the git identity call, so doc_index_progress is never null
+        while a rebuild is in flight."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        clear_doc_store()
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        gate = threading.Event()
+        entered = threading.Event()
+        real_identity = doc_store_mod.project_identity
+
+        def _slow_identity(s: Settings) -> str:
+            entered.set()
+            gate.wait(5)
+            return real_identity(s)
+
+        with patch.object(doc_store_mod, "project_identity", _slow_identity):
+            thread = threading.Thread(target=store.rebuild, daemon=True)
+            thread.start()
+            try:
+                assert entered.wait(5)
+                in_flight = doc_store_mod.doc_rebuild_in_progress()
+                progress = doc_index_progress_fn()
+            finally:
+                gate.set()
+                thread.join(10)
+        assert in_flight is True
+        assert progress is not None, "doc_index_progress is null while a rebuild is running"
+        assert progress["phase"] == "starting"
+        assert progress["started_at"] is not None
+        assert doc_index_progress_fn() is None
+        clear_doc_store()
+
+    def test_case5c_shutdown_during_store_construction_publishes_nothing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Step 5b: shutdown lands after the flock, while DocStore(...) is being
+        constructed, with an adoptable index on disk: nothing is published."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        clear_doc_store()
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        clear_doc_store()
+        real_init = DocStore.__init__
+        entered = threading.Event()
+        go = threading.Event()
+
+        def _slow_init(self: Any, *a: Any, **k: Any) -> None:
+            entered.set()
+            go.wait(10)
+            real_init(self, *a, **k)
+
+        async def _scenario() -> None:
+            await init_doc_store_background(settings, embedding_function=FakeEmbeddingFunction())
+            task = doc_store_mod._build_task
+            await asyncio.to_thread(entered.wait, 10)
+            clear_doc_store()
+            go.set()
+            assert task is not None
+            await asyncio.wait_for(task, 10)
+
+        with patch.object(DocStore, "__init__", _slow_init):
+            asyncio.run(_scenario())
+        assert get_doc_store() is None
+
+    def test_case5c_shutdown_during_project_identity_publishes_nothing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Step 5b test as specified: an adoptable collection on disk and
+        project_identity patched to call clear_doc_store() first."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        clear_doc_store()
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        clear_doc_store()
+        real_identity = doc_store_mod.project_identity
+        calls: list[None] = []
+
+        def _identity_with_shutdown(s: Settings) -> str:
+            if not calls:
+                calls.append(None)
+                clear_doc_store()
+            return real_identity(s)
+
+        with (
+            patch.object(doc_store_mod, "project_identity", _identity_with_shutdown),
+            pytest.raises(doc_store_mod.DocRebuildCancelled),
+        ):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert calls
+        assert get_doc_store() is None
+
+    def test_refresh_worker_generation_captured_before_thread_start(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Step 5b: a re-init worker whose generation was captured on the loop
+        publishes nothing when shutdown runs before the thread reaches it."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        clear_doc_store()
+        generation = doc_store_mod.current_shutdown_generation()
+        clear_doc_store()
+        with pytest.raises(doc_store_mod.DocRebuildCancelled):
+            init_doc_store(
+                settings, embedding_function=FakeEmbeddingFunction(), generation=generation
+            )
+        assert get_doc_store() is None

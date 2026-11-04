@@ -1,4 +1,4 @@
-"""Refresh tool — unconditional teardown and wholesale re-index of the analyzer.
+"""Refresh tool — restart the analyzer and rebuild the doc index in the background.
 
 Registered with the FastMCP app at import time via ``@mcp.tool()``.
 """
@@ -6,29 +6,38 @@ Registered with the FastMCP app at import time via ``@mcp.tool()``.
 import asyncio
 import logging
 import weakref
+from collections.abc import Callable
 from typing import Any
 
-from anyio.to_thread import run_sync
 from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, mcp
-from rust_lsp_mcp.doc_store import DOC_STATE_ERROR, get_doc_store, init_doc_store
+from rust_lsp_mcp.doc_store import (
+    DOC_STATE_ERROR,
+    DocRebuildCancelled,
+    current_shutdown_generation,
+    doc_index_progress,
+    doc_store_state,
+    get_doc_store,
+    init_doc_store,
+    start_doc_rebuild,
+)
 from rust_lsp_mcp.envelope import RECOVERY_REFRESH, error, ok
-from rust_lsp_mcp.settings import get_settings
+from rust_lsp_mcp.settings import Settings, get_settings
 
 _log = logging.getLogger(__name__)
 
-# finding-3: serializes the doc-store re-init/rebuild block below across
-# concurrent refresh() calls.  Without this, two concurrent refresh() calls
-# hitting an absent/errored store both take the re-init branch and construct
-# two DocStore instances against the same on-disk collection (DocStore's
-# _build_lock is per-instance, so two separate instances don't coordinate at
-# all) — worst case a spurious transient error.  This is an asyncio.Lock (not
-# threading.Lock) because it only needs to serialize coroutines on the event
-# loop, one at a time, before each one offloads its own doc-store work to a
-# worker thread via run_sync.  Scoped to ONLY the doc-store block, not
-# mgr.restart() — the analyzer side is already serialized by its own
-# lifecycle lock.
+# finding-3: serializes the doc-store decide-and-start block below across
+# concurrent refresh() calls.  Without it, two concurrent refresh() calls on
+# an absent/errored store could both decide to re-initialise and start two
+# workers that construct two DocStore instances against the same on-disk
+# collection (DocStore's _build_lock is per-instance, so separate instances
+# don't coordinate).  Under the lock, start_doc_rebuild() checks whether a
+# build is already in flight and starts at most one worker thread, so a
+# second refresh() never queues another rebuild.  This is an asyncio.Lock
+# (not threading.Lock) because it only serializes coroutines on the event
+# loop.  Scoped to ONLY the doc-store block, not mgr.restart() — the
+# analyzer side is already serialized by its own lifecycle lock.
 #
 # Per-loop lock (#91): a bare module-level asyncio.Lock binds to the event
 # loop that first CONTENDS it (Python's lazy _get_loop(), reached only on the
@@ -81,7 +90,7 @@ def _get_doc_store_refresh_lock() -> asyncio.Lock:
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
 )
 async def refresh() -> dict[str, Any]:
-    """Tear down the running analyzer and start a fresh wholesale re-index.
+    """Restart the analyzer process and rebuild the doc index in the background.
 
     **Blast radius:** this tears down and re-indexes the single global
     analyzer shared by the whole server — every other navigation tool
@@ -90,21 +99,29 @@ async def refresh() -> dict[str, Any]:
     re-indexing completes, which can take minutes on large projects. Do not
     invoke this mid-task unless the index is actually stale or broken (e.g.
     ``status``/``analyzer_status`` reports ``state == "error"``, or you know
-    the workspace changed since the last index).
+    the workspace changed since the last index).  ``search_docs`` keeps
+    answering from the old doc index while the doc rebuild runs.
 
     Behaviour contract:
-        - **Unconditional**: every call re-indexes wholesale regardless of the
-          current commit or state — there is no hash-gating or diff check.
+        - **Unconditional**: every call restarts the analyzer regardless of
+          the current commit or state — there is no hash-gating or diff check.
         - **Non-blocking (analyzer)**: returns after kicking off the analyzer
           re-index in the background.  Poll ``analyzer_status`` (or ``status``)
-          until ``state == "ready"`` before issuing navigation queries.
-        - **Blocking (doc store)**: the documentation store rebuild is awaited
-          synchronously (offloaded to a worker thread) before this call returns.
-          The rebuild is fast; ``is_ready`` is ``False`` during the rebuild, so
-          concurrent ``search_docs`` calls correctly return ``not_ready`` rather
-          than a misleading partial result.
-        - **Cache-preserving**: never wipes rust-analyzer's saved on-disk cargo
-          cache; only the in-process LSP context is torn down and respawned.
+          until ``state == "ready"`` before issuing navigation queries.  The
+          rust-analyzer process is restarted and re-reads the workspace from
+          scratch.
+        - **Non-blocking (doc index)**: starts the doc index rebuild on a
+          background thread and returns once that thread has started, with
+          ``doc_rebuild_started: true``.  The rebuild writes a staging
+          collection and swaps it in on success, so ``search_docs`` keeps
+          answering from the old index meanwhile and ``doc_index_state`` stays
+          ``"ready"`` (it reads ``"building"`` only for a first build on an
+          empty store).  Only files whose content changed are re-embedded.
+          ``status``'s ``doc_index_progress`` reports the rebuild's progress.
+        - **No queued rebuilds**: while a doc build or rebuild is already
+          running (from startup or an earlier ``refresh``), no second one is
+          started; the envelope carries ``doc_rebuild_started: false`` and the
+          current ``doc_index_progress``.  The analyzer is still restarted.
         - ``restart()`` sets ``state = "indexing"`` as its very first action
           (before teardown begins), so callers never observe a stale ``"ready"``
           during the re-index window.  Concurrent ``refresh`` calls serialize
@@ -116,39 +133,31 @@ async def refresh() -> dict[str, Any]:
           ``restart()`` is also the recovery path from an errored analyzer
           (``state == "error"``): it clears the error and re-indexes.
         - **Doc-store recovery**: if the doc store was never initialised
-          (``get_doc_store()`` is ``None``) or is in the ``"error"`` state
-          (permanently failed until recovered), ``refresh`` re-initialises it
-          from scratch via ``init_doc_store`` rather than calling ``rebuild()``
-          on a store that may not exist or is known-broken.  Otherwise (a
-          healthy store already present) it calls ``store.rebuild()`` directly
-          — this is the doc-index half of the same recovery path DS-07 uses on
-          the analyzer side.
-        - If doc-store re-init/rebuild raises an exception, an ``error``
-          envelope is returned with a message noting that the analyzer
-          re-index was already kicked off.  ``DocStore.rebuild()`` sets
-          ``state = "error"`` on failure (not left in a stale ``"ready"``), so
-          ``search_docs`` will correctly return ``error`` (not a misleading
-          ``ok``) afterward — the invariant holds.
-        - **Doc-store re-init serialization (finding-3)**: the doc-store
-          recovery block (the ``get_doc_store()`` read through the
-          ``init_doc_store``/``rebuild`` call) is serialized behind a
-          per-event-loop ``asyncio.Lock`` (see ``_get_doc_store_refresh_lock``)
-          so two concurrent ``refresh`` calls on an absent/errored store cannot
-          both construct a fresh ``DocStore`` against the same on-disk
-          collection.  Only that block is locked — ``mgr.restart()`` above is
-          already serialized by the analyzer's own lifecycle lock.
+          (``get_doc_store()`` is ``None``) or is in the ``"error"`` state, the
+          worker re-initialises it from scratch via ``init_doc_store`` rather
+          than calling ``rebuild()`` on a store that may not exist or is
+          known-broken; otherwise it calls ``store.rebuild()``.
+        - **Doc-store failures**: because this returns before the rebuild
+          runs, the envelope cannot carry a doc rebuild failure.  The worker
+          logs it at error and ``status`` reports it: ``doc_index_error``
+          carries the message (with ``doc_index_state`` ``"error"`` when no
+          old index is left to serve, else still ``"ready"``), and
+          ``search_docs`` returns an ``error`` envelope when the index is
+          unavailable.
+        - **Serialization (finding-3)**: the decide-and-start block is
+          serialized behind a per-event-loop ``asyncio.Lock`` (see
+          ``_get_doc_store_refresh_lock``).
 
     Returns:
-        ``ok`` envelope with ``state="indexing"`` and a polling hint message,
-        an ``error`` envelope if the analyzer manager is not running, or an
-        ``error`` envelope if the doc-store rebuild/re-init failed (the
-        analyzer re-index will still be running in the background in that
-        case).  The doc-store-rebuild-failure ``error`` carries
-        ``recovery: "refresh"`` — the analyzer half is already recovering;
-        fix the doc-index cause (e.g. the embedding model or Chroma path)
-        and call ``refresh`` again.  The analyzer-not-running ``error`` is a
-        rare startup-ordering case and carries the default
-        ``recovery: "unknown"``.
+        ``ok`` envelope with ``state`` (the analyzer state snapshotted right
+        after ``restart()``, normally ``"indexing"``), ``doc_index_state``
+        (as it stands at return), ``doc_rebuild_started``,
+        ``doc_index_progress`` (the running rebuild's progress or ``null``)
+        and a polling hint ``message``; an ``error`` envelope if the analyzer
+        manager is not running (default ``recovery: "unknown"``, a rare
+        startup-ordering case), or, with ``recovery: "refresh"``, if the doc
+        rebuild thread could not be started (the analyzer re-index is
+        already running in that case).
     """
     mgr = get_manager()
     if mgr is None:
@@ -157,51 +166,77 @@ async def refresh() -> dict[str, Any]:
     await mgr.restart()
 
     # Snapshot the just-kicked-off analyzer state (``"indexing"`` in the normal
-    # path) BEFORE the blocking doc-store work below.  The returned state is an
-    # acknowledgement that a re-index was started — it must not depend on how
-    # long the doc-store rebuild takes.  Reading ``mgr.state`` at return time
-    # instead would race the background re-index (a fast warm re-index can reach
-    # ``"ready"`` while a cold doc-store embed is still running), yielding a
-    # misleading ``"ready"``; callers poll ``status`` for the live state.
+    # path) right after restart().  The returned state is an acknowledgement
+    # that a re-index was started; callers poll ``status`` for the live state.
     refresh_state = mgr.state
 
-    # Doc-store recovery: an absent or errored store is re-initialised from
-    # scratch (mirrors lifespan startup); a healthy store is rebuilt in place.
-    # Either way this is synchronous/blocking work offloaded to a worker
-    # thread so we don't block the event loop.
-    #
-    # finding-3: serialized behind the per-loop doc-store refresh lock (#91)
-    # so two concurrent refresh() calls on an absent/errored store cannot
-    # both take the re-init path and construct two DocStore instances
-    # against the same on-disk collection — see the lock accessor's
-    # module-level docstring.  (DS-12's search/rebuild race itself is fixed
-    # inside DocStore via _read_lock; this lock only serializes refresh()'s
-    # OWN doc-store block.)  ``get_doc_store`` is read INSIDE the lock too,
-    # so a refresh() that waited behind another one observes the
-    # just-re-initialised singleton rather than a stale absent/errored
-    # snapshot taken before the wait.
+    # finding-3: decide and start under the per-loop doc-store refresh lock
+    # (#91).  The store, the settings, init_doc_store and the shutdown
+    # generation are read here, on the event loop, before the thread starts,
+    # and handed to the worker, so the worker acts on what this call observed
+    # and a shutdown that runs before it gets going stops it (SW-L14).
     try:
         async with _get_doc_store_refresh_lock():
-            store = get_doc_store()
-            if store is None or getattr(store, "state", None) == DOC_STATE_ERROR:
-                _log.info("refresh: doc store absent or errored — re-initialising")
-                await run_sync(lambda: init_doc_store(get_settings()))
-            else:
-                await run_sync(store.rebuild)
+            work = _doc_rebuild_work(
+                get_doc_store(), get_settings(), init_doc_store, current_shutdown_generation()
+            )
+            started = start_doc_rebuild(work)
     except Exception as exc:
-        # DocStore.rebuild() sets state="error" on failure, so search_docs
-        # will correctly surface the failure after this — the invariant holds.
-        _log.exception("refresh: doc-store rebuild failed")
+        _log.exception("refresh: could not start the doc-store rebuild")
         return error(
-            f"Analyzer re-index started, but documentation rebuild failed: {exc}. "
+            f"Analyzer re-index started, but the documentation rebuild could not start: {exc}. "
             "The analyzer re-index is already running in the background and will "
             "complete on its own — do NOT call refresh again to fix the analyzer. "
-            "Only the documentation index failed to rebuild; once the underlying "
-            "cause is fixed, calling refresh again will rebuild it.",
+            "Once the underlying cause is fixed, calling refresh again will rebuild "
+            "the documentation index.",
             recovery=RECOVERY_REFRESH,
         )
 
+    doc_state, _doc_err = doc_store_state()
+    if started:
+        message = (
+            "Re-index started; poll status until state is 'ready'. The doc index "
+            "rebuilds in the background (status.doc_index_progress); search_docs "
+            "keeps answering from the old index meanwhile."
+        )
+    else:
+        message = (
+            "Re-index started; poll status until state is 'ready'. A doc index "
+            "rebuild was already running, so no new one was started "
+            "(status.doc_index_progress)."
+        )
     return ok(
         state=refresh_state,
-        message="Re-index started; poll status until state is 'ready'.",
+        doc_index_state=doc_state,
+        doc_rebuild_started=started,
+        doc_index_progress=doc_index_progress(),
+        message=message,
     )
+
+
+def _doc_rebuild_work(
+    store: Any, settings: Settings, reinit: Callable[..., Any], generation: int
+) -> Callable[[], None]:
+    """Return the worker-thread body for one doc rebuild.
+
+    An absent or errored *store* is re-initialised through *reinit*
+    (``init_doc_store``, mirroring lifespan startup); a healthy one is rebuilt
+    in place.  *generation* is the shutdown generation captured on the event
+    loop; both paths pass it on, so a shutdown that ran since publishes and
+    rebuilds nothing.  Never raises: a cancellation at shutdown logs at info,
+    any other failure at error (``status`` then reports it, SW-L22).
+    """
+
+    def _work() -> None:
+        try:
+            if store is None or getattr(store, "state", None) == DOC_STATE_ERROR:
+                _log.info("refresh: doc store absent or errored — re-initialising")
+                reinit(settings, generation=generation)
+            else:
+                store.rebuild(generation=generation)
+        except DocRebuildCancelled:
+            _log.info("refresh: doc-store rebuild cancelled at shutdown")
+        except Exception:
+            _log.exception("refresh: background doc-store rebuild failed")
+
+    return _work

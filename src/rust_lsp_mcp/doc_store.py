@@ -9,14 +9,28 @@ singleton accessors below are already final and must keep their signatures.
 
 The store wraps a ChromaDB ``PersistentClient`` (cosine collection) over the
 chunks produced by :func:`rust_lsp_mcp.doc_chunking.chunk_markdown`.  It is
-built once at lifespan startup and rebuilt wholesale by ``refresh``.
+built once at lifespan startup and rebuilt by ``refresh`` on a background
+thread.
 
 Readiness contract (load-bearing — mirrors the analyzer's readiness gate):
     ``state`` is one of ``"building"`` / ``"ready"`` / ``"error"``; ``is_ready``
     (kept for backward compatibility) is ``True`` only when ``state ==
     "ready"``.  ``search_docs`` gates on this so a caller never receives a
-    misleading empty/partial answer mid-rebuild, and surfaces a permanent
-    failure (``"error"``) distinctly from a transient one (``"building"``).
+    misleading empty/partial answer, and surfaces a permanent failure
+    (``"error"``) distinctly from a transient one (``"building"``).
+
+Build-and-swap (SW-10):
+    A rebuild writes into a staging collection named ``<live name>_staging``
+    while the store keeps serving the live collection, so ``state`` stays
+    ``"ready"`` through a rebuild over an existing index; only the first build
+    on an empty store reads ``"building"``.  On success the live collection is
+    deleted and the staging one renamed to the live name and published, under
+    ``_read_lock``; on failure (or cancellation at shutdown) the staging
+    collection is deleted and the live one keeps answering, with
+    ``error_message`` set.  Every chunk carries the SHA-256 of its file's
+    bytes (``file_sha256``); a file whose hash matches the live collection's
+    has its chunks and embeddings copied into staging instead of re-embedded.
+    :meth:`DocStore.progress` reports the rebuild's phase and file counts.
 
 Read/write coordination (DS-12):
     A fast-path ``is_ready``/``state`` check on the event loop followed by an
@@ -58,8 +72,9 @@ Inter-process start lock (SW-02, KI-13):
 
 Doc index freshness (SW-04):
     :func:`doc_store_files` is the one place that selects the files to index
-    (the glob patterns, de-duplication and ``doc_exclude_patterns``); no other
-    function globs the doc patterns.  A successful rebuild stamps the
+    (the glob patterns, de-duplication, ``doc_exclude_patterns``, and the
+    SW-L21 skip of symlinks and of files resolving outside ``project_root``);
+    no other function globs the doc patterns.  A successful rebuild stamps the
     collection with ``indexed_commit`` (git ``HEAD`` of ``project_root``) and
     ``doc_digest`` (:func:`doc_store_digest`, over the same file list), so
     :func:`_try_adopt` refuses an index built on another branch or from other
@@ -79,6 +94,17 @@ Startup split (DS-08):
     the flock the singleton is ``None`` and ``doc_store_state()`` reports
     ``"building"``; once it publishes the store, ``get_doc_store()`` /
     ``doc_store_state()`` observe the in-flight store.
+
+Shutdown (SW-L14):
+    :func:`clear_doc_store` sets the cancel flag of every store whose rebuild
+    is running (started by the startup task or by a ``refresh`` worker) and
+    waits up to 10 seconds for it to stop; the rebuild checks the flag between
+    files and before each embedding batch (at most one file's chunks) and
+    abandons its staging collection.  It also bumps a shutdown generation,
+    which workers capture before they start: :func:`_prepare_store` checks it
+    after the flock and again, under ``_running_lock``, when it publishes the
+    singleton, and ``rebuild()`` checks it at registration, so a worker
+    interrupted anywhere before its publish or rebuild does neither.
 """
 
 from __future__ import annotations
@@ -92,8 +118,10 @@ import os
 import pathlib
 import subprocess
 import threading
+import time
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import chromadb
@@ -101,7 +129,7 @@ from chromadb.api.types import Metadatas
 from chromadb.config import Settings as ChromaSettings
 from chromadb.errors import NotFoundError
 
-from rust_lsp_mcp.doc_chunking import chunk_markdown
+from rust_lsp_mcp.doc_chunking import CHUNKER_VERSION, chunk_markdown, drop_junk_lines
 from rust_lsp_mcp.settings import Settings
 
 _log = logging.getLogger(__name__)
@@ -112,6 +140,33 @@ _ADD_BATCH_SIZE = 500
 DOC_STATE_BUILDING = "building"
 DOC_STATE_READY = "ready"
 DOC_STATE_ERROR = "error"
+
+
+# Suffix of the collection a rebuild writes before swapping it in (SW-10).
+_STAGING_SUFFIX = "_staging"
+
+# Progress is logged at info every this many files (T04 step 3).
+_PROGRESS_LOG_EVERY = 50
+
+# clear_doc_store() waits this long for a running rebuild to stop (SW-L14).
+_SHUTDOWN_WAIT_SECONDS = 10.0
+
+# Model name stamped for ChromaDB's bundled DefaultEmbeddingFunction (SW-L13).
+_DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+# Rebuild phases reported by DocStore.progress().
+PHASE_STARTING = "starting"
+PHASE_SCANNING = "scanning"
+PHASE_EMBEDDING = "embedding"
+PHASE_SWAPPING = "swapping"
+
+
+class DocRebuildCancelled(Exception):
+    """Raised by :meth:`DocStore.rebuild` when shutdown cancelled it (SW-L14).
+
+    The staging collection has been deleted and the live collection is
+    intact.  Callers log it at info; it is not a failure of the index.
+    """
 
 
 class DocStoreNotReady(Exception):
@@ -211,21 +266,40 @@ def doc_store_files(settings: Settings) -> list[pathlib.Path]:
     a ``settings.doc_exclude_patterns`` glob matches is removed.
     ``_rebuild_locked`` indexes exactly this list and :func:`doc_store_digest`
     hashes exactly this list, so an excluded file never changes the digest.
+
+    SW-L21: a match that is itself a symlink, or whose resolved path lies
+    outside the resolved ``project_root`` (reached through a symlinked
+    directory), is skipped, so a hostile repository cannot get container
+    files such as ``/proc/self/environ`` indexed and served.  The check lives
+    here and nowhere else, so the indexer and the digest read the same list
+    and a skipped file changing never flips ``doc_stale``.
     """
     src_root = pathlib.Path(settings.project_root)
+    root_resolved = src_root.resolve()
     patterns = [p.strip() for p in settings.doc_glob_patterns.split(",") if p.strip()]
 
     all_files: list[pathlib.Path] = []
     for pattern in patterns:
         all_files.extend(src_root.glob(pattern))
 
-    # Deduplicate (multiple patterns may match same file) and filter to files only.
+    # Deduplicate (multiple patterns may match same file), drop symlinks and
+    # files resolving outside project_root (SW-L21), keep regular files only.
     seen: set[pathlib.Path] = set()
     unique_files: list[pathlib.Path] = []
     for f in all_files:
-        if f not in seen and f.is_file():
-            seen.add(f)
-            unique_files.append(f)
+        if f in seen:
+            continue
+        seen.add(f)
+        if f.is_symlink() or not f.is_file():
+            continue
+        try:
+            resolved = f.resolve()
+        except OSError:
+            continue
+        if not resolved.is_relative_to(root_resolved):
+            _log.debug("doc_store: skipping %s (resolves outside project_root)", f)
+            continue
+        unique_files.append(f)
 
     # Compute the exclusion set from doc_exclude_patterns and remove those paths.
     exclude_patterns = [p.strip() for p in settings.doc_exclude_patterns.split(",") if p.strip()]
@@ -332,6 +406,62 @@ def _project_fingerprint(settings: Settings, identity: str | None = None) -> str
     return f"{pathlib.Path(settings.project_root).resolve()}|{identity}"
 
 
+def _embedding_model_name(embedding_function: Any | None) -> str:
+    """Return the embedding model name stamped on the collection (SW-L13).
+
+    ``None`` (ChromaDB's bundled default) is ``all-MiniLM-L6-v2``; otherwise
+    the embedding function's ``MODEL_NAME`` or ``model_name`` attribute when it
+    has one (ChromaDB itself only compares ``name()``, which names the
+    embedding-function family, not the model), else its ``name()``, falling
+    back to its class name.
+    """
+    if embedding_function is None:
+        return _DEFAULT_EMBEDDING_MODEL
+    for attr in ("MODEL_NAME", "model_name"):
+        model = getattr(embedding_function, attr, None)
+        if isinstance(model, str) and model:
+            return model
+    name_fn = getattr(embedding_function, "name", None)
+    if callable(name_fn):
+        try:
+            name = name_fn()
+        except Exception:
+            name = None
+        if isinstance(name, str) and name:
+            return name
+    return type(embedding_function).__name__
+
+
+def _build_settings_stamp(settings: Settings, embedding_function: Any | None) -> dict[str, str]:
+    """Return the SW-L13 adopt keys for *settings* and *embedding_function*.
+
+    Stamped on every built collection and compared by :func:`_try_adopt`:
+    a change to the doc globs, the exclusions, the chunker or the embedding
+    model makes the old chunks unusable.
+    """
+    return {
+        "doc_glob_patterns": settings.doc_glob_patterns,
+        "doc_exclude_patterns": settings.doc_exclude_patterns,
+        "chunker_version": CHUNKER_VERSION,
+        "embedding_model": _embedding_model_name(embedding_function),
+    }
+
+
+def _utc_now_iso() -> str:
+    """Return the current time as ISO 8601 UTC with seconds precision."""
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _read_doc_text(data: bytes) -> str:
+    """Decode a doc file's bytes as UTF-8 with universal newlines.
+
+    Matches what ``Path.read_text(encoding="utf-8", errors="replace")`` gave
+    before the rebuild started hashing bytes: ``\r\n`` and a lone ``\r``
+    become ``\n``.
+    """
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 @contextlib.contextmanager
 def _doc_store_flock(chroma_path: str) -> Iterator[None]:
     """Hold the exclusive inter-process doc-store lock for the ``with`` body.
@@ -402,14 +532,15 @@ class DocStore:
         self._error: str | None = None
         # Two distinct locks (DS-12):
         #   _build_lock — guards rebuild() against concurrent invocation (e.g.
-        #       the DS-08 background build task racing a synchronous refresh()
+        #       the DS-08 background build task racing a refresh worker's
         #       rebuild).  Held for the ENTIRE rebuild (long: globbing,
         #       chunking, embedding, batch-add).
-        #   _read_lock — guards the _state/_collection reads in search() and
-        #       their transitions in _rebuild_locked().  Held only BRIEFLY: by
-        #       search() across its readiness-check + snapshot + count/query,
-        #       and by _rebuild_locked() only around its two brief start/end
-        #       transitions (not around the long build body).
+        #   _read_lock — guards the _state/_error/_collection reads in
+        #       search() and state_snapshot() and their transitions in
+        #       _rebuild_locked() / _rebuild_recording_errors().  Held only
+        #       BRIEFLY: by search() across its readiness-check + snapshot +
+        #       count/query, and by the rebuild around its start transition
+        #       and its swap (not around the long build body).
         # Ordering/no-deadlock: rebuild() always acquires _build_lock (outer)
         # before _read_lock (inner, and only briefly); search() acquires only
         # _read_lock and never _build_lock.  Since no code path acquires
@@ -417,12 +548,26 @@ class DocStore:
         # and thus no deadlock.
         self._build_lock = threading.Lock()
         self._read_lock = threading.Lock()
+        # Rebuild progress (T04 step 3), guarded by its own small lock so a
+        # status poll never waits behind a search holding _read_lock.
+        self._progress_lock = threading.Lock()
+        self._progress: dict[str, Any] = _idle_progress()
+        # Shutdown coordination (SW-L14): clear_doc_store() sets _cancel; the
+        # rebuild checks it between files.  _rebuild_idle is set whenever no
+        # rebuild() call is running on this store (cleared on entry, set in a
+        # finally on exit); _active_rebuilds counts the calls in flight and is
+        # guarded by the module-level _running_lock.
+        self._cancel = threading.Event()
+        self._rebuild_idle = threading.Event()
+        self._rebuild_idle.set()
+        self._active_rebuilds = 0
 
     @property
     def is_ready(self) -> bool:
-        """``True`` only when the collection is fully built and not mid-rebuild.
+        """``True`` only when a collection is published and queryable.
 
         Kept for backward compatibility; equivalent to ``state == "ready"``.
+        Stays ``True`` during a rebuild over an existing index (SW-10).
         """
         return self._state == DOC_STATE_READY
 
@@ -433,8 +578,39 @@ class DocStore:
 
     @property
     def error_message(self) -> str | None:
-        """``"{ExceptionType}: {message}"`` if the last ``rebuild()`` failed, else ``None``."""
+        """``"{ExceptionType}: {message}"`` if the last ``rebuild()`` failed, else ``None``.
+
+        Set together with ``state`` under ``_read_lock`` (SW-L23).  A failed
+        rebuild over an existing index leaves ``state == "ready"`` (the old
+        index keeps answering) with this message set.
+        """
         return self._error
+
+    def state_snapshot(self) -> tuple[str, str | None]:
+        """Return ``(state, error_message)`` read together under ``_read_lock`` (SW-L23).
+
+        ``status`` reads the pair through this, so it never observes
+        ``"error"`` with a ``None`` message mid-transition.
+        """
+        with self._read_lock:
+            return self._state, self._error
+
+    def progress(self) -> dict[str, Any]:
+        """Return the rebuild's progress (T04 step 3).
+
+        A new dict with ``files_total`` and ``files_done`` (ints),
+        ``started_at`` (ISO 8601 UTC, or ``None`` when idle) and ``phase``:
+        ``"starting"`` (registered, waiting for the locks and the project
+        identity), ``"scanning"`` (listing and stamping the files), ``"embedding"``
+        (chunking, embedding or copying each file), ``"swapping"`` (replacing
+        the live collection) or ``None`` when no rebuild is running.
+        """
+        with self._progress_lock:
+            return dict(self._progress)
+
+    def _set_progress(self, **fields: Any) -> None:
+        with self._progress_lock:
+            self._progress.update(fields)
 
     def chunk_count(self) -> int | None:
         """Return the collection's live ``count()``, or ``None`` if not ``"ready"``.
@@ -446,7 +622,8 @@ class DocStore:
         running ``_rebuild_locked`` in this process). An intentionally-empty
         adopted corpus (DS-24: ready, ``build_complete``, 0 rows) correctly
         reports ``0``, not ``None`` — only "not ready" (no collection yet, or
-        state != ``"ready"``) reports ``None``.
+        state != ``"ready"``) reports ``None``.  During a rebuild over an
+        existing index this is the live (old) collection's count.
 
         Lock choice (DS-12): only the readiness check + collection snapshot
         is taken under ``_read_lock`` (briefly); the ``collection.count()``
@@ -455,11 +632,8 @@ class DocStore:
         ``count()``+``query()``. This is a deliberate trade for this accessor:
         it is called on every ``status`` poll (a frequent, low-stakes read),
         so holding ``_read_lock`` across the Chroma call would serialize
-        every poll behind a concurrent rebuild's brief start/end transitions.
-        Reading a possibly-stale/wrong count on the rare occasion a rebuild's
-        destructive start transition lands between the snapshot and the
-        ``count()`` call is the better trade than adding that contention. If
-        the snapshotted collection object is invalidated by such a race
+        every poll behind a concurrent rebuild's brief transitions.  If the
+        snapshotted collection object is invalidated by a concurrent swap
         before ``count()`` returns, the exception is swallowed and ``None``
         is reported rather than propagating.
         """
@@ -472,15 +646,21 @@ class DocStore:
         except Exception:
             return None
 
-    def rebuild(self, *, lock_held: bool = False) -> int:
-        """Wholesale rebuild: drop + recreate the collection, re-index every
-        matching ``*.md``.  Flips ``state`` to ``"building"`` during the rebuild
-        and to ``"ready"`` on completion (or ``"error"`` on failure, re-raising
-        the exception).  Returns the number of chunks indexed.
+    def rebuild(self, *, lock_held: bool = False, generation: int | None = None) -> int:
+        """Rebuild the index into a staging collection and swap it in (SW-10).
+
+        While the rebuild runs the store keeps serving the live collection
+        (``state`` stays ``"ready"`` when one is published; the first build on
+        an empty store reads ``"building"``).  On success the staging
+        collection replaces the live one and ``state`` is ``"ready"``; on
+        failure the staging collection is deleted, ``error_message`` is set
+        and the exception re-raised, with ``state`` left ``"ready"`` when a
+        live collection exists and ``"error"`` otherwise.  Files whose bytes
+        hash the same as in the live collection are copied, not re-embedded.
+        Returns the number of chunks in the new index.
 
         Synchronous/blocking — callers that must not block the event loop run it
-        via a worker thread (e.g. ``anyio.to_thread.run_sync`` or
-        ``asyncio.to_thread``).
+        on a worker thread.
 
         Args:
             lock_held: ``False`` (every caller except ``_prepare_store``) takes
@@ -490,16 +670,31 @@ class DocStore:
                 released afterwards.  ``True`` means the calling thread already
                 holds both ``_build_lock`` and the flock (``_prepare_store``'s
                 decide-and-build section); neither is taken again.
+            generation: the shutdown generation the caller captured (see
+                :func:`current_shutdown_generation`).  When a
+                :func:`clear_doc_store` has run since, registration sets the
+                cancel flag, so the rebuild stops before doing any work.
+
+        Raises:
+            DocRebuildCancelled: :func:`clear_doc_store` set the cancel flag
+                (SW-L14); the live collection is intact.
         """
-        if lock_held:
-            return self._rebuild_recording_errors(acquire_flock=False)
-        with self._build_lock:
-            return self._rebuild_recording_errors(acquire_flock=True)
+        _register_running(self, generation)
+        try:
+            if lock_held:
+                return self._rebuild_recording_errors(acquire_flock=False)
+            with self._build_lock:
+                return self._rebuild_recording_errors(acquire_flock=True)
+        finally:
+            _unregister_running(self)
 
     def _rebuild_recording_errors(self, *, acquire_flock: bool) -> int:
         """Run ``_rebuild_locked`` (under the flock if asked), recording a failure.
 
-        Must only be called while holding ``_build_lock``.
+        Must only be called while holding ``_build_lock``.  ``state`` and
+        ``error_message`` are written together under ``_read_lock`` (SW-L23);
+        ``state`` becomes ``"error"`` only when no live collection is
+        published.
         """
         try:
             if acquire_flock:
@@ -507,151 +702,292 @@ class DocStore:
                     return self._rebuild_locked()
             return self._rebuild_locked()
         except Exception as exc:
-            self._state = DOC_STATE_ERROR
-            self._error = f"{type(exc).__name__}: {exc}"
+            with self._read_lock:
+                self._error = f"{type(exc).__name__}: {exc}"
+                if self._collection is None:
+                    self._state = DOC_STATE_ERROR
             raise
 
+    def _check_cancelled(self) -> None:
+        if self._cancel.is_set():
+            raise DocRebuildCancelled("doc index rebuild cancelled at shutdown")
+
+    def _open_copy_source(
+        self, live_name: str, identity: str, stamp: dict[str, str]
+    ) -> tuple[Any, dict[str, str]]:
+        """Return ``(collection, {file: file_sha256})`` to copy unchanged files from.
+
+        The source is the live collection: the published one when it carries
+        the live name, else the on-disk collection of that name (for example
+        one ``_try_adopt`` refused because the tree moved on).  It is usable
+        only when it carries the build-complete sentinel and the same
+        project identity, chunker version and embedding model; otherwise, or
+        on any read failure (logged at warning), ``(None, {})`` and every file
+        is re-embedded.  A file is listed only when all its chunks carry the
+        same hash.
+        """
+        source = self._collection
+        try:
+            if source is None or getattr(source, "name", None) != live_name:
+                get_kwargs: dict[str, Any] = {}
+                if self._ef is not None:
+                    get_kwargs["embedding_function"] = self._ef
+                source = self._client.get_collection(live_name, **get_kwargs)
+            meta = source.metadata or {}
+            if not (
+                meta.get("build_complete")
+                and meta.get("project_identity") == identity
+                and meta.get("chunker_version") == stamp["chunker_version"]
+                and meta.get("embedding_model") == stamp["embedding_model"]
+            ):
+                return None, {}
+            rows = source.get(include=["metadatas"])
+        except NotFoundError:
+            return None, {}
+        except Exception as exc:
+            _log.warning(
+                "doc_store: cannot read the live collection for copying (%r) —"
+                " re-embedding every file",
+                exc,
+            )
+            return None, {}
+        hashes: dict[str, str] = {}
+        mixed: set[str] = set()
+        for row in rows.get("metadatas") or []:
+            if not row:
+                continue
+            file = row.get("file")
+            sha = row.get("file_sha256")
+            if not isinstance(file, str):
+                continue
+            if not isinstance(sha, str) or hashes.get(file, sha) != sha:
+                mixed.add(file)
+                continue
+            hashes[file] = sha
+        for file in mixed:
+            hashes.pop(file, None)
+        return source, hashes
+
     def _rebuild_locked(self) -> int:
-        """The actual rebuild body.
+        """The actual rebuild body: build into ``<live name>_staging``, then swap.
 
         Must only be called while holding ``_build_lock`` and the doc-store
-        flock.
+        flock.  See the module docstring's build-and-swap section.
         """
+        started = time.monotonic()
         # Computed once up front; the identity names the collection and is
-        # stamped into its metadata (with the fingerprint) below so a later
+        # stamped into its metadata (with the fingerprint) so a later
         # init_doc_store() can refuse to adopt a collection built for a
         # different project (DS-05, SW-01).
         identity = project_identity(self._settings)
-        collection_name = doc_collection_name(self._settings, identity)
+        live_name = doc_collection_name(self._settings, identity)
+        staging_name = live_name + _STAGING_SUFFIX
         project_fingerprint = _project_fingerprint(self._settings, identity)
+        stamp = _build_settings_stamp(self._settings, self._ef)
+        self._check_cancelled()
+        self._set_progress(phase=PHASE_SCANNING, files_total=0, files_done=0)
+        try:
+            # --- Start transition (DS-12): under _read_lock, briefly -------
+            # The live collection keeps answering when one is published
+            # (SW-10).  With none (first build on an empty store) the store
+            # reads "building".  _error is cleared either way: a rebuild in
+            # flight replaces the previous attempt's outcome.
+            with self._read_lock:
+                self._error = None
+                if self._collection is None:
+                    self._state = DOC_STATE_BUILDING
 
-        # --- Start transition (DS-12): under _read_lock, briefly -----------
-        # Mark not ready at the very start — never ready mid-build.  Clearing
-        # _error here (rather than only on success) means a rebuild that is
-        # itself interrupted mid-flight (e.g. process killed) leaves the
-        # store honestly "building" rather than replaying a stale error from
-        # a previous failed attempt.  The delete is INSIDE this locked
-        # section (not after it) so no in-flight search() can be mid-query on
-        # the collection being deleted: search() holds _read_lock across its
-        # own count()+query(), so the delete here waits for it to finish, and
-        # any search() that starts after this section observes
-        # state=BUILDING/collection=None and raises DocStoreNotReady instead
-        # of racing a half-deleted collection.
-        with self._read_lock:
-            self._state = DOC_STATE_BUILDING
-            self._error = None
-            self._collection = None
+            # Leftover _staging from an interrupted rebuild is discarded first.
+            with contextlib.suppress(NotFoundError):
+                self._client.delete_collection(staging_name)
 
-            # Drop existing collection if present.
+            # Note: passing embedding_function=None explicitly disables the default EF
+            # in chromadb 1.5.x.  When no custom EF is provided, omit the parameter
+            # entirely so create_collection uses its default (all-MiniLM-L6-v2).
+            create_kwargs: dict[str, Any] = {
+                "configuration": {"hnsw": {"space": "cosine"}},
+            }
+            if self._ef is not None:
+                create_kwargs["embedding_function"] = self._ef
+            staging = self._client.create_collection(staging_name, **create_kwargs)
+
             try:
-                self._client.delete_collection(collection_name)
-                _log.debug("doc_store: deleted existing collection %r", collection_name)
-            except NotFoundError:
-                # Expected on first build.
-                pass
-            except Exception as exc:
-                _log.debug("doc_store: delete_collection raised %r (ignored)", exc)
+                return self._fill_staging(
+                    staging, live_name, identity, project_fingerprint, stamp, started
+                )
+            except BaseException:
+                # A failed or cancelled rebuild abandons _staging; the live
+                # collection (if any) is untouched and keeps answering.
+                try:
+                    self._client.delete_collection(staging_name)
+                except Exception as cleanup_exc:
+                    _log.debug("doc_store: deleting staging raised %r (ignored)", cleanup_exc)
+                raise
+        finally:
+            # Back to "starting" while another rebuild() call on this store
+            # waits on _build_lock; _unregister_running sets idle at zero.
+            self._set_progress(phase=PHASE_STARTING, files_total=0, files_done=0)
 
-        # --- Long section: NO lock held --------------------------------
-        # create_collection into a LOCAL variable (never assigned to
-        # self._collection until the end transition below) so any
-        # concurrent state-check race is doubly safe: self._collection stays
-        # None for the whole build, not just until create_collection returns.
-        # Recreate with cosine distance.
-        # Note: passing embedding_function=None explicitly disables the default EF in
-        # chromadb 1.5.x.  When no custom EF is provided, omit the parameter entirely so
-        # create_collection uses its default (DefaultEmbeddingFunction / all-MiniLM-L6-v2).
-        create_kwargs: dict[str, Any] = {
-            "configuration": {"hnsw": {"space": "cosine"}},
-        }
-        if self._ef is not None:
-            create_kwargs["embedding_function"] = self._ef
-        collection = self._client.create_collection(collection_name, **create_kwargs)
-
-        # Select the files to index (the one shared helper, SW-04).
+    def _fill_staging(
+        self,
+        staging: Any,
+        live_name: str,
+        identity: str,
+        project_fingerprint: str,
+        stamp: dict[str, str],
+        started: float,
+    ) -> int:
+        """Index every file into *staging*, then swap it in as *live_name*."""
         src_root = pathlib.Path(self._settings.project_root)
         unique_files = doc_store_files(self._settings)
         _log.debug("doc_store: found %d markdown files to index", len(unique_files))
 
         # Freshness stamp (SW-04), taken BEFORE the files are read: a file
         # changed while the build runs then reads as stale on the next check
-        # instead of being stamped as indexed.  Stamped together with the
-        # completion sentinel below.
-        build_metadata = {
+        # instead of being stamped as indexed.  Written at the swap below.
+        build_metadata: dict[str, Any] = {
             "build_complete": True,
             "project_root": project_fingerprint,
             "project_identity": identity,
             "indexed_commit": _doc_head_commit(self._settings.project_root),
             "doc_digest": doc_store_digest(self._settings, unique_files),
+            **stamp,
         }
 
-        # Chunk and collect all docs.
+        source, source_hashes = self._open_copy_source(live_name, identity, stamp)
+
+        self._set_progress(phase=PHASE_EMBEDDING, files_total=len(unique_files))
         ids: list[str] = []
         documents: list[str] = []
         metadatas: list[dict[str, str]] = []
+        total = 0
+        unchanged = 0
+        reembedded = 0
+        junk_lines = 0
 
-        for filepath in unique_files:
+        def _flush() -> None:
+            # Embedding happens inside add(); one file's chunks at a time, in
+            # batches of at most _ADD_BATCH_SIZE, with a cancel check before
+            # each embed (SW-L14, R-gate), so a shutdown never waits for the
+            # rest of the corpus to embed.
+            for batch_start in range(0, len(ids), _ADD_BATCH_SIZE):
+                self._check_cancelled()
+                batch_end = batch_start + _ADD_BATCH_SIZE
+                staging.add(
+                    ids=ids[batch_start:batch_end],
+                    documents=documents[batch_start:batch_end],
+                    metadatas=cast(Metadatas, metadatas[batch_start:batch_end]),
+                )
+            ids.clear()
+            documents.clear()
+            metadatas.clear()
+
+        for done, filepath in enumerate(unique_files, start=1):
+            self._check_cancelled()
             rel_path = str(filepath.relative_to(src_root))
             try:
-                text = filepath.read_text(encoding="utf-8", errors="replace")
+                data = filepath.read_bytes()
             except OSError as exc:
                 _log.warning("doc_store: could not read %s: %s", filepath, exc)
+                self._set_progress(files_done=done)
                 continue
+            file_sha = hashlib.sha256(data).hexdigest()
 
-            chunks = chunk_markdown(text, rel_path)
-            for chunk in chunks:
-                ids.append(chunk.id)
-                documents.append(chunk.text)
-                metadatas.append({"file": chunk.file, "breadcrumb": chunk.breadcrumb})
-
-        total = len(ids)
-        _log.debug("doc_store: indexing %d chunks", total)
-
-        # Handle empty corpus without crashing.
-        if total == 0:
-            # Write completion sentinel so the adopt branch (DS-24) recognises
-            # an intentionally-empty corpus as a completed (not interrupted)
-            # build and ADOPTS it on the next startup instead of rebuilding
-            # every time — the adopt gate no longer requires count() > 0 (a
-            # count-0 collection can never satisfy that), it relies solely on
-            # this sentinel + the project_root fingerprint below. project_root,
-            # project_identity, indexed_commit and doc_digest are stamped
-            # alongside it (DS-05, SW-01, SW-04) —
-            # modify() REPLACES metadata wholesale (verified against chromadb
-            # 1.5.9), so all keys must be written together in one call.
-            collection.modify(metadata=build_metadata)
-            # --- End transition (empty-corpus path): under _read_lock -----
-            with self._read_lock:
-                self._collection = collection
-                self._state = DOC_STATE_READY
-            return 0
-
-        # Batch-add to avoid ChromaDB memory issues with large corpora.
-        for batch_start in range(0, total, _ADD_BATCH_SIZE):
-            batch_end = batch_start + _ADD_BATCH_SIZE
-            collection.add(
-                ids=ids[batch_start:batch_end],
-                documents=documents[batch_start:batch_end],
-                metadatas=cast(Metadatas, metadatas[batch_start:batch_end]),
+            copied = (
+                self._copy_file_chunks(source, staging, rel_path)
+                if source is not None and source_hashes.get(rel_path) == file_sha
+                else None
             )
+            if copied is not None:
+                unchanged += 1
+                total += copied
+            else:
+                text, dropped = drop_junk_lines(_read_doc_text(data))
+                junk_lines += dropped
+                for chunk in chunk_markdown(text, rel_path):
+                    ids.append(chunk.id)
+                    documents.append(chunk.text)
+                    metadatas.append(
+                        {
+                            "file": chunk.file,
+                            "breadcrumb": chunk.breadcrumb,
+                            "file_sha256": file_sha,
+                        }
+                    )
+                    total += 1
+                reembedded += 1
+                _flush()
 
-        # Write completion sentinel BEFORE flipping is_ready — a hard-killed build
-        # will lack this sentinel, causing init_doc_store to rebuild rather than
-        # adopt a silently-partial collection.  project_root and project_identity
-        # are stamped alongside it (DS-05, SW-01) so a later init_doc_store() can
-        # detect cross-project reuse, and indexed_commit and doc_digest (SW-04)
-        # so it can detect an index built from another tree state.
-        collection.modify(metadata=build_metadata)
+            self._set_progress(files_done=done)
+            if done % _PROGRESS_LOG_EVERY == 0:
+                _log.info("doc_store: rebuild progress %d/%d files", done, len(unique_files))
 
-        # --- End transition (DS-12): under _read_lock, briefly -------------
-        # Only mark ready after ALL adds AND the sentinel are written, and only
-        # publish self._collection now — never earlier — so no state-check
-        # race during the (unlocked) build above can observe a half-built
-        # collection.
+        _flush()
+        self._check_cancelled()
+
+        # --- Swap (SW-10): under _read_lock, briefly -----------------------
+        # Delete the live collection, rename staging to the live name with the
+        # completion sentinel and stamps (modify() replaces metadata
+        # wholesale, verified against chromadb 1.5.9, so every key is written
+        # in one call), and publish it.  search() holds _read_lock across its
+        # own count()+query(), so no query runs on a half-swapped collection.
+        # A hard kill between the delete and the rename leaves no live
+        # collection, so the next start rebuilds (it never adopts staging).
+        self._set_progress(phase=PHASE_SWAPPING)
         with self._read_lock:
-            self._collection = collection
+            with contextlib.suppress(NotFoundError):
+                self._client.delete_collection(live_name)
+            try:
+                staging.modify(name=live_name, metadata=build_metadata)
+            except BaseException:
+                # The old live collection is already gone: stop serving it,
+                # so the failure handler reports "error" instead of "ready".
+                self._collection = None
+                self._state = DOC_STATE_BUILDING
+                raise
+            self._collection = staging
             self._state = DOC_STATE_READY
+            self._error = None
+
+        if junk_lines:
+            _log.info(
+                "doc_store: dropped %d lines over 2000 characters with no whitespace", junk_lines
+            )
+        _log.info(
+            "doc_store: rebuild complete, %d files unchanged, %d re-embedded, %d chunks,"
+            " %.1f seconds",
+            unchanged,
+            reembedded,
+            total,
+            time.monotonic() - started,
+        )
         return total
+
+    @staticmethod
+    def _copy_file_chunks(source: Any, staging: Any, rel_path: str) -> int | None:
+        """Copy *rel_path*'s chunks and embeddings from *source* into *staging*.
+
+        Returns the number of chunks copied, or ``None`` when the copy failed
+        (logged at warning) or found nothing, so the caller re-embeds the file.
+        """
+        try:
+            rows = source.get(
+                where={"file": rel_path}, include=["embeddings", "documents", "metadatas"]
+            )
+            row_ids = rows.get("ids") or []
+            embeddings = rows.get("embeddings")
+            if not row_ids or embeddings is None or len(embeddings) != len(row_ids):
+                return None
+            staging.add(
+                ids=row_ids,
+                embeddings=embeddings,
+                documents=rows.get("documents"),
+                metadatas=rows.get("metadatas"),
+            )
+        except Exception as exc:
+            _log.warning("doc_store: copying %s from the live index failed (%r)", rel_path, exc)
+            return None
+        return len(row_ids)
 
     def search(self, query: str, n_results: int = 5) -> list[dict[str, Any]]:
         """Return up to ``n_results`` best-matching chunks, best-first.
@@ -752,6 +1088,70 @@ _init_error: str | None = None
 # the whole of _prepare_store on a worker thread), or None if none was started.
 _build_task: asyncio.Task[None] | None = None
 
+# The background thread started by start_doc_rebuild() (refresh), or None.
+_rebuild_thread: threading.Thread | None = None
+
+# Guards _running_stores, each store's _active_rebuilds, _shutdown_generation
+# and the publish of the _doc_store singleton by _prepare_store (so a shutdown
+# either precedes the publish and stops it, or follows it and drops the
+# store).  The check-and-start in start_doc_rebuild() is serialised by the
+# refresh tool's per-event-loop asyncio lock, not by this lock.
+_running_lock = threading.Lock()
+
+# Every store with a rebuild() call in flight, whichever caller started it
+# (the startup task or a refresh worker); clear_doc_store() cancels them.
+_running_stores: set[DocStore] = set()
+
+# Bumped by every clear_doc_store().  A worker captures it before it starts
+# (current_shutdown_generation()); _prepare_store compares it after the flock
+# and again, under _running_lock, when it publishes the singleton, and
+# rebuild() compares it at registration, so work that began before a shutdown
+# publishes nothing and rebuilds nothing after it (SW-L14).
+_shutdown_generation = 0
+
+
+def current_shutdown_generation() -> int:
+    """Return the shutdown generation; capture it before starting doc-store work."""
+    with _running_lock:
+        return _shutdown_generation
+
+
+def _idle_progress() -> dict[str, Any]:
+    """Return the progress dict of a store with no rebuild running."""
+    return {"files_total": 0, "files_done": 0, "started_at": None, "phase": None}
+
+
+def _register_running(store: DocStore, generation: int | None = None) -> None:
+    """Record that a ``rebuild()`` call on *store* has started.
+
+    Sets the progress phase to ``"starting"`` (with ``started_at``) when no
+    other call is running, so ``doc_index_progress`` is non-null from this
+    moment (step 3, R-gate).  When *generation* is stale (a shutdown ran since
+    the caller captured it) the cancel flag is set here, atomically with the
+    shutdown's own bookkeeping.
+    """
+    with _running_lock:
+        if generation is not None and generation != _shutdown_generation:
+            store._cancel.set()
+        store._active_rebuilds += 1
+        if store._active_rebuilds == 1:
+            store._set_progress(
+                phase=PHASE_STARTING, started_at=_utc_now_iso(), files_total=0, files_done=0
+            )
+        store._rebuild_idle.clear()
+        _running_stores.add(store)
+
+
+def _unregister_running(store: DocStore) -> None:
+    """Record that a ``rebuild()`` call on *store* has exited (any outcome)."""
+    with _running_lock:
+        store._active_rebuilds -= 1
+        if store._active_rebuilds <= 0:
+            store._active_rebuilds = 0
+            store._set_progress(**_idle_progress())
+            _running_stores.discard(store)
+            store._rebuild_idle.set()
+
 
 def get_doc_store() -> DocStore | None:
     """Return the current :class:`DocStore` singleton, or ``None`` if not started.
@@ -770,13 +1170,18 @@ def doc_store_state() -> tuple[str, str | None]:
     task's ``_prepare_store`` call is still waiting on the doc-store lock or
     constructing it) or if lock acquisition or construction itself failed.
 
-    - If the singleton is set, defer to it (``store.state``, ``store.error_message``).
+    - If the singleton is set, defer to it (:meth:`DocStore.state_snapshot`,
+      read under its lock so ``"error"`` never pairs with ``None``, SW-L23).
+      During a rebuild over an existing index this is ``"ready"``, and a
+      failed rebuild that left the old index serving reads ``"ready"`` with
+      the failure's message.
     - Else, if construction previously failed, report ``("error", _init_error)``.
     - Else, report ``("building", None)`` — construction/build has not
       reached the singleton-assignment point yet.
     """
-    if _doc_store is not None:
-        return _doc_store.state, _doc_store.error_message
+    store = _doc_store
+    if store is not None:
+        return store.state_snapshot()
     if _init_error is not None:
         return DOC_STATE_ERROR, _init_error
     return DOC_STATE_BUILDING, None
@@ -794,6 +1199,59 @@ def doc_index_chunk_count() -> int | None:
     if _doc_store is None:
         return None
     return _doc_store.chunk_count()
+
+
+def doc_index_progress() -> dict[str, Any] | None:
+    """Return the running doc rebuild's :meth:`DocStore.progress`, or ``None`` (T04).
+
+    ``None`` when no rebuild is running.  Prefers the singleton when it is
+    rebuilding, else any other store with a rebuild in flight.
+    """
+    with _running_lock:
+        running = list(_running_stores)
+    candidates = [_doc_store] if _doc_store in running else []
+    candidates.extend(s for s in running if s is not _doc_store)
+    for store in candidates:
+        if store is None:
+            continue
+        progress = store.progress()
+        if progress.get("phase") is not None:
+            return progress
+    return None
+
+
+def doc_rebuild_in_progress() -> bool:
+    """Return ``True`` while any doc index build or rebuild is in flight.
+
+    Covers the startup task (``_build_task`` not done, including its wait on
+    the flock), a ``refresh`` worker thread, and any store with a
+    ``rebuild()`` call running.  Call from the event loop.
+    """
+    if _build_task is not None and not _build_task.done():
+        return True
+    if _rebuild_thread is not None and _rebuild_thread.is_alive():
+        return True
+    with _running_lock:
+        return bool(_running_stores)
+
+
+def start_doc_rebuild(work: Callable[[], None]) -> bool:
+    """Start *work* (a doc rebuild or re-init) on a background thread (T04 step 4).
+
+    Returns ``False`` without starting anything when a build or rebuild is
+    already in flight (:func:`doc_rebuild_in_progress`), so a second
+    ``refresh`` never queues another rebuild.  Otherwise starts a daemon
+    thread, recorded as ``_rebuild_thread``, and returns ``True`` once it has
+    started.  *work* must catch and log its own exceptions.  Call from the
+    event loop, under the ``refresh`` tool's per-loop lock.
+    """
+    global _rebuild_thread
+    if doc_rebuild_in_progress():
+        return False
+    thread = threading.Thread(target=work, name="doc-store-rebuild", daemon=True)
+    _rebuild_thread = thread
+    thread.start()
+    return True
 
 
 def doc_store_freshness() -> tuple[str | None, bool | None]:
@@ -849,13 +1307,16 @@ def _try_adopt(
     the SAME tree state (its stamped ``indexed_commit`` equals the current
     ``HEAD`` and its stamped ``doc_digest`` equals :func:`doc_store_digest`
     now — SW-04; a missing stamp on a pre-SW-04 collection compares unequal)
-    and carries the build-complete sentinel, adopt it (``store._collection`` and
+    with the SAME build settings (``doc_glob_patterns``,
+    ``doc_exclude_patterns``, ``chunker_version`` and ``embedding_model`` all
+    equal — SW-L13; a missing key compares unequal) and carries the
+    build-complete sentinel, adopt it (``store._collection`` and
     ``store._state = DOC_STATE_READY``) and return ``True`` WITHOUT
     re-embedding.  Returns ``False`` on any failure to adopt (not found,
-    interrupted build, cross-project mismatch, a stale commit or digest, or
-    an unexpected exception) —
-    mirroring the original ``init_doc_store``'s fall-through-to-rebuild
-    behaviour exactly.
+    interrupted build, cross-project mismatch, a stale commit or digest, a
+    changed build setting, or an unexpected exception).  A read failure is
+    logged at warning and deletes nothing (SW-L15); the rebuild that follows
+    builds into staging and replaces the live collection only on success.
 
     DS-24: the adopt gate deliberately does NOT require ``count() > 0``.
     ``build_complete`` is written ONLY at successful ``rebuild()`` completion
@@ -903,6 +1364,18 @@ def _try_adopt(
             existing_project_root == current_fingerprint and existing_identity == identity
         )
         if build_complete and same_project:
+            # SW-L13: refuse an index built with other doc globs, exclusions,
+            # chunker or embedding model.  Logged at info with the key that
+            # differed; the caller rebuilds.
+            for key, current in _build_settings_stamp(settings, embedding_function).items():
+                if meta.get(key) != current:
+                    _log.info(
+                        "doc_store: not adopting: %s differs (stamped %r, current %r) — rebuilding",
+                        key,
+                        meta.get(key),
+                        current,
+                    )
+                    return False
             # SW-04: refuse an index built from another tree state.  Logged at
             # info with the key that differed; the caller rebuilds.
             current_commit = _doc_head_commit(settings.project_root)
@@ -966,11 +1439,18 @@ def _try_adopt(
         # No existing collection — will rebuild below.
         return False
     except Exception as exc:
-        _log.debug("doc_store: get_collection check raised %r — will rebuild", exc)
+        # SW-L15: a transient read failure must be visible and must not cost
+        # the index: nothing is deleted here, and the rebuild that follows
+        # replaces the live collection only once its staging build succeeds.
+        _log.warning("doc_store: adopt check failed (%r) — rebuilding into staging", exc)
         return False
 
 
-def _prepare_store(settings: Settings, embedding_function: Any | None = None) -> DocStore:
+def _prepare_store(
+    settings: Settings,
+    embedding_function: Any | None = None,
+    generation: int | None = None,
+) -> DocStore | None:
     """Run the whole decide-and-build critical section under the doc-store flock.
 
     Sequence, all on the calling thread and all under ONE exclusive
@@ -990,30 +1470,63 @@ def _prepare_store(settings: Settings, embedding_function: Any | None = None) ->
     (another container on the same volume) waits on the flock, then adopts
     the collection the first one built instead of rebuilding it.
 
+    Shutdown (SW-L14): *generation* is the module's shutdown generation as
+    the caller saw it (read here on entry when ``None``).  When
+    :func:`clear_doc_store` ran while this call waited on the flock, the
+    generation differs once the flock is acquired: this logs at info,
+    publishes nothing to the singleton and returns ``None`` without
+    adopting or rebuilding.  The same check runs again before a rebuild.
+
     Raises whatever lock acquisition, :class:`DocStore` construction or the
     rebuild raises.  A failure before the store exists is recorded in the
-    module-level ``_init_error`` for ``doc_store_state()`` to report; a
-    rebuild failure is recorded on the (published) store itself.  Callers
-    are responsible for catching it.
+    module-level ``_init_error`` for ``doc_store_state()`` to report, and a
+    construction failure also drops the singleton (SW-L22), so
+    ``doc_store_state()`` reports the new error rather than an older store's
+    state; a rebuild failure is recorded on the (published) store itself.
+    Callers are responsible for catching it.
     """
     global _doc_store, _init_error
+    if generation is None:
+        generation = _shutdown_generation
     _init_error = None
     store: DocStore | None = None
     try:
         with _doc_store_flock(settings.chroma_path):
+            if generation != _shutdown_generation:
+                _log.info(
+                    "doc_store: shutdown ran while waiting for the doc-store lock — not starting"
+                )
+                return None
             identity = project_identity(settings)
             _log.info(
                 "doc_store: project identity %s, collection %s",
                 identity,
                 doc_collection_name(settings, identity),
             )
-            store = DocStore(settings, embedding_function=embedding_function)
+            try:
+                store = DocStore(settings, embedding_function=embedding_function)
+            except Exception:
+                # SW-L22: drop an older (e.g. errored) singleton so the new
+                # construction error recorded below is what callers see.
+                _doc_store = None
+                raise
             with store._build_lock:
-                _doc_store = store
+                # SW-L14 (R-gate): the generation check and the publish happen
+                # together under _running_lock, so a shutdown that landed
+                # after the flock (during project_identity or DocStore(...))
+                # publishes nothing, on the adopt and rebuild paths alike.
+                with _running_lock:
+                    current = generation == _shutdown_generation
+                    if current:
+                        _doc_store = store
+                if not current:
+                    _log.info("doc_store: shutdown ran while starting the doc store — not starting")
+                    return None
                 if not _try_adopt(store, settings, embedding_function, identity):
                     _log.info("doc_store: no usable existing collection — rebuilding")
-                    count = store.rebuild(lock_held=True)
-                    _log.info("doc_store: rebuild complete, %d chunks indexed", count)
+                    # A shutdown after the publish is caught at registration
+                    # (stale generation) or by the cancel flag.
+                    store.rebuild(lock_held=True, generation=generation)
     except Exception as exc:
         if store is None:
             _init_error = f"{type(exc).__name__}: {exc}"
@@ -1021,7 +1534,11 @@ def _prepare_store(settings: Settings, embedding_function: Any | None = None) ->
     return store
 
 
-def init_doc_store(settings: Settings, embedding_function: Any | None = None) -> DocStore:
+def init_doc_store(
+    settings: Settings,
+    embedding_function: Any | None = None,
+    generation: int | None = None,
+) -> DocStore:
     """Construct the :class:`DocStore`, build it (if not adopted), return it.
 
     Synchronous/blocking — used by tests and by ``refresh`` (which already
@@ -1049,8 +1566,18 @@ def init_doc_store(settings: Settings, embedding_function: Any | None = None) ->
             ChromaDB's default EF" — tests inject a deterministic fake so the
             real adopt gate, interrupted-build fallback, and singleton
             assignment run fully offline (DS-06).
+        generation: the shutdown generation captured before this work was
+            started (the ``refresh`` worker captures it on the event loop);
+            ``None`` reads it on entry.
+
+    Raises:
+        DocRebuildCancelled: shutdown (:func:`clear_doc_store`) ran while this
+            call waited on the doc-store lock, so nothing was started.
     """
-    return _prepare_store(settings, embedding_function)
+    store = _prepare_store(settings, embedding_function, generation)
+    if store is None:
+        raise DocRebuildCancelled("doc store not started: shutdown ran while waiting for the lock")
+    return store
 
 
 async def init_doc_store_background(
@@ -1077,12 +1604,23 @@ async def init_doc_store_background(
     # Drop a stale construction error from an earlier attempt so the window
     # before the worker starts reports "building", not the old error.
     _init_error = None
+    # Read on the event loop now, so a clear_doc_store() that runs before the
+    # worker thread even starts still stops it (SW-L14).
+    generation = current_shutdown_generation()
 
     async def _build() -> None:
         try:
-            store = await asyncio.to_thread(_prepare_store, settings, embedding_function)
+            store = await asyncio.to_thread(
+                _prepare_store, settings, embedding_function, generation
+            )
+        except DocRebuildCancelled:
+            _log.info("doc_store: background startup build cancelled at shutdown")
+            return
         except Exception:
             _log.exception("doc_store: background startup failed")
+            return
+        if store is None:
+            _log.info("doc_store: background startup skipped (shutdown)")
             return
         _log.info("doc_store: background startup complete (state=%s)", store.state)
 
@@ -1090,13 +1628,34 @@ async def init_doc_store_background(
 
 
 def clear_doc_store() -> None:
-    """Drop the module singleton (lifespan teardown).
+    """Stop any running doc rebuild, then drop the module singleton (lifespan teardown).
 
-    Does NOT cancel an in-flight ``_build_task`` — the task holds its own
-    reference to the (now-orphaned) store and will finish or fail on its own;
-    cancelling a rebuild mid-ChromaDB-write is not obviously safer.
+    SW-L14: bumps the shutdown generation (a worker still waiting on the
+    flock in :func:`_prepare_store` then publishes nothing), sets the cancel
+    flag of every store with a rebuild running — started by the startup task
+    or by a ``refresh`` worker — and waits up to 10 seconds in total for
+    those rebuilds to exit.  A cancelled rebuild stops between files or
+    between embedding batches and deletes its staging collection, so the live
+    collection survives.  A rebuild still running after 10 seconds is logged
+    at warning and left to
+    finish on its daemon thread.  The wait blocks the caller (the lifespan's
+    ``finally``) for at most 10 seconds, which is acceptable because the
+    lifespan is ending.
     """
-    global _doc_store, _init_error, _build_task
+    global _doc_store, _init_error, _build_task, _rebuild_thread, _shutdown_generation
+    with _running_lock:
+        _shutdown_generation += 1
+        running = list(_running_stores)
+    for store in running:
+        store._cancel.set()
+    deadline = time.monotonic() + _SHUTDOWN_WAIT_SECONDS
+    for store in running:
+        if not store._rebuild_idle.wait(max(0.0, deadline - time.monotonic())):
+            _log.warning(
+                "doc_store: the doc index rebuild did not stop within %.0f seconds of shutdown",
+                _SHUTDOWN_WAIT_SECONDS,
+            )
     _doc_store = None
     _init_error = None
     _build_task = None
+    _rebuild_thread = None

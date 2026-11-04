@@ -147,8 +147,8 @@ def test_wait_for_ready_rides_through_boot_sequence() -> None:
     responses = [
         (None, ConnectionRefusedError("refused")),
         (None, ConnectionRefusedError("refused")),
-        ({"status": "ok", "state": "indexing"}, None),
-        ({"status": "ok", "state": "ready"}, None),
+        ({"status": "ok", "state": "indexing", "doc_index_state": "building"}, None),
+        ({"status": "ok", "state": "ready", "doc_index_state": "ready"}, None),
     ]
     calls = {"n": 0}
 
@@ -168,6 +168,56 @@ def test_wait_for_ready_rides_through_boot_sequence() -> None:
     assert ready is True
     assert ever_connected is True
     assert calls["n"] == 4
+
+
+def test_wait_for_ready_keeps_polling_while_doc_index_building() -> None:
+    """SW-L25: a ready code index with the doc index still ``building`` is not
+    ready; the wait keeps polling until ``doc_index_state`` is ``ready``."""
+    responses = [
+        ({"status": "ok", "state": "ready", "doc_index_state": "building"}, None),
+        ({"status": "ok", "state": "ready", "doc_index_state": "building"}, None),
+        ({"status": "ok", "state": "ready", "doc_index_state": "ready"}, None),
+    ]
+    calls = {"n": 0}
+
+    def fake_check(_url: str) -> tuple[dict[str, Any] | None, Exception | None]:
+        result = responses[calls["n"]]
+        calls["n"] += 1
+        return result
+
+    _clock, monotonic, sleep = _fake_clock()
+    ready, ever_connected = client_mod.wait_for_ready(
+        "http://x/mcp",
+        timeout_seconds=30,
+        status_check=fake_check,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
+    assert (ready, ever_connected) == (True, True)
+    assert calls["n"] == 3
+
+
+def test_wait_for_ready_times_out_when_doc_index_never_ready() -> None:
+    """SW-L25: ``state == "ready"`` alone never ends the wait."""
+
+    def fake_check(_url: str) -> tuple[dict[str, Any] | None, Exception | None]:
+        return ({"status": "ok", "state": "ready", "doc_index_state": "building"}, None)
+
+    _clock, monotonic, sleep = _fake_clock()
+    ready, ever_connected = client_mod.wait_for_ready(
+        "http://x/mcp",
+        timeout_seconds=5,
+        status_check=fake_check,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
+    assert (ready, ever_connected) == (False, True)
+
+
+def test_wait_help_names_doc_index_state(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    assert "doc_index_state=ready" in " ".join(capsys.readouterr().out.split())
 
 
 def test_wait_for_ready_timeout_never_connected() -> None:

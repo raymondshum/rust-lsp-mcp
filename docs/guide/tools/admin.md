@@ -46,8 +46,9 @@ Always returns `status: "ok"` with a health envelope:
 | `indexing_started_at` | string \| null | ISO 8601 UTC time the current indexing run began (reset by `refresh`). |
 | `analyzer_progress` | string \| null | Latest rust-analyzer progress title and message. |
 | `analyzer_progress_at` | string \| null | ISO 8601 UTC time of the latest progress report. |
-| `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. |
-| `doc_index_error` | string \| null | Error message if documentation store build failed. |
+| `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. Stays `"ready"` during a rebuild over an existing index (the old index keeps answering); `"building"` only for the first build on an empty store. |
+| `doc_index_error` | string \| null | Error message if the documentation index build failed; also set with `doc_index_state` `"ready"` when the last rebuild failed and the old index is still served. |
+| `doc_index_progress` | object \| null | Progress of a running doc index rebuild: `files_total`, `files_done`, `started_at` (ISO 8601 UTC) and `phase` (`"starting"` while it waits for its locks, then `"scanning"`, `"embedding"` and `"swapping"`). `null` when no rebuild is running. |
 | `doc_index_chunk_count` | integer \| null | Total stored document chunks (`0` indicates unmounted or empty doc path). |
 | `doc_indexed_commit` | string \| null | Git commit stamped on the doc index at build time; `null` unless `doc_index_state` is `"ready"`. |
 | `doc_stale` | boolean \| null | `true` if the commit changed, or a Markdown file the index covers was added, removed or changed, since the doc index was built; stays `true` until `refresh` or a restart. `null` unless `doc_index_state` is `"ready"`. |
@@ -60,16 +61,18 @@ Always returns `status: "ok"` with a health envelope:
 
 ## `refresh`
 
-Restarts the language server and rebuilds the documentation index.
+Restarts the language server process and rebuilds the documentation index in the background. It does not wait for either: it returns once the analyzer restart has begun and the doc rebuild thread has started.
 
-> **Blast radius warning**: `refresh` resets the shared language server. Concurrent requests return `not_ready` until re-indexing completes. Avoid calling `refresh` during active query workflows unless the index is stale or in an `"error"` state.
+> **Blast radius warning**: `refresh` resets the shared language server. Concurrent navigation requests return `not_ready` until re-indexing completes. `search_docs` keeps answering from the old doc index during the doc rebuild. Avoid calling `refresh` during active query workflows unless the index is stale or in an `"error"` state.
+
+The doc rebuild writes a staging collection and swaps it in on success, so the old index is served meanwhile and a failed rebuild loses nothing. Only Markdown files whose content changed are re-embedded. Follow it through `status`'s `doc_index_progress`.
 
 ### Inputs
 None.
 
 ### Returns
-- `not_ready`: Analyzer restart has been triggered in the background. Poll `status` until `state` transitions to `"ready"`.
-- `error`: Failed to rebuild doc store or restart analyzer process.
+- `ok`: `state` (`"indexing"`: the analyzer restart has begun; poll `status` until `state` is `"ready"`), `doc_index_state` as it stands at return (`"ready"` while the old index is served), `doc_rebuild_started` (`true` when this call started the doc rebuild; `false` when a doc build or rebuild was already running, in which case none is queued), `doc_index_progress` (the running rebuild's progress or `null`) and `message`.
+- `error`: the analyzer is not running (`recovery: "unknown"`), or the doc rebuild thread could not start (`recovery: "refresh"`; the analyzer restart is already under way). A doc rebuild that fails later is reported by `status` in `doc_index_error`, not by `refresh`.
 
 ---
 

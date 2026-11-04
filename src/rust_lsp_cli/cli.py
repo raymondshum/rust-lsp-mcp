@@ -170,7 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Before running the command, poll `status` every 2s until the "
-            "daemon reports state=ready (or SECS elapses). Rides through "
+            "daemon reports both state=ready and doc_index_state=ready, i.e. "
+            "the code index and the doc index (or SECS elapses). Rides through "
             "daemon boot (connection-refused -> not_ready -> ready). Must be "
             "given BEFORE the subcommand, e.g. `rust-lsp --wait 180 status`."
         ),

@@ -29,15 +29,16 @@ Token estimation
 ----------------
 We use a conservative multi-metric heuristic that correctly handles:
 
-- **CJK / multibyte text**: each CJK codepoint (Unified Ideographs, Extension A,
-  CJK Symbols/Punctuation, Hiragana, Katakana, Fullwidth Forms) is counted at
-  1.0 token because MiniLM's WordPiece treats each CJK character as its own token.
-  The old ``len/4`` formula counted 3-byte CJK chars at 0.75 tokens — a severe
-  under-estimate.
+- **Non-ASCII text**: every non-ASCII codepoint (CJK, Cyrillic, Greek, Arabic,
+  accented Latin, symbols) is counted at 1.0 token (SW-L24).  MiniLM's
+  WordPiece vocabulary is English-centric: a CJK character is its own token, and
+  Cyrillic and similar scripts split into one or more sub-tokens per character,
+  so counting only CJK at one token per character let Cyrillic text overflow
+  the 256-token window.
 
 - **Code / punctuation-heavy text**: WordPiece splits aggressively on special
   characters (``<``, ``>``, ``&``, ``::``, ``[``, ``]``, etc.), producing far more
-  tokens than words.  We use ``len(non_cjk) / 2`` as the char-based estimate,
+  tokens than words.  We use ``len(ascii) / 2`` as the char-based estimate,
   which over-estimates by ~2× for typical English prose but is necessary to cover
   observed real/char ratios up to 0.52 for code-heavy corpus chunks.
 
@@ -45,7 +46,7 @@ Both metrics intentionally *over*-estimate.  The formula is::
 
     estimate_tokens(text) = ceil(
         max(
-            cjk_count * 1.0 + len(non_cjk_text) / 2.0,   # char-based
+            non_ascii_count * 1.0 + len(ascii_text) / 2.0,   # char-based
             word_count * 1.5                                # word-based
         )
     )
@@ -60,6 +61,14 @@ With the improved estimator, the effective maximum chunk length for pure ASCII
 code text is ~400 characters.  At the worst observed real-token/char ratio of
 0.52 on the ripgrep corpus, this produces at most ~208 real tokens — safely
 under the 256-token MiniLM window with 48-token margin.
+
+Input hygiene
+-------------
+The document is split into lines on ``\n`` only (SW-L17), never on the Unicode
+line separators or form feeds that ``str.splitlines`` also breaks on.  A line
+longer than 2,000 characters with no whitespace (base64, a data URI, minified
+code) is dropped before chunking (SW-L20, :func:`drop_junk_lines`), and a
+section whose body is empty after its header is not emitted (SW-L19).
 """
 
 import math
@@ -76,6 +85,18 @@ BODY_TOKEN_CAP: int = 200
 
 Keeps total chunk length comfortably under the MiniLM 256-token window.
 """
+
+CHUNKER_VERSION: str = "2"
+"""Version of the chunking rules, stamped on the doc collection (SW-L13).
+
+Bump it whenever a change to this module changes the chunks produced for the
+same input: the doc store refuses to adopt, or copy chunks from, a collection
+stamped with another version, so the next start re-chunks every file.
+Version 2: SW-L16 to SW-L20 and SW-L24.
+"""
+
+JUNK_LINE_MIN_CHARS: int = 2000
+"""A line longer than this with no whitespace is dropped before chunking (SW-L20)."""
 
 _OVERLAP_PARAGRAPHS: int = 1
 """Number of trailing paragraphs to repeat at the start of the next size-split piece.
@@ -115,35 +136,18 @@ class DocChunk:
 # Token estimator
 # ---------------------------------------------------------------------------
 
-# CJK Unicode ranges: each codepoint ≈ 1 MiniLM WordPiece token.
-# Covers CJK Unified Ideographs, Extension A, Extension B, CJK Symbols and
-# Punctuation, Hiragana, Katakana, and Halfwidth/Fullwidth Forms.
-_CJK_RANGES: tuple[tuple[int, int], ...] = (
-    (0x3000, 0x303F),  # CJK Symbols and Punctuation
-    (0x3040, 0x309F),  # Hiragana
-    (0x30A0, 0x30FF),  # Katakana
-    (0x3400, 0x4DBF),  # CJK Extension A
-    (0x4E00, 0x9FFF),  # CJK Unified Ideographs (main block)
-    (0xFF00, 0xFFEF),  # Halfwidth and Fullwidth Forms
-    (0x20000, 0x2A6DF),  # CJK Extension B
-)
-
-
-def _is_cjk(cp: int) -> bool:
-    """Return True if code-point *cp* falls in a CJK range (≈ 1 WP token each)."""
-    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
-
 
 def estimate_tokens(text: str) -> int:
     """Conservative token-count estimate for a MiniLM embedding window.
 
     Uses the larger of two fast heuristics:
 
-    - **Char-based**: ``cjk_count * 1.0 + non_cjk_len / 2.0``
-      CJK characters are each 1 WordPiece token; non-CJK characters are
-      estimated at 2 chars per token (len/2), which is conservative for
-      code-heavy and punctuation-heavy text where WordPiece may split a
-      4-char token into 2–3 sub-tokens.
+    - **Char-based**: ``non_ascii_count * 1.0 + ascii_len / 2.0``
+      Every non-ASCII character (any script, not only CJK — SW-L24) is
+      counted as 1 WordPiece token; ASCII characters are estimated at 2 chars
+      per token (len/2), which is conservative for code-heavy and
+      punctuation-heavy text where WordPiece may split a 4-char token into
+      2–3 sub-tokens.
 
     - **Word-based**: ``word_count * 1.5``
       Provides a floor for short, dense text where the char estimate is too low.
@@ -160,9 +164,9 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
-    cjk_count = sum(1 for c in text if _is_cjk(ord(c)))
-    non_cjk_len = len(text) - cjk_count
-    char_estimate = cjk_count * 1.0 + non_cjk_len / 2.0
+    non_ascii_count = sum(1 for c in text if ord(c) > 0x7F)
+    ascii_len = len(text) - non_ascii_count
+    char_estimate = non_ascii_count * 1.0 + ascii_len / 2.0
     word_estimate = len(text.split()) * 1.5
     return math.ceil(max(char_estimate, word_estimate))
 
@@ -171,10 +175,15 @@ def estimate_tokens(text: str) -> int:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-# Regex for ATX headers: one-to-six ``#`` chars followed by a space/tab and content.
+# Regex for ATX headers: one-to-six ``#`` chars followed by a space/tab or the
+# end of the line (an empty ``#`` header is a header, SW-L18).
 # Per CommonMark, up to 3 leading spaces are allowed (4+ leading spaces is
 # indented code, which is NOT a header).
-_HEADER_RE = re.compile(r"^ {0,3}(#{1,6})\s+(.*)")
+_HEADER_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*))?$")
+
+# Optional ATX closing sequence: ``#`` characters preceded by a space/tab (or
+# making up the whole title) and followed only by spaces/tabs (SW-L18).
+_ATX_CLOSING_RE = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
 
 # Regex for fenced-code block delimiters (``` or ~~~, optionally followed by info string).
 # Per CommonMark, up to 3 leading spaces are allowed (4+ leading spaces is
@@ -200,6 +209,57 @@ _TABLE_SEP_RE = re.compile(r"^ {0,3}\|")
 def _is_fence_delimiter(line: str) -> bool:
     """Return True if *line* opens or closes a fenced code block."""
     return bool(_FENCE_RE.match(line.rstrip()))
+
+
+def _split_lines_keepends(text: str) -> list[str]:
+    """Split *text* into lines on ``\n`` only, keeping each line's ``\n`` (SW-L17).
+
+    Unlike ``str.splitlines``, a Unicode line or paragraph separator
+    (U+2028, U+2029), a form feed, a vertical tab or a lone ``\r`` in mid-line
+    is ordinary line content, so it can never start a fabricated header line.
+    """
+    if not text:
+        return []
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _atx_title(raw: str | None) -> str:
+    """Return the ATX header title from the text after the opening hashes (SW-L18).
+
+    Strips surrounding whitespace and the optional closing sequence of ``#``
+    characters, so ``## Usage ##`` and ``## Usage`` both give ``"Usage"`` and
+    ``# #`` gives ``""``.  A ``#`` that is not preceded by whitespace is part
+    of the title (``# C#`` stays ``"C#"``).
+    """
+    if raw is None:
+        return ""
+    return _ATX_CLOSING_RE.sub("", raw.strip()).strip()
+
+
+def drop_junk_lines(text: str) -> tuple[str, int]:
+    """Remove the lines of *text* that are longer than 2,000 characters with no whitespace.
+
+    Base64 blobs, data URIs and minified code otherwise size-split into
+    thousands of junk chunks (SW-L20).  Lines split on ``\n`` only.
+
+    Returns:
+        ``(text_without_those_lines, dropped_line_count)``.
+    """
+    kept: list[str] = []
+    dropped = 0
+    for line in _split_lines_keepends(text):
+        body = line.rstrip("\n").rstrip("\r")
+        if len(body) > JUNK_LINE_MIN_CHARS and not any(c.isspace() for c in body):
+            dropped += 1
+            continue
+        kept.append(line)
+    if not dropped:
+        return text, 0
+    return "".join(kept), dropped
 
 
 def _could_be_setext_preceding(line: str) -> bool:
@@ -260,7 +320,7 @@ def _detect_frontmatter_span(lines: list[str]) -> tuple[int, int] | None:
     thematic-break / setext / header handling.
 
     Args:
-        lines: The document split into lines via ``str.splitlines(keepends=True)``.
+        lines: The document split into lines on ``\n`` (``_split_lines_keepends``).
 
     Returns:
         ``(start_index, end_index)`` inclusive, or ``None``.
@@ -329,7 +389,7 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
         ``level`` is 1–6 for ATX headers; 0 for the preamble section.
     """
     sections: list[tuple[int, str, str]] = []
-    lines = text.splitlines(keepends=True)
+    lines = _split_lines_keepends(text)
 
     current_level: int = 0
     current_title: str = ""
@@ -390,9 +450,16 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
                 prev_body_raw = ""
             else:
                 # Potential closing fence: must use the same delimiter character
-                # AND have length >= the opening fence length (CommonMark §4.5).
+                # AND have length >= the opening fence length AND carry no info
+                # string (CommonMark §4.5).  A line such as ``` ```rust ``` while
+                # a fence is open is content, not a close (SW-L16).
                 m = _FENCE_RE.match(stripped)
-                if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len:
+                if (
+                    m
+                    and m.group(1)[0] == fence_char
+                    and len(m.group(1)) >= fence_len
+                    and not stripped[m.end() :].strip()
+                ):
                     in_fence = False
                     fence_char = ""
                     fence_len = 0
@@ -443,7 +510,7 @@ def _split_into_header_sections(text: str) -> list[tuple[int, str, str]]:
         if m_hdr:
             _flush()
             current_level = len(m_hdr.group(1))
-            current_title = m_hdr.group(2).strip()
+            current_title = _atx_title(m_hdr.group(2))
             current_body_lines = []
             prev_body_stripped = ""
             prev_body_raw = ""
@@ -894,6 +961,9 @@ def chunk_markdown(text: str, rel_path: str) -> list[DocChunk]:
     """
     if not text or not text.strip():
         return []
+    text, _dropped = drop_junk_lines(text)
+    if not text.strip():
+        return []
 
     basename = os.path.basename(rel_path)
     sections = _split_into_header_sections(text)
@@ -914,12 +984,15 @@ def chunk_markdown(text: str, rel_path: str) -> list[DocChunk]:
                 header_stack.pop()
             header_stack.append((level, title))
 
-        # Build breadcrumb from stack titles only.
-        titles = [t for _, t in header_stack]
+        # Build breadcrumb from stack titles only; an empty ``#`` header
+        # (SW-L18) bounds a section but adds no breadcrumb segment.
+        titles = [t for _, t in header_stack if t]
         breadcrumb = _build_breadcrumb(basename, titles)
 
-        # Skip entirely empty sections (no body and no meaningful breadcrumb).
-        if not body.strip() and level == 0:
+        # Skip every section whose body is empty after its header (SW-L19):
+        # a header-only chunk would be indexed and returned with empty text.
+        # Its title still reaches the breadcrumbs of its child sections.
+        if not body.strip():
             continue
 
         new_chunks, ordinal = _size_split(breadcrumb, body, rel_path, ordinal)

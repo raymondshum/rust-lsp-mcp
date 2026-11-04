@@ -15,6 +15,7 @@ Test coverage:
       importlib.metadata (null-degradation on PackageNotFoundError);
       rust_analyzer_version read from the manager's cached value; capture-once
       semantics on AnalyzerManager.start().
+    - T04 ``doc_index_progress``: null when idle, the progress dict mid-rebuild.
 """
 
 import asyncio
@@ -383,6 +384,67 @@ class TestStatusDocIndexChunkCount:
             doc_index_chunk_count_return=0,
         )
         assert result["status"] == STATUS_OK
+
+
+class TestStatusDocIndexProgress:
+    """T04 step 3: ``doc_index_progress`` is the running rebuild's progress or null."""
+
+    def test_null_when_no_rebuild_running(self) -> None:
+        import rust_lsp_mcp.doc_store as doc_store_mod
+
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        with patch.object(doc_store_mod, "_running_stores", set()):
+            result = _call_status(
+                mgr,
+                subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+                doc_store_state_return=("ready", None),
+                doc_index_chunk_count_return=3,
+            )
+        assert result["status"] == STATUS_OK
+        assert "doc_index_progress" in result
+        assert result["doc_index_progress"] is None
+
+    def test_shape_while_rebuild_running(self, tmp_path: Any) -> None:
+        """A store with a rebuild in flight reports its progress dict."""
+        import rust_lsp_mcp.doc_store as doc_store_mod
+        from rust_lsp_mcp.settings import Settings
+
+        settings = Settings(chroma_path=str(tmp_path / "chroma"), project_root=str(tmp_path))
+        store = doc_store_mod.DocStore(settings)
+        store._set_progress(
+            phase="embedding",
+            started_at="2026-11-04T10:00:00+00:00",
+            files_total=120,
+            files_done=50,
+        )
+        mgr = _make_manager(STATE_READY, indexed_commit=_FAKE_COMMIT_A)
+        with patch.object(doc_store_mod, "_running_stores", {store}):
+            result = _call_status(
+                mgr,
+                subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+                doc_store_state_return=("ready", None),
+                doc_index_chunk_count_return=7,
+            )
+        assert result["doc_index_progress"] == {
+            "files_total": 120,
+            "files_done": 50,
+            "started_at": "2026-11-04T10:00:00+00:00",
+            "phase": "embedding",
+        }
+        assert result["doc_index_state"] == "ready"
+
+    def test_status_reads_progress_via_accessor(self) -> None:
+        import rust_lsp_mcp.tools.status as status_mod
+
+        progress = {"files_total": 2, "files_done": 0, "started_at": "t", "phase": "scanning"}
+        with patch.object(status_mod, "doc_index_progress", return_value=progress):
+            result = _call_status(
+                None,
+                subprocess_run_return=_completed_process(0, _FAKE_COMMIT_A),
+                doc_store_state_return=("building", None),
+                doc_index_chunk_count_return=None,
+            )
+        assert result["doc_index_progress"] == progress
 
 
 class TestStatusPreflightWarnings:
