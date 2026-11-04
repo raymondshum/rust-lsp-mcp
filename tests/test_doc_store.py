@@ -1475,3 +1475,53 @@ class TestDocStoreStartLock:
             if holder.is_alive():
                 holder.kill()
                 holder.join()
+
+
+class TestRebuildTakesFlock:
+    def test_rebuild_without_lock_held_waits_for_flock(self, tmp_path: pathlib.Path) -> None:
+        """The ``refresh`` path: ``rebuild()`` called without ``lock_held`` on a
+        live store takes the inter-process flock itself, so it waits while
+        another process holds the lock and completes once it is released."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert store.state == DOC_STATE_READY
+
+        ctx = multiprocessing.get_context("spawn")
+        ready = ctx.Event()
+        release = ctx.Event()
+        holder = ctx.Process(
+            target=_flock_holder,
+            args=(str(pathlib.Path(settings.chroma_path) / ".rlm-doc-store.lock"), ready, release),
+        )
+        holder.start()
+        done = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def _refresh_rebuild() -> None:
+            try:
+                outcome["count"] = store.rebuild()
+            except BaseException as exc:  # surfaced by the asserts below
+                outcome["error"] = exc
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=_refresh_rebuild, daemon=True)
+        try:
+            assert ready.wait(timeout=60), "fake lock holder never acquired the flock"
+            worker.start()
+            assert not done.wait(timeout=0.5), (
+                "rebuild() without lock_held finished while another process held the "
+                "doc-store flock — the refresh path must take the flock"
+            )
+        finally:
+            release.set()
+            holder.join(timeout=30)
+            if holder.is_alive():
+                holder.kill()
+                holder.join()
+        assert done.wait(timeout=30), "rebuild() never completed after the flock was released"
+        assert "error" not in outcome, outcome
+        assert outcome["count"] > 0
+        assert store.state == DOC_STATE_READY

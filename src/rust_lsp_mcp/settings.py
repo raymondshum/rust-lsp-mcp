@@ -61,13 +61,14 @@ class Settings(BaseSettings):
 
     The doc store keys its fingerprint and its ChromaDB collection name on
     this identity, so two projects that share one ``chroma_path`` never adopt
-    each other's index.  ``None`` and the empty string are equivalent: both
-    mean "unset", and the server then derives the identity from the resolved
-    ``project_root``, its git ``remote.origin.url`` and its root
-    ``Cargo.toml`` bytes (see ``doc_store.project_identity``).  Set it when two
-    different projects are mounted at the same path with no git remote and
-    byte-identical root ``Cargo.toml`` files, the one case the derived
-    identity cannot tell apart.
+    each other's index.  The value is stripped of surrounding whitespace:
+    ``None``, the empty string and a whitespace-only string are equivalent
+    and all mean "unset".  The server then derives the identity from the
+    resolved ``project_root``, its git ``remote.origin.url`` and its root
+    ``Cargo.toml``'s ``[package].name`` (see ``doc_store.project_identity``).
+    Set it when two different projects share the mount path, share the git
+    remote (or both have none) and have the same root package name (or both
+    have none), the case the derived identity cannot tell apart.
     """
 
     # -----------------------------------------------------------------------

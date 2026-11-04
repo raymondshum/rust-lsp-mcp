@@ -204,9 +204,10 @@ Check this list at these lifecycle checkpoints (see
   `/data/chroma`. A container on one project adopted the doc index another project
   had built on the same volume and answered `search_docs` with that project's docs.
 - **Resolved:** 2026-11-03 (remediation T01). A new `RLM_PROJECT_ID` setting names
-  the project; when it is unset or empty, `project_identity()` derives one from the
-  resolved `project_root`, its git `remote.origin.url` and its root `Cargo.toml`
-  bytes. The identity is part of the fingerprint (`<project_root>|<identity>`),
+  the project; when it is unset, empty or whitespace-only, `project_identity()`
+  derives one from the resolved `project_root`, its git `remote.origin.url` and its
+  root `Cargo.toml`'s `[package].name` (not the file bytes, so a version bump does
+  not rename the collection). The identity is part of the fingerprint (`<project_root>|<identity>`),
   is stamped into the collection metadata as `project_identity` (checked on
   adopt), and suffixes the collection name (`<RLM_DOC_COLLECTION>_<12 hex>`), so
   projects sharing one volume keep separate collections. The README's configs now

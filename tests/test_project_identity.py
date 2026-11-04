@@ -102,10 +102,14 @@ def test_collection_name_is_valid_whatever_the_id(tmp_path: pathlib.Path) -> Non
     client.create_collection(name)
 
 
-# (b) derived identity follows Cargo.toml content ------------------------------
+# (b) derived identity follows the root package name only ---------------------
 
 
-def test_derived_identity_tracks_cargo_toml_content(tmp_path: pathlib.Path) -> None:
+def _write_cargo(project: pathlib.Path, text: str) -> None:
+    (project / "Cargo.toml").write_text(text, encoding="utf-8")
+
+
+def test_derived_identity_tracks_package_name(tmp_path: pathlib.Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     s = _settings(project, tmp_path / "chroma")
@@ -113,40 +117,84 @@ def test_derived_identity_tracks_cargo_toml_content(tmp_path: pathlib.Path) -> N
     no_cargo = project_identity(s)
     assert re.fullmatch(r"[0-9a-f]{16}", no_cargo)
 
-    (project / "Cargo.toml").write_text('[package]\nname = "alpha"\n', encoding="utf-8")
-    first = project_identity(s)
-    assert first != no_cargo
-    # Stable while the content is unchanged.
-    assert project_identity(s) == first
-    (project / "Cargo.toml").write_text('[package]\nname = "alpha"\n', encoding="utf-8")
-    assert project_identity(s) == first
+    _write_cargo(project, '[package]\nname = "alpha"\nversion = "0.1.0"\n')
+    alpha = project_identity(s)
+    assert alpha != no_cargo
+    assert project_identity(s) == alpha  # stable while unchanged
 
-    (project / "Cargo.toml").write_text('[package]\nname = "bravo"\n', encoding="utf-8")
-    second = project_identity(s)
-    assert second != first
-    assert doc_collection_name(s, second) != doc_collection_name(s, first)
+    _write_cargo(project, '[package]\nname = "bravo"\nversion = "0.1.0"\n')
+    bravo = project_identity(s)
+    assert bravo != alpha
+    assert doc_collection_name(s, bravo) != doc_collection_name(s, alpha)
 
 
-# (c) empty RLM_PROJECT_ID equals unset ----------------------------------------
+def test_derived_identity_ignores_version_bump(tmp_path: pathlib.Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    s = _settings(project, tmp_path / "chroma")
+    _write_cargo(project, '[package]\nname = "alpha"\nversion = "0.1.0"\n')
+    before = project_identity(s)
+    _write_cargo(project, '[package]\nname = "alpha"\nversion = "0.2.0"\n')
+    assert project_identity(s) == before
 
 
-def test_empty_project_id_behaves_as_unset(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+def test_derived_identity_ignores_added_dependency(tmp_path: pathlib.Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    s = _settings(project, tmp_path / "chroma")
+    _write_cargo(project, '[package]\nname = "alpha"\nversion = "0.1.0"\n')
+    before = project_identity(s)
+    _write_cargo(
+        project,
+        '[package]\nname = "alpha"\nversion = "0.1.0"\n\n[dependencies]\nserde = "1"\n',
+    )
+    assert project_identity(s) == before
+
+
+@pytest.mark.parametrize(
+    "cargo_text",
+    [
+        "this is = = not toml [[[\n",  # unparsable
+        '[workspace]\nmembers = ["crates/a"]\n',  # workspace-only root, no [package]
+    ],
+)
+def test_unusable_cargo_toml_counts_as_no_package_name(
+    tmp_path: pathlib.Path, cargo_text: str
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    (project / "Cargo.toml").write_text('[package]\nname = "x"\n', encoding="utf-8")
+    s = _settings(project, tmp_path / "chroma")
+    absent = project_identity(s)
+    _write_cargo(project, cargo_text)
+    assert project_identity(s) == absent
+
+
+# (c) empty or whitespace-only RLM_PROJECT_ID equals unset ---------------------
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t \n"])
+def test_blank_project_id_behaves_as_unset(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_cargo(project, '[package]\nname = "x"\n')
 
     unset = _settings(project, tmp_path / "chroma")
     assert unset.project_id is None
-    explicit_empty = _settings(project, tmp_path / "chroma", project_id="")
-    monkeypatch.setenv("RLM_PROJECT_ID", "")
-    env_empty = _settings(project, tmp_path / "chroma")
-    assert env_empty.project_id == ""
+    explicit_blank = _settings(project, tmp_path / "chroma", project_id=blank)
+    monkeypatch.setenv("RLM_PROJECT_ID", blank)
+    env_blank = _settings(project, tmp_path / "chroma")
+    assert env_blank.project_id == blank
 
-    assert project_identity(explicit_empty) == project_identity(unset)
-    assert project_identity(env_empty) == project_identity(unset)
-    assert doc_collection_name(env_empty) == doc_collection_name(unset)
+    assert project_identity(explicit_blank) == project_identity(unset)
+    assert project_identity(env_blank) == project_identity(unset)
+    assert doc_collection_name(env_blank) == doc_collection_name(unset)
+
+
+def test_explicit_project_id_is_stripped(tmp_path: pathlib.Path) -> None:
+    s = _settings(tmp_path, tmp_path / "chroma", project_id="  alpha  ")
+    assert project_identity(s) == "alpha"
 
 
 def test_env_project_id_is_read(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:

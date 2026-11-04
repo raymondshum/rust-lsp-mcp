@@ -37,7 +37,7 @@ Project identity (SW-01):
     Every project gets its own identity (:func:`project_identity`): the
     explicit ``RLM_PROJECT_ID`` when set, else a hash of the resolved
     ``project_root``, its git ``remote.origin.url`` and its root
-    ``Cargo.toml`` bytes.  The identity is part of the adopt fingerprint and
+    ``Cargo.toml``'s ``[package].name``.  The identity is part of the adopt fingerprint and
     of the ChromaDB collection name (:func:`doc_collection_name`), so two
     projects that share one ``/data`` volume, even at the same mount path,
     keep separate collections and never adopt each other's index.
@@ -82,6 +82,7 @@ import os
 import pathlib
 import subprocess
 import threading
+import tomllib
 from collections.abc import Iterator
 from typing import Any, cast
 
@@ -144,29 +145,52 @@ def _git_remote_url(project_root: pathlib.Path) -> str:
     return result.stdout.strip()
 
 
+def _root_package_name(project_root: pathlib.Path) -> str:
+    """Return ``[package].name`` of ``<project_root>/Cargo.toml``, or ``""``.
+
+    Empty when the file is absent or unreadable, when ``tomllib`` cannot parse
+    it, or when it has no ``[package]`` table (a workspace-only root) or no
+    string ``name``.  Only the name is used, never the file bytes, so a
+    version bump or a dependency edit does not change the project identity
+    (which would rename the collection, force a full re-embed and orphan the
+    old collection on the volume).
+    """
+    try:
+        with (project_root / "Cargo.toml").open("rb") as fh:
+            manifest = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return ""
+    package = manifest.get("package")
+    if not isinstance(package, dict):
+        return ""
+    name = package.get("name")
+    return name if isinstance(name, str) else ""
+
+
 def project_identity(settings: Settings) -> str:
     """Return the identity of the target project for the doc index (SW-01).
 
-    ``settings.project_id`` wins when it is set and non-empty.  Otherwise the
-    identity is the first 16 hex characters of the SHA-256 over three
-    newline-joined parts: the resolved ``project_root``, the output of
-    ``git -C <project_root> config --get remote.origin.url`` (empty on any
-    failure, 5-second timeout) and the bytes of ``<project_root>/Cargo.toml``
-    (empty when absent or unreadable).
+    ``settings.project_id`` is stripped of surrounding whitespace first; when
+    the stripped value is non-empty it is the identity (empty or
+    whitespace-only counts as unset).  Otherwise the identity is the first 16
+    hex characters of the SHA-256 over three newline-joined parts: the
+    resolved ``project_root``, the output of ``git -C <project_root> config
+    --get remote.origin.url`` (empty on any failure, 5-second timeout) and the
+    root package name (``[package].name`` of ``<project_root>/Cargo.toml``,
+    see :func:`_root_package_name`).
 
-    The derived identity collides only for two different projects that share
-    the mount path, have no git remote and have byte-identical root
-    ``Cargo.toml`` files; ``RLM_PROJECT_ID`` tells those apart.
+    The derived identity collides for two different projects that share the
+    mount path, share the git remote (or both have none) and have the same
+    root package name (or both have none); ``RLM_PROJECT_ID`` tells those
+    apart.
     """
-    if settings.project_id:
-        return settings.project_id
+    explicit = (settings.project_id or "").strip()
+    if explicit:
+        return explicit
     root = pathlib.Path(settings.project_root).resolve()
     remote = _git_remote_url(root)
-    try:
-        cargo_toml = (root / "Cargo.toml").read_bytes()
-    except OSError:
-        cargo_toml = b""
-    digest = hashlib.sha256(b"\n".join([str(root).encode(), remote.encode(), cargo_toml]))
+    package_name = _root_package_name(root)
+    digest = hashlib.sha256("\n".join([str(root), remote, package_name]).encode())
     return digest.hexdigest()[:16]
 
 
