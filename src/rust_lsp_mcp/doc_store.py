@@ -196,9 +196,7 @@ _LOCK_FILENAME = ".rlm-doc-store.lock"
 
 # error_message set when the live collection was deleted by another process
 # on the volume and no rebuild is bringing it back (KI-13).
-_DELETED_COLLECTION_ERROR = (
-    "the doc index collection was deleted by another process on this volume; call refresh"
-)
+_DELETED_COLLECTION_ERROR = "the doc index collection was deleted by another process on this volume"
 
 # A wait on the lock longer than this is logged once at info.
 _LOCK_WAIT_LOG_SECONDS = 2.0
@@ -1215,8 +1213,9 @@ class DocStore:
         held flock means a rebuild is mid-swap, so ``_state``, ``_error`` and
         ``_collection`` stay as they are.  A free flock means nothing will
         bring the collection back: after one more re-open under the flock,
-        ``_state`` becomes ``"error"`` with a message naming ``refresh`` and
-        ``_collection`` is cleared.
+        ``_state`` becomes ``"error"`` with ``_DELETED_COLLECTION_ERROR`` as
+        its message, which says another process on the volume deleted the
+        collection, and ``_collection`` is cleared.
 
         Raises:
             DocStoreNotReady: no collection can be served now.
@@ -1377,6 +1376,25 @@ def doc_store_state() -> tuple[str, str | None]:
     if _init_error is not None:
         return DOC_STATE_ERROR, _init_error
     return DOC_STATE_BUILDING, None
+
+
+def reported_doc_state(
+    snapshot: tuple[str, str | None] | None = None,
+) -> tuple[str, str | None]:
+    """Return the doc state the tools report: :func:`doc_store_state`, masked.
+
+    Same pair as :func:`doc_store_state` (or as *snapshot*, a pair the caller
+    already read from it), with one change: ``("error", <message>)`` becomes
+    ``("building", None)`` while :func:`doc_rebuild_in_progress` is true, so
+    ``status``, ``refresh`` and ``search_docs`` all report an errored index
+    whose ``refresh`` rebuild is in flight as ``"building"`` (backlog line
+    117).  Call from the event loop, as :func:`doc_rebuild_in_progress`
+    requires.
+    """
+    state, message = snapshot if snapshot is not None else doc_store_state()
+    if state == DOC_STATE_ERROR and doc_rebuild_in_progress():
+        return DOC_STATE_BUILDING, None
+    return state, message
 
 
 def doc_index_chunk_count() -> int | None:

@@ -86,8 +86,13 @@ def _run_search_docs(
     limit: int = 5,
     store: Any = None,
     doc_store_state_return: Any = None,
+    rebuild_in_progress: bool = False,
 ) -> dict[str, Any]:
     """Monkeypatch get_doc_store (and optionally doc_store_state) and call search_docs().
+
+    ``rebuild_in_progress`` pins ``search_mod.doc_rebuild_in_progress`` so
+    the errored-store branches do not depend on a rebuild thread another
+    test left running.
 
     ``doc_store_state_return``, when given, patches
     ``search_mod.doc_store_state`` to return that ``(state, error)`` tuple
@@ -98,7 +103,10 @@ def _run_search_docs(
     import rust_lsp_mcp.tools.search_docs as search_mod
 
     async def _inner() -> dict[str, Any]:
-        patches = [patch.object(search_mod, "get_doc_store", return_value=store)]
+        patches = [
+            patch.object(search_mod, "get_doc_store", return_value=store),
+            patch.object(search_mod, "doc_rebuild_in_progress", return_value=rebuild_in_progress),
+        ]
         if doc_store_state_return is not None:
             patches.append(
                 patch.object(search_mod, "doc_store_state", return_value=doc_store_state_return)
@@ -200,6 +208,103 @@ class TestErrorState:
         """store is None but doc_store_state() reports "building" → not_ready, not error."""
         result = _run_search_docs(store=None, doc_store_state_return=("building", None))
         assert result["status"] == STATUS_NOT_READY
+
+    def test_deleted_collection_envelope_names_no_build_failure(self) -> None:
+        """Backlog lines 114 and 122: an errored store whose reason is the
+        deleted-collection text names no build failure and names refresh
+        once."""
+        from rust_lsp_mcp.doc_store import _DELETED_COLLECTION_ERROR
+
+        result = _run_search_docs(store=_make_error_store(_DELETED_COLLECTION_ERROR))
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "refresh"
+        message = result["message"]
+        assert "failed to build" not in message
+        assert "call refresh" not in message
+        assert message.lower().count("refresh") == 1
+        assert message == (
+            "The documentation index is unavailable: the doc index collection was "
+            "deleted by another process on this volume. Run the refresh tool to rebuild it."
+        )
+
+
+class TestErroredStoreWithRebuildInFlight:
+    """Backlog line 117: an errored index that a refresh rebuild is
+    re-initialising answers not_ready, as status reports "building"."""
+
+    def test_errored_store_with_rebuild_returns_not_ready(self) -> None:
+        store = _make_error_store()
+        result = _run_search_docs(store=store, rebuild_in_progress=True)
+        assert result["status"] == STATUS_NOT_READY
+        assert result["recovery"] == "poll_status"
+        store.search.assert_not_called()
+
+    def test_errored_store_without_rebuild_returns_error(self) -> None:
+        result = _run_search_docs(store=_make_error_store(), rebuild_in_progress=False)
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "refresh"
+
+    def test_store_none_init_error_with_rebuild_returns_not_ready(self) -> None:
+        result = _run_search_docs(
+            store=None,
+            doc_store_state_return=("error", "RuntimeError: chroma path unwritable"),
+            rebuild_in_progress=True,
+        )
+        assert result["status"] == STATUS_NOT_READY
+
+    def test_store_none_init_error_without_rebuild_returns_error(self) -> None:
+        result = _run_search_docs(
+            store=None,
+            doc_store_state_return=("error", "RuntimeError: chroma path unwritable"),
+            rebuild_in_progress=False,
+        )
+        assert result["status"] == STATUS_ERROR
+        assert "failed to initialise" in result["message"]
+
+    def test_recheck_with_rebuild_returns_not_ready(self) -> None:
+        """The DocStoreNotReady re-check of a store gone to error answers
+        not_ready while a rebuild is in flight."""
+        store = MagicMock()
+        store.is_ready = True
+        store.state = "ready"
+        store.error_message = "RuntimeError: boom"
+
+        def _flip(*_args: Any, **_kwargs: Any) -> Any:
+            store.state = "error"
+            raise DocStoreNotReady()
+
+        store.search.side_effect = _flip
+        result = _run_search_docs(store=store, rebuild_in_progress=True)
+        assert result["status"] == STATUS_NOT_READY
+
+    def test_real_rebuild_thread_masks_errored_store(self) -> None:
+        """End to end through the real doc_rebuild_in_progress: a held
+        refresh worker thread makes the errored store answer not_ready, and
+        the error envelope returns once the thread ends."""
+        import threading
+
+        import rust_lsp_mcp.doc_store as doc_store_mod
+        import rust_lsp_mcp.tools.search_docs as search_mod
+
+        store = _make_error_store("RuntimeError: boom")
+        release = threading.Event()
+
+        def _held() -> None:
+            release.wait(30)
+
+        async def _call() -> dict[str, Any]:
+            return await search_mod.search_docs(query="install")
+
+        with patch.object(search_mod, "get_doc_store", return_value=store):
+            assert doc_store_mod.start_doc_rebuild(_held) is True
+            try:
+                assert asyncio.run(_call())["status"] == STATUS_NOT_READY
+            finally:
+                release.set()
+                thread = doc_store_mod._rebuild_thread
+                if thread is not None:
+                    thread.join(timeout=30)
+            assert asyncio.run(_call())["status"] == STATUS_ERROR
 
 
 # ---------------------------------------------------------------------------

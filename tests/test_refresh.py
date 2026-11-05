@@ -784,3 +784,162 @@ class TestRefreshLockCrossEventLoop:
         # above.  Post-fix, this loop gets its own (different) lock object.
         third = asyncio.run(_contend_and_return_lock())
         assert third is not first
+
+
+# ---------------------------------------------------------------------------
+# Backlog lines 115 and 117: the reply reports the masked doc state status
+# reports, and its message follows that state.
+# ---------------------------------------------------------------------------
+
+
+def _errored_store(message: str = "RuntimeError: boom") -> MagicMock:
+    store = MagicMock()
+    store.state = DOC_STATE_ERROR
+    store.error_message = message
+    store.state_snapshot.return_value = (DOC_STATE_ERROR, message)
+    return store
+
+
+class TestRefreshReplyDocState:
+    def test_errored_store_reply_reads_building(self) -> None:
+        """Line 117: a refresh that starts the re-init of an errored store
+        reports "building", as status does, and a second refresh while that
+        re-init runs reports "building" with doc_rebuild_started false."""
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        mgr = _FakeManager()
+        store = _errored_store()
+        release = threading.Event()
+        reinit_calls: list[None] = []
+
+        def _held_reinit(*_a: Any, **_kw: Any) -> None:
+            reinit_calls.append(None)
+            assert release.wait(timeout=5), "test deadlocked waiting for release"
+
+        async def _inner() -> tuple[dict[str, Any], dict[str, Any]]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(doc_store_mod, "_doc_store", store),
+                patch.object(refresh_mod, "get_doc_store", return_value=store),
+                patch.object(refresh_mod, "init_doc_store", _held_reinit),
+            ):
+                first = await refresh_mod.refresh()
+                second = await refresh_mod.refresh()
+                return first, second
+
+        try:
+            first, second = asyncio.run(_inner())
+        finally:
+            release.set()
+            _join_doc_worker()
+
+        assert first["doc_rebuild_started"] is True
+        assert first["doc_index_state"] == "building"
+        assert second["doc_rebuild_started"] is False
+        assert second["doc_index_state"] == "building"
+        assert len(reinit_calls) == 1
+
+    def test_errored_store_message_names_not_ready(self) -> None:
+        """Line 115: the started-rebuild message over an errored store says
+        search_docs answers not_ready, not that the old index keeps
+        answering."""
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        mgr = _FakeManager()
+        store = _errored_store()
+        release = threading.Event()
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(doc_store_mod, "_doc_store", store),
+                patch.object(refresh_mod, "get_doc_store", return_value=store),
+                patch.object(
+                    refresh_mod, "init_doc_store", lambda *_a, **_k: release.wait(timeout=5)
+                ),
+            ):
+                return await refresh_mod.refresh()
+
+        try:
+            result = asyncio.run(_inner())
+        finally:
+            release.set()
+            _join_doc_worker()
+
+        message = result["message"]
+        assert result["doc_rebuild_started"] is True
+        assert "old index" not in message
+        assert "keeps answering" not in message
+        assert "not_ready" in message
+        assert message.startswith("Re-index started; poll status until state is 'ready'.")
+
+
+class TestRefreshReplyMessage:
+    """Line 115: the reply message for each doc state."""
+
+    def test_ready_started_keeps_old_index_message(self) -> None:
+        from rust_lsp_mcp.tools.refresh import _reply_message
+
+        message = _reply_message("ready", True)
+        assert message == (
+            "Re-index started; poll status until state is 'ready'. The doc index "
+            "rebuilds in the background (status.doc_index_progress); search_docs "
+            "keeps answering from the old index meanwhile."
+        )
+
+    def test_ready_not_started_keeps_already_running_message(self) -> None:
+        from rust_lsp_mcp.tools.refresh import _reply_message
+
+        message = _reply_message("ready", False)
+        assert message == (
+            "Re-index started; poll status until state is 'ready'. A doc index "
+            "rebuild was already running, so no new one was started "
+            "(status.doc_index_progress)."
+        )
+
+    @pytest.mark.parametrize("started", [True, False])
+    def test_building_names_not_ready(self, started: bool) -> None:
+        from rust_lsp_mcp.tools.refresh import _reply_message
+
+        message = _reply_message("building", started)
+        assert message.startswith("Re-index started; poll status until state is 'ready'.")
+        assert "being built in the background" in message
+        assert "status.doc_index_progress" in message
+        assert "not_ready" in message
+        assert "doc_index_state 'ready'" in message
+        assert "old index" not in message
+
+    @pytest.mark.parametrize("started", [True, False])
+    def test_error_names_error_envelope(self, started: bool) -> None:
+        from rust_lsp_mcp.tools.refresh import _reply_message
+
+        message = _reply_message("error", started)
+        assert message.startswith("Re-index started; poll status until state is 'ready'.")
+        assert "error envelope until a rebuild succeeds" in message
+        assert "old index" not in message
+        assert "keeps answering" not in message
+
+    def test_error_reply_when_no_rebuild_masks(self) -> None:
+        """An errored store whose rebuild could not be seen in flight reads
+        "error" and carries the error message (the reply follows the state)."""
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.refresh as refresh_mod
+
+        mgr = _FakeManager()
+        store = _errored_store()
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(doc_store_mod, "_doc_store", store),
+                patch.object(refresh_mod, "get_doc_store", return_value=store),
+                patch.object(refresh_mod, "start_doc_rebuild", return_value=False),
+                patch.object(doc_store_mod, "doc_rebuild_in_progress", return_value=False),
+            ):
+                return await refresh_mod.refresh()
+
+        result = asyncio.run(_inner())
+        assert result["doc_index_state"] == "error"
+        assert "error envelope until a rebuild succeeds" in result["message"]

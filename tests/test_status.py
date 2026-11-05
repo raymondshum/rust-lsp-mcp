@@ -845,7 +845,7 @@ class TestStatusHealthFields:
 # state the reply reports (R2, R3) and come from one collection (R4).
 # ---------------------------------------------------------------------------
 
-_FLIP_ERROR = "the doc index collection was deleted by another process on this volume; call refresh"
+_FLIP_ERROR = "the doc index collection was deleted by another process on this volume"
 
 
 def _ready_doc_store(tmp_path: Any) -> Any:

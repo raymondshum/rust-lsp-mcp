@@ -15,14 +15,12 @@ from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, get_preflight_warnings, mcp
 from rust_lsp_mcp.doc_store import (
-    DOC_STATE_BUILDING,
-    DOC_STATE_ERROR,
     DOC_STATE_READY,
     doc_index_chunk_count,
     doc_index_progress,
-    doc_rebuild_in_progress,
     doc_store_state,
     doc_store_status_fields,
+    reported_doc_state,
 )
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
@@ -254,9 +252,9 @@ async def status() -> dict[str, Any]:
     # An errored index whose refresh rebuild is in flight (for example a
     # re-init waiting on another process's doc-store lock) reads "building",
     # so a client polling for ready keeps waiting instead of acting on the
-    # error the rebuild is about to replace.
-    if doc_state == DOC_STATE_ERROR and doc_rebuild_in_progress():
-        doc_state, doc_err = DOC_STATE_BUILDING, None
+    # error the rebuild is about to replace.  The mask is reported_doc_state's,
+    # so refresh and search_docs report the same state (backlog line 117).
+    doc_state, doc_err = reported_doc_state((doc_state, doc_err))
     # Backlog line 50: the doc fields read after the awaits belong to the
     # doc_state reported; a store that is not ready reports null for all of
     # them, so one reply never pairs "building" or "error" with values.
