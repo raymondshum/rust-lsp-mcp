@@ -210,9 +210,9 @@ Check this list at these lifecycle checkpoints (see
   *server* process, not `rust-lsp`.
 - **Status:** decided: D12's single-writer mandate (documented in the
   CLI-frontend Phase 4 compose/README rewrite: one process per Chroma path;
-  separate volume names if two servers are truly needed). Entry stays open
-  until a stronger guard (e.g. an on-disk lock or per-mode volumes by default)
-  is decided.
+  separate volume names if two servers are truly needed). At that point the
+  entry stood open until a stronger guard (e.g. an on-disk lock or per-mode
+  volumes by default) was decided.
   **2026-07-03 (CLI-frontend Phase 4):** the compose flip landed —
   [docker-compose.yml](../../docker-compose.yml)'s entrypoint now runs the
   daemon directly (`RLM_TRANSPORT=streamable-http`), the old `sleep infinity`
@@ -220,7 +220,7 @@ Check this list at these lifecycle checkpoints (see
   single-writer mandate is spelled out in the compose header comment, the
   README's [CLI access](../../README.md#cli-access-for-agents-without-mcp)
   section, and [docs/guide/cli.md](../guide/cli.md)'s troubleshooting table.
-  Entry remains open per the stronger-guard note above.
+  On that date the entry remained open per the stronger-guard note above.
   **2026-11-03 (defect sweep SW-02, remediation T01):** the hazard was shown on
   the very first start, in the README's documented config. Two containers started
   together on a fresh shared volume: the first built its doc index normally, and
@@ -232,11 +232,12 @@ Check this list at these lifecycle checkpoints (see
   (`_prepare_store`), and a `rebuild()` on a live store (`refresh`) takes the same
   flock, so two servers on one volume serialise their first builds (the second
   waits, then adopts) and never rebuild concurrently. Per-project collections
-  (SW-01, below) keep different projects on one volume apart. Entry stays open
-  only for the cross-process read of a collection another process deletes: a
-  `refresh` in one server still deletes and recreates the collection another
-  server on the same volume is serving, and that server's doc search fails until
-  it restarts. The one-server-per-volume guidance above still holds for serving.
+  (SW-01, below) keep different projects on one volume apart. On that date the
+  entry stood open only for the cross-process read of a collection another
+  process deletes: a `refresh` in one server still deleted and recreated the
+  collection another server on the same volume was serving, and that server's
+  doc search failed until it restarted, so the one-server-per-volume guidance
+  above still held for serving.
   **2026-11-04 (remediation T05, daemon):** under `rlm-connect`
   ([docs/guide/daemon.md](../guide/daemon.md)) every IDE window on a project
   attaches through `rust-lsp mcp-bridge` to that project's one daemon

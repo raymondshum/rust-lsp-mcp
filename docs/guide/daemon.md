@@ -4,16 +4,16 @@ type: Guide
 title: Daemon runbook (rlm-connect)
 description: Warm, check and attach to one rust-lsp-mcp daemon per project with rlm-connect -- names, cache priming, readiness, logs, idle timeout, IDE configuration and recovery.
 tags: [guide, tier-a, daemon, operations]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: scripts/rlm-connect
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_cli/bridge.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/server.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: docker-compose.yml
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 cite:
   - scripts/rlm-connect:BRIDGE_ARGV
   - src/rust_lsp_cli/bridge.py:DEFAULT_LISTENER_TIMEOUT_SECONDS

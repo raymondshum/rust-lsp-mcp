@@ -4,22 +4,22 @@ type: Guide
 title: Development setup
 description: How to set up the dev container, run the server locally, and run the test tiers.
 tags: [guide, tier-b, development]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: Dockerfile
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: docker-compose.yml
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: .devcontainer/devcontainer.json
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: .devcontainer/Dockerfile
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: scripts/setup.sh
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: scripts/clone-ripgrep.sh
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: pyproject.toml
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -84,7 +84,7 @@ Certain folders are stored *outside* the container, under `.devcontainer/cache/`
 | `chroma-model-cache/` | `~/.cache/chroma` | The ~80 MB ONNX embedding model, downloaded once |
 | `chroma/` | `/workspaces/chroma` | The documentation-search vector database |
 
-> **Production image:** The same persistent data categories live on a single named Docker volume mounted at `/data` (e.g. `rust-lsp-mcp-data`). Because ChromaDB enforces single-process access, do not run a Compose daemon and a separate `docker run` session against the same volume simultaneously.
+> **Production image:** The same persistent data categories live on a named Docker volume mounted at `/data`, one per project (`rlm-<project-name>-data`). Server processes on one volume take turns on the doc-store lock, which covers the store's construction, the adopt check and every rebuild.
 
 ### Automatic first-time setup
 
@@ -183,7 +183,7 @@ docker run -i --rm --init \
 
 Environment defaults (`RLM_PROJECT_ROOT=/project`, `RLM_CHROMA_PATH=/data/chroma`) work out of the box. See [Configuration](configuration.md) to override them.
 
-**Persistent daemon mode:** For agents without MCP tool access or when keeping rust-analyzer hot across many calls, run a daemon. `rlm-connect` starts one daemon and one volume per project; see [Daemon mode](daemon.md). The compose path is `docker compose up -d rust-lsp-mcp`, with commands run via `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd>`; see the [CLI reference](cli.md). Do not launch multiple server processes against the same Chroma data volume.
+**Persistent daemon mode:** For agents without MCP tool access or when keeping rust-analyzer hot across many calls, run a daemon. `rlm-connect` starts one daemon and one volume per project; see [Daemon mode](daemon.md). The compose path is `docker compose up -d rust-lsp-mcp`, with commands run via `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd>`; see the [CLI reference](cli.md). A second server started on the same volume with the same `RLM_PROJECT_ID` takes turns with the daemon on the doc-store lock, which covers the store's construction, the adopt check and every rebuild, and its doc search picks up the daemon's rebuilt index on its next call ([KI-13](../impl/known-issues.md), resolved).
 
 ---
 
@@ -223,6 +223,38 @@ only this gate can. It takes roughly ten minutes (several cold rust-analyzer
 starts plus the embedding model).
 
 > **Note:** The VS Code Test panel (the beaker icon in the sidebar) is configured to run the fast tests only by default. The integration tests are never triggered accidentally from there.
+
+### Fast tests inside the production image
+
+To check that the fast tier passes on the image's own Python and system
+libraries, build the image and run the tier in it against your checkout. Run
+this from the repo root:
+
+```bash
+IMAGE="${IMAGE:-rust-lsp-mcp:fast-tier}"
+podman build -t "$IMAGE" .
+podman run --rm --init --pids-limit -1 \
+  -v "$PWD":/workspaces/rust-lsp-mcp:z -w /workspaces/rust-lsp-mcp \
+  -e UV_PROJECT_ENVIRONMENT=/opt/rlm-test-venv \
+  --entrypoint sh "$IMAGE" \
+  -c 'uv sync --frozen && uv run pytest -m "not integration" -p no:cacheprovider -q'
+```
+
+The image has no pytest (it installs with `--no-dev`), so `uv sync --frozen`
+installs the dev dependencies first, which needs network access. The
+`UV_PROJECT_ENVIRONMENT` path is inside the container, so your checkout's own
+`.venv` is untouched, and `-p no:cacheprovider` keeps pytest from writing a
+`.pytest_cache` into the checkout. `docker` works in place of `podman`.
+
+`--pids-limit -1` lifts the container's process and thread cap (podman's
+default is 2048). The fast tier starts more threads than that over one run,
+and under the default cap the later tests fail with `can't start new thread`
+or a ChromaDB `Resource temporarily unavailable (os error 11)`, or the run
+hangs.
+
+The image sets `RLM_PROJECT_ROOT`, `RLM_CHROMA_PATH`, `RLM_RUST_ANALYZER_BIN`
+and `RLM_DOC_COLLECTION` (see the `Dockerfile`); the settings tests that assert
+the code defaults clear every `RLM_*` variable first, so they pass here too.
 
 ### Production-image smoke gate
 

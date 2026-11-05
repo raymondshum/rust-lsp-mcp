@@ -4,30 +4,30 @@ type: Guide
 title: Tool reference
 description: Every MCP tool the server exposes, with its inputs and exact envelope responses.
 tags: [guide, tier-a, tools]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/diagnostics.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/envelope.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -606,8 +606,9 @@ on the doc index) — a fresh `refresh` clears both failures and starts over.
 **Blast radius:** this tears down and re-indexes the single global analyzer
 shared by the whole server. Every navigation tool returns `not_ready` for
 every caller until re-indexing completes, which can take minutes on large
-projects. `search_docs` keeps answering from the old doc index while the doc
-rebuild runs. Do not invoke `refresh` mid-task unless the index is actually
+projects. Over a ready doc index, `search_docs` keeps answering from the old
+index while the doc rebuild runs; over an errored or absent one it answers
+`not_ready` until the re-initialised index is ready. Do not invoke `refresh` mid-task unless the index is actually
 stale or broken — check `status`/`analyzer_status` first.
 
 **Inputs:** none.
@@ -627,7 +628,7 @@ before issuing navigation queries.
 workspace, and the doc index rebuilds in the background. `refresh` returns
 once the doc rebuild thread has started; it does not wait for the rebuild.
 The rebuild writes a staging collection and swaps it in when it succeeds, so
-`search_docs` serves the old index meanwhile. Unchanged Markdown files keep
+over a ready index `search_docs` serves the old index meanwhile. Unchanged Markdown files keep
 their stored embeddings; a changed or renamed file is re-embedded, and every
 file is re-embedded when there is no complete live index for this project or
 the chunker version or the embedding model changed. Follow the rebuild

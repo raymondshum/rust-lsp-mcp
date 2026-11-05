@@ -4,14 +4,14 @@ type: Guide
 title: Agentic coding — how this project is built with Claude Code
 description: Maps the delivery lifecycle, orchestration model, and Claude Code configuration that build this project.
 tags: [guide, tier-b, agentic-coding]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: CLAUDE.md
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: docs/conventions/lifecycle.md
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: docs/conventions/index.md
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)

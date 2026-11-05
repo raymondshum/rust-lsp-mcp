@@ -4,12 +4,12 @@ type: Guide
 title: CLI reference (rust-lsp)
 description: Command-line client reference for rust-lsp -- subcommands, exit codes, and --wait semantics for agents without MCP tool access.
 tags: [guide, tier-a, cli]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: src/rust_lsp_cli/cli.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_cli/client.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 cite:
   - src/rust_lsp_cli/cli.py:EXIT_NOT_READY
 ---
@@ -242,7 +242,7 @@ During normal operation, logs may display a per-request `ClosedResourceError` tr
 
 ## `refresh`: shared-daemon blast radius
 
-`refresh` restarts the single analyzer process and rebuilds the documentation index in the background, inside the container. It returns as soon as both have started. Because all CLI calls and MCP clients share this instance, running `refresh` makes all concurrent navigation queries return `not_ready` until the analyzer finishes indexing; `search-docs` keeps answering from the old doc index while the doc rebuild runs.
+`refresh` restarts the single analyzer process and rebuilds the documentation index in the background, inside the container. It returns as soon as both have started. Because all CLI calls and MCP clients share this instance, running `refresh` makes all concurrent navigation queries return `not_ready` until the analyzer finishes indexing. Over a ready doc index, `search-docs` keeps answering from the old index while the doc rebuild runs; over an errored or absent one it returns `not_ready` until the re-initialised index is ready.
 
 Check `rust-lsp status` before refreshing. Only trigger `refresh` when code changes warrant an index rebuild or when `state` reports `"error"`.
 
@@ -257,7 +257,7 @@ Check `rust-lsp status` before refreshing. Only trigger `refresh` when code chan
 | `docker exec: no such container` | Container was not started or has a different name. | Run `docker ps` to verify container name. |
 | Exit `127`: `rust-lsp not found` | Command was invoked without full path. | Invoke `/app/.venv/bin/rust-lsp` directly. |
 | `state: "ready"` with `chunk_count: 0` | SELinux denied container read access to the project mount. | Ensure mount includes `:ro,z` suffix, or run `chcon -Rt container_file_t /path/to/project`. |
-| Multiple containers conflicting on `/data` | Concurrent processes writing to the same ChromaDB volume. | Ensure only one active server container mounts each data directory. |
+| Multiple containers conflicting on `/data` | Several server processes share one ChromaDB volume. They take turns on the doc-store lock, so a second server waits while the first builds or rebuilds the doc index, and a `refresh` in one rebuilds the index the other serves. | Give each project its own volume (`rlm-<project-name>-data`). |
 
 ## Related pages
 

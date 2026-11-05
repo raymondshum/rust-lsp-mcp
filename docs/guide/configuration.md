@@ -4,12 +4,12 @@ type: Guide
 title: Configuration reference
 description: Every rust-lsp-mcp setting -- environment variable, default, and precedence -- plus the CLI-only RLM_CLI_URL override.
 tags: [guide, tier-a, configuration]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/settings.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: env.sample
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
