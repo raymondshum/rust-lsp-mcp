@@ -148,10 +148,13 @@ async def status() -> dict[str, Any]:
                            "ready"`` (``"none"`` if git failed at build time).
                            Informational: ``doc_stale`` does not compare it.
     - ``doc_stale``      — ``true`` when a Markdown file the index covers was
-                           added, removed or changed (size or mtime) since
-                           the build; ``false`` when none was, including
-                           after a branch switch or commit that leaves the
-                           doc files byte-identical; ``null`` when
+                           added, removed, or changed in size or
+                           modification time since the build, including a
+                           checkout that rewrites a covered file with the
+                           same bytes (a switch to a branch that edits it
+                           and back); ``false`` when none was, including
+                           after a branch switch or commit that does not
+                           rewrite a covered doc file; ``null`` when
                            ``doc_index_state != "ready"``.  No running server
                            rebuilds the doc index on its own: ``doc_stale``
                            stays ``true`` until the next ``refresh`` or
