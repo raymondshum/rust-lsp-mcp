@@ -186,14 +186,16 @@ collection on the volume.
   about a second (0.8 seconds measured with podman on the ripgrep sample). The
   container then reports exit code `143` (terminated by SIGTERM), not `0`, and
   an attached window's bridge ends. A stop during the cold index takes longer,
-  because the daemon waits up to 10 seconds for the doc index build to stop
-  while the analyzer shuts down beside it: a stop 2 seconds into a cold start
-  took 10.9 to 11.9 seconds and also ended with exit code `143`. `rlm-connect`
+  because the daemon waits up to 10 seconds each for the doc index build to
+  stop and for the analyzer to drain, side by side, and then tears the
+  analyzer down: a stop 2 seconds into a cold start took 10.9 to 11.9 seconds
+  and also ended with exit code `143`. `rlm-connect`
   creates the daemon with a 15-second stop timeout, so a plain `docker stop`
   waits up to 15 seconds before the engine kills the container (podman logs
   `resorting to SIGKILL`, exit code `137`). A container created before
-  `rlm-connect` set that timeout keeps the engine's 10-second default until
-  you run `docker rm -f rlm-<ID>` and start it again. `docker rm rlm-<ID>`
+  `rlm-connect` set that timeout keeps the engine's 10-second default, and an
+  isolated one also lacks `CARGO_NET_OFFLINE=true`, until you run
+  `docker rm -f rlm-<ID>` and start it again. `docker rm rlm-<ID>`
   also removes the container; the volume, with its cargo cache and doc index,
   stays.
 

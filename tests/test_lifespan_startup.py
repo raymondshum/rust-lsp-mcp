@@ -468,3 +468,30 @@ class TestLifespanOverlappedShutdown:
         assert records, caplog.text
         assert records[0].exc_info is not None
         assert "clear boom" in str(records[0].exc_info[1])
+
+    def test_analyzer_shutdown_error_still_waits_for_doc_store(self) -> None:
+        """``AnalyzerManager.shutdown`` raising still lets the worker-thread
+        ``clear_doc_store`` run to completion, and the error escapes
+        ``_lifespan``."""
+        finished: list[str] = []
+
+        def _slow_clear() -> None:
+            time.sleep(0.3)
+            finished.append("doc_store")
+
+        async def _failing_shutdown(self: object) -> None:
+            raise RuntimeError("shutdown boom")
+
+        async def _scenario() -> None:
+            with (
+                patch.object(analyzer_mod.AnalyzerManager, "start", AsyncMock()),
+                patch.object(analyzer_mod.AnalyzerManager, "shutdown", _failing_shutdown),
+                patch.object(core_mod, "init_doc_store_background", AsyncMock()),
+                patch.object(core_mod, "clear_doc_store", _slow_clear),
+            ):
+                async with core_mod._lifespan(object()):  # ty: ignore[invalid-argument-type]
+                    pass
+
+        with pytest.raises(RuntimeError, match="shutdown boom"):
+            asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
+        assert finished == ["doc_store"]
