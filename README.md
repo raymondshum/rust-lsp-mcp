@@ -105,7 +105,7 @@ The alternative to `rlm-connect` is one ephemeral container per client session. 
     "rust-lsp-mcp": {
       "command": "docker",
       "args": [
-        "run", "-i", "--rm",
+        "run", "-i", "--rm", "--init",
         "-v", "/absolute/path/to/your/rust/project:/project:ro",
         "-e", "RLM_PROJECT_ID=<project-name>",
         "-v", "rlm-<project-name>-data:/data",
@@ -118,6 +118,7 @@ The alternative to `rlm-connect` is one ephemeral container per client session. 
 
 #### Configuration details
 - `run -i --rm`: Creates a temporary container per session connected via stdio. The container removes itself on exit.
+- `--init`: Runs a minimal init as PID 1, which reaps rust-analyzer's child processes and passes `docker stop` on to the server. Without it the server is PID 1: a rust-analyzer crash leaves zombie child processes, and `docker stop` waits out its timeout and then kills the container.
 - `-v /absolute/path/to/your/rust/project:/project:ro`: Mounts your target Rust project read-only. Replace `/absolute/path/...` with your project's local path.
   - **SELinux hosts**: On systems enforcing SELinux (such as Fedora with rootless Podman), append `,z` to share the mount across containers: `-v /path:/project:ro,z`. Use lowercase `z` for shared access, not uppercase `Z`.
 - `-e RLM_PROJECT_ID=<project-name>`: Names the project for the documentation index. Replace `<project-name>` with a short name for your project, such as `ripgrep`. Without it, the server derives a name from the project path, its git remote, and the package name in its root `Cargo.toml`. Every project is mounted at the same path (`/project`), so two different projects that share the git remote (or both have none) and have the same root package name (or both have none) would get the same derived name; setting `RLM_PROJECT_ID` keeps them apart.
@@ -144,7 +145,7 @@ Rust build scripts (`build.rs`) and procedural macros run host code during index
        "rust-lsp-mcp": {
          "command": "docker",
          "args": [
-           "run", "-i", "--rm", "--network", "none",
+           "run", "-i", "--rm", "--init", "--network", "none",
            "-e", "CARGO_NET_OFFLINE=true",
            "-v", "/absolute/path/to/your/rust/project:/project:ro",
            "-e", "RLM_PROJECT_ID=<project-name>",

@@ -1295,7 +1295,7 @@ class AnalyzerManager:
                 if not await server_cm.__aexit__(type(body_exc), body_exc, body_exc.__traceback__):
                     raise
             else:
-                await server_cm.__aexit__(None, None, None)
+                await self._exit_server_context(lsp, server_cm, exit_watch)
         except _AnalyzerProcessExited:
             pass
         except asyncio.CancelledError:
@@ -1337,6 +1337,58 @@ class AnalyzerManager:
                 with contextlib.suppress(Exception):
                     await lsp.server.stop()
 
+    @staticmethod
+    async def _exit_server_context(
+        lsp: PatchedRustAnalyzer,
+        server_cm: contextlib.AbstractAsyncContextManager[Any],
+        exit_watch: asyncio.Task[int],
+    ) -> None:
+        """Leave the ``start_server()`` context normally, unless rust-analyzer dies first.
+
+        multilspy's normal exit sends a ``shutdown`` request and awaits its
+        reply.  A rust-analyzer that dies just before or during that request
+        (backlog line 54: a ``refresh`` lands in the ~80 ms between a SIGKILL
+        and the exit of the ``/bin/sh -c`` wrapper whose ``returncode``
+        ``_hold_ready`` reads) never replies, so the drain would wait out
+        ``DRAIN_TIMEOUT_SECONDS``.  The exit is therefore raced against
+        *exit_watch*.
+
+        When *exit_watch* wins before multilspy has received the ``shutdown``
+        reply (``lsp.server._received_shutdown`` still False), the process died
+        under the request: the exit is cancelled, an info line is logged and
+        ``_run``'s ``finally`` force-stop closes the pipes.  No death is
+        recorded: a shutdown was requested and ``restart()`` follows.  When
+        the reply already arrived, rust-analyzer is exiting on its own after
+        multilspy's ``exit`` notification (the healthy path), so the exit is
+        awaited to completion unchanged.  A cancellation of ``_run`` cancels
+        the exit, as awaiting it directly would.
+        """
+        aexit = asyncio.ensure_future(server_cm.__aexit__(None, None, None))
+        try:
+            await asyncio.wait({aexit, exit_watch}, return_when=asyncio.FIRST_COMPLETED)
+            if (
+                not aexit.done()
+                and not exit_watch.cancelled()
+                and exit_watch.exception() is None
+                and not getattr(lsp.server, "_received_shutdown", False)
+            ):
+                aexit.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await aexit
+                _log.info(
+                    "AnalyzerManager: rust-analyzer exited (code %d) during the shutdown "
+                    "request; skipping the wait for its reply",
+                    exit_watch.result(),
+                )
+                return
+            await aexit
+        except asyncio.CancelledError:
+            if not aexit.done():
+                aexit.cancel()
+                with contextlib.suppress(BaseException):
+                    await aexit
+            raise
+
     async def _hold_ready(
         self,
         gen: int,
@@ -1352,7 +1404,13 @@ class AnalyzerManager:
         *exit_watch* with ``FIRST_COMPLETED``.  When the process exited and no
         shutdown was requested, records the death and raises
         ``_AnalyzerProcessExited`` so ``_run`` leaves the context without
-        multilspy's shutdown request to a dead process.
+        multilspy's shutdown request to a dead process.  When a shutdown was
+        requested and the process handle's ``returncode`` is already set
+        (rust-analyzer died less than ``EXIT_POLL_SECONDS`` before a
+        ``refresh``, so *exit_watch* has not fired), it logs at info and raises
+        ``_AnalyzerProcessExited`` as well, without recording a death: the
+        shutdown was requested and ``restart()`` follows.  Otherwise it returns
+        normally and multilspy's own shutdown sequence runs.
         """
         # The three writes below are one synchronous block with no await
         # between them and the caller's gen-check — inserting an await here
@@ -1370,6 +1428,20 @@ class AnalyzerManager:
                 await shutdown_wait
         if exit_watch.done() and not self._shutdown_event.is_set():
             await self._record_process_exit(gen, exit_watch.result(), stderr_started, stderr_done)
+            raise _AnalyzerProcessExited
+        # A shutdown requested inside the EXIT_POLL_SECONDS window after an
+        # undetected death (backlog line 54): the exit watch has not polled
+        # yet, but the handle already carries the exit code.  Leaving the
+        # context normally would send multilspy's ``shutdown`` request to the
+        # dead process and wait out DRAIN_TIMEOUT_SECONDS.  The shutdown was
+        # requested, so this is not a recorded death.
+        process = lsp.server.process
+        if self._shutdown_event.is_set() and process is not None and process.returncode is not None:
+            _log.info(
+                "AnalyzerManager: rust-analyzer had already exited (code %d) at shutdown; "
+                "skipping the shutdown request",
+                process.returncode,
+            )
             raise _AnalyzerProcessExited
 
     async def _race_teardown(self, coro: Coroutine[Any, Any, _T], op: str) -> _T:

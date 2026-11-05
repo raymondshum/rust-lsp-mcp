@@ -19,6 +19,10 @@ Coverage:
     - ``restart()`` clears ``analyzer_exit_code``, ``analyzer_health`` and
       ``analyzer_health_message``, so a new run that fails before its process
       starts reports "failed to start", not the old exit code.
+    - A ``refresh`` right after an undetected death (backlog line 54) skips
+      multilspy's ``shutdown`` request, or stops waiting for its reply when
+      the process dies under it, without a drain timeout or a recorded death;
+      a healthy restart runs multilspy's exit sequence unchanged.
 """
 
 import asyncio
@@ -476,6 +480,229 @@ class TestRestartClearsDeathFields:
         assert result["recovery"] == RECOVERY_REFRESH
         assert "failed to start" in result["message"]
         assert "is not running" not in result["message"]
+
+
+class HangingShutdownHandler:
+    """``lsp.server`` whose ``shutdown`` request never gets a reply.
+
+    Mirrors multilspy's ``shutdown()`` sent to a dead rust-analyzer: nothing
+    answers, so the request waits until the drain cancels it.
+    """
+
+    def __init__(self) -> None:
+        self.process: FakeProcess | None = None
+        self.stop_calls = 0
+        self.shutdown_calls = 0
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self.process = None
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        await asyncio.Event().wait()
+
+
+class ReadyHangingShutdownLsp(ReadyDyingLsp):
+    """``ReadyDyingLsp`` whose ``server.shutdown()`` hangs."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.server = HangingShutdownHandler()
+
+
+class DiesOnShutdownHandler(HangingShutdownHandler):
+    """The process dies once the ``shutdown`` request is sent; no reply ever comes.
+
+    The live case of backlog line 54: the ``refresh`` lands before the
+    ``/bin/sh -c`` wrapper has exited, so ``returncode`` reads None at the
+    ``_hold_ready`` check and the request goes to a dying process.
+    """
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        assert self.process is not None
+        self.process.die(137)
+        await asyncio.Event().wait()
+
+
+class ReadyDiesOnShutdownLsp(ReadyDyingLsp):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.server = DiesOnShutdownHandler()
+
+
+class HealthyExitHandler:
+    """multilspy's healthy shutdown: the reply arrives, then the process exits.
+
+    ``shutdown`` sets ``_received_shutdown`` (as multilspy does after the
+    reply) and the process exits after the ``exit`` notification, before
+    ``stop()`` finishes its cleanup sleep, so the exit watch fires while
+    the context exit is still running.
+    """
+
+    def __init__(self) -> None:
+        self.process: FakeProcess | None = None
+        self.stop_calls = 0
+        self.shutdown_calls = 0
+        self._received_shutdown = False
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        self._received_shutdown = True
+        assert self.process is not None
+        self.process.die(0)
+        await asyncio.sleep(0)
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self.process = None
+        await asyncio.sleep(0.05)
+
+
+class ReadyHealthyExitLsp(ReadyDyingLsp):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.server = HealthyExitHandler()
+
+
+def _pending_tasks() -> list[asyncio.Task]:
+    current = asyncio.current_task()
+    return [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+
+
+class TestRefreshAfterUndetectedDeath:
+    def test_restart_skips_shutdown_request_to_dead_process(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Backlog line 54: a ``refresh`` inside the ``EXIT_POLL_SECONDS``
+        window after a death must not send multilspy's ``shutdown`` to the
+        dead process and wait out the drain timeout."""
+        instances: list[ReadyHangingShutdownLsp] = []
+
+        async def _scenario() -> tuple[Any, float]:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(analyzer_module, "DRAIN_TIMEOUT_SECONDS", 2.0)
+                # The exit watch reads returncode only every 30 s, so it has
+                # not fired when the restart below arrives.
+                mp.setattr(analyzer_module, "EXIT_POLL_SECONDS", 30.0)
+                mp.setattr(
+                    analyzer_module,
+                    "PatchedRustAnalyzer",
+                    _factory(ReadyHangingShutdownLsp, instances),
+                )
+                mgr = _make_manager()
+                await mgr.start()
+                lsp = await _await_first_instance(instances)
+                await _wait_until(lambda: mgr.state == STATE_READY)
+                # Dead, but wait() has not resolved (a child still holds the
+                # pipe) and the exit watch has not polled yet.
+                lsp.process.returncode = 137
+                started = asyncio.get_running_loop().time()
+                await mgr.restart()
+                elapsed = asyncio.get_running_loop().time() - started
+                assert lsp.server.shutdown_calls == 0
+                assert lsp.server.stop_calls >= 1
+                # A requested shutdown is not a death.
+                assert mgr.analyzer_exit_code is None
+                assert mgr.state != STATE_ERROR
+                await mgr.shutdown()
+                await _cancel_leaked_tasks()
+                return mgr, elapsed
+
+        with caplog.at_level(logging.INFO, logger="rust_lsp_mcp.analyzer"):
+            _mgr, elapsed = asyncio.run(_scenario())
+        assert elapsed < 1.0, f"restart took {elapsed:.2f} s"
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("drain timed out" in m for m in messages)
+        assert any(
+            "rust-analyzer had already exited (code 137) at shutdown; "
+            "skipping the shutdown request" in m
+            for m in messages
+        )
+
+    def test_restart_after_death_during_shutdown_request(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The process dies after the ``_hold_ready`` check, under multilspy's
+        ``shutdown`` request: the exit watch ends the wait for the reply."""
+        instances: list[ReadyDiesOnShutdownLsp] = []
+
+        async def _scenario() -> tuple[Any, float, list[asyncio.Task]]:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(analyzer_module, "DRAIN_TIMEOUT_SECONDS", 2.0)
+                mp.setattr(
+                    analyzer_module,
+                    "PatchedRustAnalyzer",
+                    _factory(ReadyDiesOnShutdownLsp, instances),
+                )
+                mgr = _make_manager()
+                await mgr.start()
+                lsp = await _await_first_instance(instances)
+                await _wait_until(lambda: mgr.state == STATE_READY)
+                started = asyncio.get_running_loop().time()
+                await mgr.restart()
+                elapsed = asyncio.get_running_loop().time() - started
+                assert lsp.server.shutdown_calls == 1
+                # The finally force-stop still ran after the cancelled exit.
+                assert lsp.server.stop_calls >= 1
+                assert lsp.exited is False
+                assert mgr.analyzer_exit_code is None
+                assert mgr.state != STATE_ERROR
+                await mgr.shutdown()
+                pending = _pending_tasks()
+                await _cancel_leaked_tasks()
+                return mgr, elapsed, pending
+
+        with caplog.at_level(logging.INFO, logger="rust_lsp_mcp.analyzer"):
+            _mgr, elapsed, pending = asyncio.run(_scenario())
+        assert elapsed < 1.0, f"restart took {elapsed:.2f} s"
+        assert pending == []
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("drain timed out" in m for m in messages)
+        assert any(
+            "rust-analyzer exited (code 137) during the shutdown request" in m for m in messages
+        )
+        assert not any(m.startswith("AnalyzerManager: rust-analyzer exited with") for m in messages)
+
+    def test_healthy_restart_is_unchanged(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Healthy path: rust-analyzer exits on its own after the reply, so the
+        exit watch can fire first; the context exit still runs to completion."""
+        instances: list[ReadyHealthyExitLsp] = []
+
+        async def _scenario() -> tuple[float, list[asyncio.Task], Any]:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(analyzer_module, "DRAIN_TIMEOUT_SECONDS", 2.0)
+                mp.setattr(
+                    analyzer_module,
+                    "PatchedRustAnalyzer",
+                    _factory(ReadyHealthyExitLsp, instances),
+                )
+                mgr = _make_manager()
+                await mgr.start()
+                lsp = await _await_first_instance(instances)
+                await _wait_until(lambda: mgr.state == STATE_READY)
+                started = asyncio.get_running_loop().time()
+                await mgr.restart()
+                elapsed = asyncio.get_running_loop().time() - started
+                assert lsp.server.shutdown_calls == 1
+                # multilspy's own exit sequence completed (not cancelled).
+                assert lsp.exited is True
+                assert lsp.server.stop_calls >= 1
+                assert mgr.analyzer_exit_code is None
+                await mgr.shutdown()
+                pending = _pending_tasks()
+                await _cancel_leaked_tasks()
+                return elapsed, pending, mgr
+
+        with caplog.at_level(logging.INFO, logger="rust_lsp_mcp.analyzer"):
+            elapsed, pending, _mgr = asyncio.run(_scenario())
+        assert elapsed < 1.0, f"restart took {elapsed:.2f} s"
+        assert pending == []
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("drain timed out" in m for m in messages)
+        assert not any("during the shutdown request" in m for m in messages)
+        assert not any("had already exited" in m for m in messages)
 
 
 class TestExitDetection:

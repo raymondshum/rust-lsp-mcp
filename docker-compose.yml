@@ -82,6 +82,12 @@ services:
       # git remote and root Cargo.toml). See docs/guide/configuration.md.
       RLM_PROJECT_ID: "${RLM_PROJECT_ID:-}"
     restart: on-failure
+    # Run a minimal init as PID 1 (docker/podman `--init`). Without it the
+    # Python server is PID 1, which never reaps the proc-macro-srv children a
+    # rust-analyzer death orphans (they stay zombies), and a PID 1 that
+    # installed no SIGTERM handler ignores `docker stop` in stdio mode.
+    # Inherited by rust-lsp-mcp-isolated through `extends`.
+    init: true
     volumes:
       # The target Rust project, read-only. Set RUST_PROJECT to its host path.
       # The `z` is the SHARED SELinux relabel (lowercase — never the private

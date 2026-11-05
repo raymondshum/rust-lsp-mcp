@@ -164,10 +164,17 @@ the cross-process hazard in [KI-13](../impl/known-issues.md).
 - **Idle timeout.** The daemon exits with code `0` when no request has arrived
   for `RLM_IDLE_TIMEOUT_SECONDS` (default `3600`; `0` disables it). It logs
   `idle timeout reached after <n> seconds; exiting`. A request in progress
-  holds the timeout off. The next `rlm-connect` starts the stopped container
-  again.
-- **`docker stop rlm-<ID>`** stops it at once. `docker rm rlm-<ID>` also removes
-  the container; the volume, with its cargo cache and doc index, stays.
+  holds the timeout off. Only HTTP requests count as activity: indexing does
+  not, so set the value above the daemon's cold start, or the daemon exits
+  before `ready` on every start. On the ripgrep sample the cold start takes
+  about 55 seconds on a primed volume and about 10 minutes on an unprimed one.
+  The next `rlm-connect` starts the stopped container again.
+- **`docker stop rlm-<ID>`** stops it in about a second (0.8 to 0.9 seconds
+  measured with podman on the ripgrep sample, with and without an attached
+  `rlm-connect` window). The container then reports exit code `143`
+  (terminated by SIGTERM), not `0`, and an attached window's bridge ends.
+  `docker rm rlm-<ID>` also removes the container; the volume, with its cargo
+  cache and doc index, stays.
 
 `RLM_IDLE_TIMEOUT_SECONDS` set in the environment that runs `rlm-connect`
 reaches the daemon only when `rlm-connect` creates the container. Starting a

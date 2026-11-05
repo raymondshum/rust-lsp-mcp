@@ -230,6 +230,19 @@ def test_idle_timeout_unset_adds_nothing(fake_env: dict[str, str], project: Path
     assert "RLM_IDLE_TIMEOUT_SECONDS" not in run_calls[0]
 
 
+@pytest.mark.parametrize("value", ["", "   "], ids=["empty", "whitespace"])
+def test_idle_timeout_blank_adds_nothing(
+    fake_env: dict[str, str], project: Path, value: str
+) -> None:
+    """An empty or whitespace-only value is not forwarded (backlog line 74)."""
+    fake_env["FAKE_STATE"] = "absent"
+    fake_env["RLM_IDLE_TIMEOUT_SECONDS"] = value
+    assert _run(["--up", str(project)], fake_env).returncode == 0
+    run_calls = [c for c in _calls(fake_env) if c.startswith("run ")]
+    assert len(run_calls) == 1
+    assert "RLM_IDLE_TIMEOUT_SECONDS" not in run_calls[0]
+
+
 def test_attach_execs_the_bridge(fake_env: dict[str, str], project: Path) -> None:
     """Without --up the launcher replaces itself with `<engine> exec -i <name> … mcp-bridge`."""
     fake_env["FAKE_STATE"] = "running"
