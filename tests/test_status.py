@@ -685,6 +685,7 @@ class TestStatusRustAnalyzerVersion:
 _NEW_FIELDS = (
     "doc_indexed_commit",
     "doc_stale",
+    "doc_unreadable_files",
     "indexing_started_at",
     "analyzer_progress",
     "analyzer_progress_at",
@@ -730,8 +731,8 @@ class TestStatusFreshnessFields:
         )
         init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
 
-        # git fails both at build time (not a repo) and here (patched), so the
-        # commit halves agree on "none" and only the digest decides.
+        # doc_stale follows the doc digest alone (backlog line 48); git
+        # fails at build time (not a repo), so the stamped commit is "none".
         before = _call_status(None, subprocess_raises=OSError("no git"))
         assert before["doc_index_state"] == "ready"
         assert before["doc_indexed_commit"] == "none"
@@ -742,6 +743,70 @@ class TestStatusFreshnessFields:
         os.utime(doc, ns=(mtime, mtime))
         after = _call_status(None, subprocess_raises=OSError("no git"))
         assert after["doc_stale"] is True
+
+    def _call_with_doc_fields(self, doc_state: str) -> dict[str, Any]:
+        import rust_lsp_mcp.tools.status as status_mod
+
+        with patch.object(status_mod, "doc_store_status_fields", return_value=("abc", True, 2)):
+            return _call_status(
+                None,
+                subprocess_raises=OSError("no git"),
+                doc_store_state_return=(doc_state, None),
+            )
+
+    def test_doc_fields_null_unless_snapshot_ready(self) -> None:
+        """Backlog line 50: the doc fields read after the awaits follow the
+        doc_index_state snapshotted before them."""
+        result = self._call_with_doc_fields("building")
+        assert result["doc_index_state"] == "building"
+        assert result["doc_indexed_commit"] is None
+        assert result["doc_stale"] is None
+        assert result["doc_unreadable_files"] is None
+
+    def test_doc_fields_carried_when_snapshot_ready(self) -> None:
+        result = self._call_with_doc_fields("ready")
+        assert result["doc_index_state"] == "ready"
+        assert result["doc_indexed_commit"] == "abc"
+        assert result["doc_stale"] is True
+        assert result["doc_unreadable_files"] == 2
+
+    def _status_after_build(self, tmp_path: Any, unreadable: str | None) -> dict[str, Any]:
+        import pathlib
+
+        from rust_lsp_mcp.doc_store import init_doc_store
+        from rust_lsp_mcp.settings import Settings
+        from tests.test_doc_store import FakeEmbeddingFunction
+
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "guide.md").write_text("# Guide\n\nGuide text.\n", encoding="utf-8")
+        (corpus / "intro.md").write_text("# Intro\n\nIntro text.\n", encoding="utf-8")
+        settings = Settings(
+            chroma_path=str(tmp_path / "chroma"),
+            project_root=str(corpus),
+            doc_glob_patterns="**/*.md",
+        )
+        real_read_bytes = pathlib.Path.read_bytes
+
+        def _read_bytes(path: pathlib.Path) -> bytes:
+            if path.name == unreadable:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read_bytes(path)
+
+        with patch.object(pathlib.Path, "read_bytes", _read_bytes):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        return _call_status(None, subprocess_raises=OSError("no git"))
+
+    def test_doc_unreadable_files_counts_unreadable_file(self, tmp_path: Any) -> None:
+        """Backlog line 63: a file whose read raises shows up as a count."""
+        result = self._status_after_build(tmp_path, "guide.md")
+        assert result["doc_index_state"] == "ready"
+        assert result["doc_unreadable_files"] == 1
+        assert result["doc_index_chunk_count"] == 1
+
+    def test_doc_unreadable_files_zero_after_clean_build(self, tmp_path: Any) -> None:
+        result = self._status_after_build(tmp_path, None)
+        assert result["doc_unreadable_files"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -773,3 +838,147 @@ class TestStatusHealthFields:
         assert result["analyzer_health"] == "warning"
         assert result["analyzer_health_message"] == "proc-macro server crashed"
         assert result["analyzer_exit_code"] == 101
+
+
+# ---------------------------------------------------------------------------
+# T02 rework round 1: the doc fields of one status reply agree with the doc
+# state the reply reports (R2, R3) and come from one collection (R4).
+# ---------------------------------------------------------------------------
+
+_FLIP_ERROR = "the doc index collection was deleted by another process on this volume; call refresh"
+
+
+def _ready_doc_store(tmp_path: Any) -> Any:
+    from rust_lsp_mcp.doc_store import init_doc_store
+    from rust_lsp_mcp.settings import Settings
+    from tests.test_doc_store import FakeEmbeddingFunction
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(parents=True)
+    (corpus / "guide.md").write_text("# Guide\n\nGuide text.\n", encoding="utf-8")
+    settings = Settings(
+        chroma_path=str(tmp_path / "chroma"),
+        project_root=str(corpus),
+        doc_glob_patterns="**/*.md",
+    )
+    return init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+
+
+def _flipping_chunk_count(store: Any) -> Any:
+    """A doc_index_chunk_count stand-in that moves *store* to "error" the way
+    the deleted-collection recovery does, then reports None."""
+
+    def _count() -> int | None:
+        with store._read_lock:
+            store._state = "error"
+            store._error = _FLIP_ERROR
+            store._collection = None
+        return None
+
+    return _count
+
+
+def status_reply_with_flip(tmp_path: Any, manager: Any = None) -> dict[str, Any]:
+    """One status reply in which the chunk-count read flips the store to error."""
+    import rust_lsp_mcp.tools.status as status_mod
+
+    store = _ready_doc_store(tmp_path)
+    with patch.object(status_mod, "doc_index_chunk_count", _flipping_chunk_count(store)):
+        return _call_status(manager, subprocess_raises=OSError("no git"))
+
+
+class TestStatusDocStateAgreesWithFields:
+    def test_reply_reports_error_when_recovery_flips_store(self, tmp_path: Any) -> None:
+        """R2: the reply whose chunk-count read moved the store to "error"
+        reports that state, not the "ready" read before the awaits."""
+        result = status_reply_with_flip(tmp_path)
+        assert result["status"] == STATUS_OK
+        assert result["doc_index_state"] == "error"
+        assert result["doc_index_error"] == _FLIP_ERROR
+        assert result["doc_index_chunk_count"] is None
+        assert result["doc_indexed_commit"] is None
+        assert result["doc_stale"] is None
+        assert result["doc_unreadable_files"] is None
+
+    def test_errored_store_reads_building_while_refresh_rebuild_in_flight(self) -> None:
+        """R3: an errored store whose refresh re-init is waiting (here on an
+        event, standing in for the shared doc-store lock) reads "building"
+        with no error, so wait_for_ready keeps polling."""
+        import threading
+
+        import rust_lsp_mcp.doc_store as doc_store_mod
+        from rust_lsp_cli import client as client_mod
+
+        store = MagicMock()
+        store.state_snapshot.return_value = ("error", "RuntimeError: boom")
+        release = threading.Event()
+        with patch.object(doc_store_mod, "_doc_store", store):
+
+            def _held_reinit() -> None:
+                release.wait(30)
+
+            assert doc_store_mod.start_doc_rebuild(_held_reinit) is True
+            try:
+                result = _call_status(None, subprocess_raises=OSError("no git"))
+                assert result["doc_index_state"] == "building"
+                assert result["doc_index_error"] is None
+                assert result["doc_indexed_commit"] is None
+                assert result["doc_stale"] is None
+                assert result["doc_unreadable_files"] is None
+                assert result["doc_index_chunk_count"] is None
+
+                clock = [0.0]
+
+                def _sleep(seconds: float) -> None:
+                    clock[0] += seconds
+
+                verdict = client_mod.wait_for_ready(
+                    "http://x/mcp",
+                    timeout_seconds=6,
+                    status_check=lambda _url: (
+                        _call_status(None, subprocess_raises=OSError("no git")),
+                        None,
+                    ),
+                    sleep=_sleep,
+                    monotonic=lambda: clock[0],
+                )
+                assert verdict == (False, True, None)
+            finally:
+                release.set()
+                thread = doc_store_mod._rebuild_thread
+                if thread is not None:
+                    thread.join(timeout=30)
+        # Once the rebuild thread is gone the error shows again.
+        with patch.object(doc_store_mod, "_doc_store", store):
+            result = _call_status(None, subprocess_raises=OSError("no git"))
+        assert result["doc_index_state"] == "error"
+        assert result["doc_index_error"] == "RuntimeError: boom"
+
+    def test_doc_fields_from_one_collection_snapshot(self, tmp_path: Any) -> None:
+        """R4: a swap that lands between the reads cannot pair one
+        collection's commit and staleness with another's unreadable count."""
+        import rust_lsp_mcp.doc_store as doc_store_mod
+
+        store = _ready_doc_store(tmp_path)
+        other = MagicMock()
+        other.metadata = {
+            "build_complete": True,
+            "indexed_commit": "f" * 40,
+            "doc_digest": "0" * 16,
+            "unreadable_files": 7,
+        }
+        real_digest = doc_store_mod.doc_store_digest
+
+        def _digest_then_swap(*args: Any, **kwargs: Any) -> str:
+            value = real_digest(*args, **kwargs)
+            with store._read_lock:
+                store._collection = other
+            return value
+
+        with patch.object(doc_store_mod, "doc_store_digest", _digest_then_swap):
+            result = _call_status(None, subprocess_raises=OSError("no git"))
+        assert (
+            result["doc_indexed_commit"],
+            result["doc_stale"],
+            result["doc_unreadable_files"],
+        ) == ("none", False, 0)

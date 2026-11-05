@@ -106,14 +106,17 @@ def wait_for_ready(
     status_check: Callable[[str], tuple[dict[str, Any] | None, Exception | None]] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, str | None]:
     """Poll ``status`` every ``poll_interval`` seconds until ready, or timeout.
 
     "Ready" means BOTH indexes are ready (SW-L25): ``state == "ready"`` (the
     code index) and ``doc_index_state == "ready"`` (the doc index), so a
     ``search-docs`` call right after a successful wait does not exit 2.  A doc
-    index that stays ``"building"`` or ``"error"`` keeps the wait polling
-    until the window expires.
+    index that stays ``"building"`` keeps the wait polling until the window
+    expires.  A doc index in ``"error"`` is permanent until ``refresh``, so
+    the first ``ok`` envelope reporting it ends the wait at once.  A
+    ``"ready"`` doc index with ``doc_index_error`` set (a failed rebuild while
+    the old index serves) is not a stop.
 
     Implements D9: within the window, a transport-level failure (daemon not
     up yet) is retriable exactly like an ``ok``-but-not-``ready`` status -- a
@@ -125,12 +128,16 @@ def wait_for_ready(
     real-time-free unit tests (a scripted ``status_check`` sequence plus a
     no-op ``sleep``); production callers rely on the defaults.
 
-    Returns ``(ready, ever_connected)``:
-        - ``(True, True)``   -- reached ``state == "ready"`` and
+    Returns ``(ready, ever_connected, doc_error)``:
+        - ``(True, True, None)``   -- reached ``state == "ready"`` and
           ``doc_index_state == "ready"`` within the window.
-        - ``(False, True)``  -- window expired; the daemon answered at least
-          once but never reported ready (D8: caller exits 2).
-        - ``(False, False)`` -- window expired without ever getting a
+        - ``(False, True, <text>)`` -- an ``ok`` envelope reported
+          ``doc_index_state == "error"``; ``<text>`` is its
+          ``doc_index_error`` (``"unknown error"`` when that is null).
+          Returned at once (caller exits 2 with the diagnostic).
+        - ``(False, True, None)``  -- window expired; the daemon answered at
+          least once but never reported ready (D8: caller exits 2).
+        - ``(False, False, None)`` -- window expired without ever getting a
           response (D8: caller exits 3).
     """
     check = (
@@ -144,12 +151,14 @@ def wait_for_ready(
         envelope, exc = check(base_url)
         if exc is None and envelope is not None:
             ever_connected = True
+            if envelope.get("status") == "ok" and envelope.get("doc_index_state") == "error":
+                return False, ever_connected, envelope.get("doc_index_error") or "unknown error"
             if (
                 envelope.get("status") == "ok"
                 and envelope.get("state") == "ready"
                 and envelope.get("doc_index_state") == "ready"
             ):
-                return True, ever_connected
+                return True, ever_connected, None
         if monotonic() >= deadline:
-            return False, ever_connected
+            return False, ever_connected, None
         sleep(poll_interval)

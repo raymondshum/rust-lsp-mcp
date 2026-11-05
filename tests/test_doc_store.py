@@ -1373,10 +1373,13 @@ class TestDocStoreFreshnessStamp:
         settings = self._built(tmp_path)
         self._restamp(settings, "indexed_commit", "0" * 40)
 
-        store, rebuilds = self._init_counting_rebuilds(settings)
+        # A real current commit: a current "none" (git failed) is unknown,
+        # not a mismatch (backlog line 45, covered below).
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="b" * 40):
+            store, rebuilds = self._init_counting_rebuilds(settings)
         assert rebuilds == 1, "a collection built at another commit must be rebuilt"
         assert store.is_ready is True
-        assert (store._collection.metadata or {}).get("indexed_commit") == "none"
+        assert (store._collection.metadata or {}).get("indexed_commit") == "b" * 40
 
     def test_adopt_refused_when_doc_digest_differs(self, tmp_path: pathlib.Path) -> None:
         settings = self._built(tmp_path)
@@ -1493,7 +1496,10 @@ class TestDocStoreFreshnessStamp:
         _bump_file(corpus / "guide.md", "# Guide\n\nEdited after the build.\n")
         assert doc_store_freshness() == ("none", True)
 
-    def test_freshness_true_when_head_moves(self, tmp_path: pathlib.Path) -> None:
+    def test_freshness_false_when_head_moves_with_identical_docs(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Backlog line 48: a new HEAD over byte-identical docs is not stale."""
         corpus = tmp_path / "corpus"
         _write_corpus(corpus)
         settings = _make_settings(tmp_path, corpus)
@@ -1501,7 +1507,94 @@ class TestDocStoreFreshnessStamp:
             init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
             assert doc_store_freshness() == ("aaa", False)
         with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="bbb"):
+            assert doc_store_freshness() == ("aaa", False)
+
+    def test_freshness_true_when_covered_doc_changes_after_head_moves(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="aaa"):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        _bump_file(corpus / "intro.md", "# Introduction\n\nRewritten on the new branch.\n")
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="bbb"):
             assert doc_store_freshness() == ("aaa", True)
+
+    def test_freshness_true_without_digest_stamp(self, tmp_path: pathlib.Path) -> None:
+        settings = self._built(tmp_path)
+        client = chromadb.PersistentClient(
+            path=settings.chroma_path,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        col = client.get_collection(
+            doc_collection_name(settings),
+            embedding_function=FakeEmbeddingFunction(),  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+        )
+        col.modify(metadata={k: v for k, v in (col.metadata or {}).items() if k != "doc_digest"})
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        store._collection = col
+        store._state = DOC_STATE_READY
+        doc_store_mod._doc_store = store
+        try:
+            assert doc_store_freshness() == ("none", True)
+        finally:
+            clear_doc_store()
+
+    def test_freshness_makes_no_git_call(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        with patch(
+            "rust_lsp_mcp.doc_store._doc_head_commit",
+            side_effect=AssertionError("doc_store_freshness must not call git"),
+        ):
+            assert doc_store_freshness() == ("none", False)
+
+    def _built_at(self, tmp_path: pathlib.Path, commit: str) -> Settings:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value=commit):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        clear_doc_store()
+        return settings
+
+    def test_adopt_with_git_failure_and_matching_digest(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Backlog line 45: a transient git failure at startup does not cost
+        an adoptable index; the digest decides."""
+        settings = self._built_at(tmp_path, "a" * 40)
+        with (
+            patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="none"),
+            caplog.at_level("INFO", logger="rust_lsp_mcp.doc_store"),
+        ):
+            store, rebuilds = self._init_counting_rebuilds(settings)
+        assert rebuilds == 0
+        assert store.is_ready is True
+        assert (store._collection.metadata or {}).get("indexed_commit") == "a" * 40
+        assert (
+            "doc_store: current commit unknown (git failed); deciding adoption on doc_digest"
+            in caplog.text
+        )
+
+    def test_adopt_with_git_failure_refused_when_digest_differs(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        settings = self._built_at(tmp_path, "a" * 40)
+        _bump_file(pathlib.Path(settings.project_root) / "guide.md", "# Guide\n\nChanged.\n")
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="none"):
+            _, rebuilds = self._init_counting_rebuilds(settings)
+        assert rebuilds == 1
+
+    def test_adopt_refused_when_stamp_none_and_current_real(self, tmp_path: pathlib.Path) -> None:
+        """A stamped "none" against a real current commit still refuses."""
+        settings = self._built_at(tmp_path, "none")
+        with patch("rust_lsp_mcp.doc_store._doc_head_commit", return_value="b" * 40):
+            _, rebuilds = self._init_counting_rebuilds(settings)
+        assert rebuilds == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2413,3 +2506,286 @@ class TestRGateRound1:
                 settings, embedding_function=FakeEmbeddingFunction(), generation=generation
             )
         assert get_doc_store() is None
+
+
+# ---------------------------------------------------------------------------
+# Backlog line 63: unreadable doc files are counted and stamped.
+# ---------------------------------------------------------------------------
+
+
+class TestUnreadableDocFiles:
+    def _patched_read_bytes(self, unreadable_name: str) -> Any:
+        real_read_bytes = pathlib.Path.read_bytes
+
+        def _read_bytes(path: pathlib.Path) -> bytes:
+            if path.name == unreadable_name:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read_bytes(path)
+
+        return patch.object(pathlib.Path, "read_bytes", _read_bytes)
+
+    def test_rebuild_stamps_unreadable_count_and_indexes_the_rest(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = DocStore(settings, embedding_function=FakeEmbeddingFunction())
+        with (
+            self._patched_read_bytes("guide.md"),
+            caplog.at_level("WARNING", logger="rust_lsp_mcp.doc_store"),
+        ):
+            count = store.rebuild()
+        assert (store._collection.metadata or {}).get("unreadable_files") == 1
+        indexed = {r["file"] for r in store.search("intro", n_results=count)}
+        assert indexed == {"intro.md"}
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING" and "could not be read" in r.getMessage()
+        ]
+        assert warnings == [
+            f"doc_store: 1 doc files could not be read and are not indexed: {corpus / 'guide.md'}"
+        ]
+
+    def test_clean_rebuild_stamps_zero(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_mod.doc_store_unreadable() == 0
+
+    def test_accessor_reports_stamp_of_ready_store(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        with self._patched_read_bytes("guide.md"):
+            init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_mod.doc_store_unreadable() == 1
+
+    def test_accessor_none_without_ready_store(self) -> None:
+        clear_doc_store()
+        assert doc_store_mod.doc_store_unreadable() is None
+
+    def test_accessor_none_without_stamp(self, tmp_path: pathlib.Path) -> None:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        meta = {
+            k: v for k, v in (store._collection.metadata or {}).items() if k != "unreadable_files"
+        }
+        store._collection.modify(metadata=meta)
+        assert doc_store_mod.doc_store_unreadable() is None
+
+
+# ---------------------------------------------------------------------------
+# Backlog line 67 (KI-13): a collection deleted by another process on the
+# volume.  The module keeps one client per path inside a process, so the
+# peer runs in a subprocess against the same chroma path.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# argv: chroma_path, collection name, mode ("swap" | "delete" | "hold").
+# swap: delete the collection and recreate it under the same name with
+# build_complete and one peer chunk.  delete: delete it only.  hold: take
+# the doc-store flock, delete the collection, print "ready", and keep the
+# flock until a line arrives on stdin.
+_PEER_SCRIPT = """
+import fcntl, os, sys
+import chromadb
+from chromadb.config import Settings as ChromaSettings
+from tests.test_doc_store import FakeEmbeddingFunction
+
+chroma_path, name, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+fd = None
+if mode == "hold":
+    fd = os.open(os.path.join(chroma_path, ".rlm-doc-store.lock"), os.O_CREAT | os.O_RDWR, 0o666)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+client = chromadb.PersistentClient(
+    path=chroma_path, settings=ChromaSettings(anonymized_telemetry=False)
+)
+client.delete_collection(name)
+if mode == "swap":
+    col = client.create_collection(
+        name,
+        embedding_function=FakeEmbeddingFunction(),
+        configuration={"hnsw": {"space": "cosine"}},
+        metadata={"build_complete": True},
+    )
+    col.add(
+        ids=["peer-1"],
+        documents=["peer.md > Peer\\n\\nswapped in by the peer process"],
+        metadatas=[{"file": "peer.md", "breadcrumb": "peer.md > Peer", "file_sha256": "x"}],
+    )
+print("ready", flush=True)
+if mode == "hold":
+    sys.stdin.readline()
+"""
+
+
+def _peer_popen(chroma_path: str, name: str, mode: str) -> Any:
+    import subprocess
+    import sys
+
+    return subprocess.Popen(
+        [sys.executable, "-c", _PEER_SCRIPT, chroma_path, name, mode],
+        cwd=str(_REPO_ROOT),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _run_peer(chroma_path: str, name: str, mode: str) -> None:
+    proc = _peer_popen(chroma_path, name, mode)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 0, err
+    assert out.strip() == "ready"
+
+
+class TestCollectionDeletedByAnotherProcess:
+    def _ready_store(self, tmp_path: pathlib.Path) -> tuple[DocStore, Settings]:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert store.state == DOC_STATE_READY
+        assert store._live_name == doc_collection_name(settings)
+        return store, settings
+
+    def test_adopt_records_live_name(self, tmp_path: pathlib.Path) -> None:
+        _, settings = self._ready_store(tmp_path)
+        clear_doc_store()
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert store._live_name == doc_collection_name(settings)
+
+    def test_search_reopens_collection_another_process_swapped_in(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        store, settings = self._ready_store(tmp_path)
+        old = store._collection
+        _run_peer(settings.chroma_path, doc_collection_name(settings), "swap")
+
+        hits = store.search("peer", n_results=5)
+        assert [h["file"] for h in hits] == ["peer.md"]
+        assert hits[0]["text"] == "swapped in by the peer process"
+        assert store.state == DOC_STATE_READY
+        assert store._collection is not old
+        assert store.chunk_count() == 1
+
+    def test_chunk_count_reopens_collection_another_process_swapped_in(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        store, settings = self._ready_store(tmp_path)
+        _run_peer(settings.chroma_path, doc_collection_name(settings), "swap")
+        assert store.chunk_count() == 1
+        assert store.state == DOC_STATE_READY
+
+    def test_deleted_collection_reads_error_and_search_docs_says_refresh(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        import rust_lsp_mcp.tools.search_docs as search_mod
+
+        store, settings = self._ready_store(tmp_path)
+        _run_peer(settings.chroma_path, doc_collection_name(settings), "delete")
+
+        envelope = asyncio.run(search_mod.search_docs(query="intro"))
+        assert envelope["status"] == "error"
+        assert envelope["recovery"] == "refresh"
+        assert doc_store_mod._DELETED_COLLECTION_ERROR in envelope["message"]
+        assert store.state == "error"
+        assert store.error_message == (
+            "the doc index collection was deleted by another process on this volume; call refresh"
+        )
+        assert store._collection is None
+        assert doc_store_state() == ("error", store.error_message)
+        with pytest.raises(DocStoreNotReady):
+            store.search("intro")
+
+    def test_deleted_collection_chunk_count_reads_none_and_error(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        store, settings = self._ready_store(tmp_path)
+        _run_peer(settings.chroma_path, doc_collection_name(settings), "delete")
+        assert store.chunk_count() is None
+        assert store.state == "error"
+        assert store._collection is None
+
+    def test_held_flock_with_collection_deleted_reads_not_ready(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        store, settings = self._ready_store(tmp_path)
+        old = store._collection
+        proc = _peer_popen(settings.chroma_path, doc_collection_name(settings), "hold")
+        try:
+            assert proc.stdout is not None
+            assert proc.stdout.readline().strip() == "ready"
+            with pytest.raises(DocStoreNotReady):
+                store.search("intro")
+            assert store.state == DOC_STATE_READY
+            assert store.error_message is None
+            assert store._collection is old
+            assert store.chunk_count() is None
+            assert store.state == DOC_STATE_READY
+        finally:
+            _out, err = proc.communicate(input="\n", timeout=120)
+        assert proc.returncode == 0, err
+
+    def test_refresh_after_deleted_collection_rebuilds(self, tmp_path: pathlib.Path) -> None:
+        """The error state is cleared by a rebuild, which reads no dead collection."""
+        store, settings = self._ready_store(tmp_path)
+        _run_peer(settings.chroma_path, doc_collection_name(settings), "delete")
+        assert store.chunk_count() is None
+        assert store.state == "error"
+        count = store.rebuild()
+        assert count > 0
+        assert store.state == DOC_STATE_READY
+        assert store.error_message is None
+        assert {h["file"] for h in store.search("intro", n_results=count)} == {
+            "intro.md",
+            "guide.md",
+        }
+
+
+class TestRecoveryFailureNeverEscapes:
+    """T02 rework R1: an OSError inside the deleted-collection recovery (the
+    flock probe's mkdir, open or flock) never escapes chunk_count() or status,
+    and search_docs maps it to its error envelope."""
+
+    def _deleted(self, tmp_path: pathlib.Path) -> DocStore:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        _run_peer(settings.chroma_path, doc_collection_name(settings), "delete")
+        return store
+
+    def test_chunk_count_none_and_status_ok_when_lock_open_fails(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        import errno
+
+        from tests.test_status import _call_status
+
+        store = self._deleted(tmp_path)
+        emfile = OSError(errno.EMFILE, "Too many open files")
+        with patch("rust_lsp_mcp.doc_store.os.open", side_effect=emfile):
+            assert store.chunk_count() is None
+            result = _call_status(None, subprocess_raises=OSError("no git"))
+        assert result["status"] == "ok"
+        assert result["doc_index_chunk_count"] is None
+
+    def test_search_docs_error_envelope_when_lock_open_fails(self, tmp_path: pathlib.Path) -> None:
+        import errno
+
+        import rust_lsp_mcp.tools.search_docs as search_mod
+
+        self._deleted(tmp_path)
+        emfile = OSError(errno.EMFILE, "Too many open files")
+        with patch("rust_lsp_mcp.doc_store.os.open", side_effect=emfile):
+            envelope = asyncio.run(search_mod.search_docs(query="intro"))
+        assert envelope["status"] == "error"
+        assert "Too many open files" in envelope["message"]

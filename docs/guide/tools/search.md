@@ -39,9 +39,9 @@ Empty or whitespace-only queries return `error` with `recovery: "fix_input"`. Ou
 
 | Status | Fields |
 |---|---|
-| `ok` | `results`: ranked list of matching documentation passages (closest distance first). |
+| `ok` | `results`: ranked list of matching documentation passages (closest distance first). `doc_stale`: `true` when a Markdown file the index covers was added, removed or changed since the build (results may be out of date; run `refresh`), `false` when none was, `null` when unknown. |
 | `not_ready` | `message`, `recovery: "poll_status"` — the first doc index build on an empty store is running. |
-| `not_found` | `message` — zero matching passages found, or documentation collection is empty. |
+| `not_found` | `message`, `doc_stale` — zero matching passages found, or documentation collection is empty. `doc_stale` is as for `ok`. |
 | `error` | `message`, `recovery` — search failure or permanent store error (`recovery: "refresh"`). |
 
 ### Match Object

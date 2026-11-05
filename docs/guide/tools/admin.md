@@ -48,12 +48,13 @@ Always returns `status: "ok"` with a health envelope:
 | `indexing_started_at` | string \| null | ISO 8601 UTC time the current indexing run began (reset by `refresh`). |
 | `analyzer_progress` | string \| null | Latest rust-analyzer progress title and message; `"<title> done"` (for example `"Indexing done"`) after that work ends. |
 | `analyzer_progress_at` | string \| null | ISO 8601 UTC time of the latest progress report. |
-| `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. Stays `"ready"` during a rebuild over an existing index (the old index keeps answering); `"building"` only for the first build on an empty store. |
+| `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. Stays `"ready"` during a rebuild over an existing index (the old index keeps answering); `"building"` for the first build on an empty store, and for an errored index while a `refresh` rebuild of it is in flight (`doc_index_error` then reads `null`). |
 | `doc_index_error` | string \| null | Error message if the documentation index build failed; also set with `doc_index_state` `"ready"` when the last rebuild failed and the old index is still served. |
 | `doc_index_progress` | object \| null | Progress of a running doc index rebuild: `files_total`, `files_done`, `started_at` (ISO 8601 UTC) and `phase` (`"starting"` while it waits for its locks, then `"scanning"`, `"embedding"` and `"swapping"`). `null` when no rebuild is running. |
 | `doc_index_chunk_count` | integer \| null | Total stored document chunks (`0` indicates unmounted or empty doc path). |
-| `doc_indexed_commit` | string \| null | Git commit stamped on the doc index at build time; `null` unless `doc_index_state` is `"ready"`. |
-| `doc_stale` | boolean \| null | `true` if the commit changed, or a Markdown file the index covers was added, removed or changed, since the doc index was built; stays `true` until `refresh` or a restart. `null` unless `doc_index_state` is `"ready"`. |
+| `doc_indexed_commit` | string \| null | Git commit stamped on the doc index at build time; informational, `doc_stale` does not compare it. `null` unless `doc_index_state` is `"ready"`. |
+| `doc_stale` | boolean \| null | `true` if a Markdown file the index covers was added, removed or changed since the doc index was built; a branch switch or commit that leaves the doc files byte-identical reads `false`. Stays `true` until `refresh` or a restart. `null` unless `doc_index_state` is `"ready"`. |
+| `doc_unreadable_files` | integer \| null | Matched Markdown files the build could not read; a non-zero count means that many matched files are absent from the index. `0` when every file was read; `null` unless `doc_index_state` is `"ready"`, or for an index built before this count existed. |
 | `preflight_warnings` | list[string] | Advisory warnings detected during startup. |
 | `server_version` | string \| null | Installed package version of `rust-lsp-mcp`. |
 | `multilspy_version` | string \| null | Installed version of `multilspy`. |

@@ -141,7 +141,7 @@ branch on `$?` without parsing JSON:
 |---|---|
 | `0` | Envelope `status` was `ok` **or** `not_found`. Both are answers, not failures — `not_found` means "the thing you asked about doesn't exist," which is a fact, not an error, matching the same "empty is not an error" doctrine as the MCP tools (see the [Tools / API reference](tools.md#response-format)). |
 | `1` | Envelope `status` was `error`. Check the `message` field in the printed JSON, and `recovery` for a machine-readable hint at the next action. |
-| `2` | `not_ready` (`EXIT_NOT_READY`) — the daemon answered but the analyzer or doc index is still (re)building. Also used when a `--wait SECS` window expired while the daemon *was* reachable but never reported `ready`. |
+| `2` | `not_ready` (`EXIT_NOT_READY`) — the daemon answered but the analyzer or doc index is still (re)building. Also used when a `--wait SECS` window expired while the daemon *was* reachable but never reported `ready`, and when `--wait` stopped because the daemon reported a doc index error (`doc_index_state: "error"`; stderr prints the error and says to run `rust-lsp refresh`). |
 | `3` | The daemon could not be reached at all — connection refused, handshake failure, or timeout. Also used when a `--wait SECS` window expired without the daemon ever answering. Stderr prints a hint to start the daemon. |
 | `2` (argparse) | A command-line usage error (bad or missing arguments, unknown subcommand) also exits `2`, from argparse's own default — this numerically collides with `not_ready` above but is never ambiguous in practice: a usage error happens *before* any network call and prints its own distinct usage message on stderr, whereas `not_ready` always comes with a printed JSON envelope on stdout. |
 
@@ -169,6 +169,14 @@ through connection-refused → `not_ready` → `ready`, and `--wait` treats a
 connection failure exactly like `not_ready` **as long as the window hasn't
 expired** — it keeps polling either way.
 
+A doc index in `"error"` stays failed until `refresh`, so `--wait` stops at
+the first `status` reply that reports `doc_index_state: "error"`, without
+waiting out the window. It prints `rust-lsp: the daemon at <url> reports a doc
+index error: <doc_index_error>; run rust-lsp refresh to rebuild it.` on stderr
+and exits `2` without running the command. A `"ready"` doc index with
+`doc_index_error` set (a failed rebuild while the old index keeps answering)
+does not stop the wait.
+
 The distinction that matters is what happens when the window *does* expire:
 
 - **Never connected within `SECS`** (exit `3`) — the daemon likely isn't
@@ -176,9 +184,9 @@ The distinction that matters is what happens when the window *does* expire:
   (`docker compose up -d rust-lsp-mcp` — always name the service) or check
   `RLM_HTTP_PORT`/`RLM_CLI_URL`.
 - **Connected but never reported `ready`** (exit `2`) — the daemon is up but
-  one of the two indexes is still building (or has permanently failed — check
-  `state` and `doc_index_state` in a plain `rust-lsp status` call). A larger
-  `--wait` won't help a permanently failed index; call `refresh` instead.
+  one of the two indexes is still building, or the code index has permanently
+  failed (check `state` in a plain `rust-lsp status` call). A larger `--wait`
+  won't help a permanently failed index; call `refresh` instead.
 
 `--wait` accepts any finite number of seconds; `nan`/`inf` are rejected at
 the argument-parsing stage (they would make the deadline arithmetic never
