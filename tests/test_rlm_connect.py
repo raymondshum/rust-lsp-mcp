@@ -128,7 +128,7 @@ def test_run_args_shape(rlm: ModuleType, project: Path) -> None:
     real, pid, name, vol = rlm.derive_names(str(project))
     args = rlm.build_run_args(real, pid, name, vol, "rust-lsp-mcp", "none", environ={})
     joined = " ".join(args)
-    assert args[:5] == ["run", "-d", "--init", "--name", name]
+    assert args[:7] == ["run", "-d", "--init", "--stop-timeout", "15", "--name", name]
     for fragment in (
         "--network none",
         f"-e RLM_PROJECT_ID={pid}",
@@ -149,13 +149,32 @@ def test_network_default_drops_network_none(rlm: ModuleType, project: Path) -> N
     assert "--network" not in args
 
 
+@pytest.mark.parametrize("network", ["none", "default"])
+def test_run_args_set_15s_stop_timeout(rlm: ModuleType, project: Path, network: str) -> None:
+    """Backlog line 87: a stop early in a cold start outlasts the engine's 10 s default."""
+    real, pid, name, vol = rlm.derive_names(str(project))
+    args = rlm.build_run_args(real, pid, name, vol, "img", network, environ={})
+    i = args.index("--stop-timeout")
+    assert args[i + 1] == "15"
+
+
+def test_network_none_sets_cargo_net_offline(rlm: ModuleType, project: Path) -> None:
+    """Backlog line 142: an isolated daemon passes CARGO_NET_OFFLINE=true; a networked one not."""
+    real, pid, name, vol = rlm.derive_names(str(project))
+    isolated = rlm.build_run_args(real, pid, name, vol, "img", "none", environ={})
+    networked = rlm.build_run_args(real, pid, name, vol, "img", "default", environ={})
+    i = isolated.index("CARGO_NET_OFFLINE=true")
+    assert isolated[i - 1] == "-e"
+    assert not any("CARGO_NET_OFFLINE" in a for a in networked)
+
+
 def test_absent_container_is_run(fake_env: dict[str, str], project: Path) -> None:
     fake_env["FAKE_STATE"] = "absent"
     proc = _run(["--up", str(project)], fake_env)
     assert proc.returncode == 0, proc.stderr
     calls = _calls(fake_env)
     assert calls[0].startswith("inspect ")
-    assert any(c.startswith("run -d --init --name rlm-") for c in calls)
+    assert any(c.startswith("run -d --init --stop-timeout 15 --name rlm-") for c in calls)
     assert not any(c.startswith("start ") for c in calls)
 
 

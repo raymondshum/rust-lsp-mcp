@@ -121,10 +121,10 @@ up in your shell instead of as a silent IDE hang.
    this envelope in about a minute, most of it spent embedding the docs. A
    restart that reuses the volume took about 5 seconds. A first start on an
    unprimed volume under `--network none` (the `rlm-connect` default) takes
-   about 10 minutes to reach `state: "ready"` and ends with a non-ok
-   `analyzer_health`, so `--wait 600` can expire first; its exit `2` then
-   means the daemon is still indexing. Stopping the daemon (`docker rm -f rlm-<ID>`), priming
-   the volume with step 2 and starting it again with step 3 is faster.
+   about 45 seconds to reach `state: "ready"` and ends with
+   `analyzer_health: "warning"`, because cargo cannot resolve the dependencies
+   offline. To get an `"ok"` health, stop the daemon (`docker rm -f rlm-<ID>`),
+   prime the volume with step 2 and start it again with step 3.
 
 5. **Refresh after a branch switch.** Run
    `docker exec rlm-528c33294931 /app/.venv/bin/rust-lsp refresh`. It returns at
@@ -178,24 +178,24 @@ collection on the volume.
   not, so set the value above the daemon's cold start, or the daemon exits
   before `ready` on every start. On the ripgrep sample the cold start takes
   about a minute on a primed volume, and a first start on an unprimed
-  volume under `--network none` (the `rlm-connect` default) takes about 10
-  minutes to reach `state: "ready"` and ends with a non-ok `analyzer_health`.
+  volume under `--network none` (the `rlm-connect` default) takes about 45
+  seconds to reach `state: "ready"` and ends with
+  `analyzer_health: "warning"`.
   The next `rlm-connect` starts the stopped container again.
 - **`docker stop rlm-<ID>`** on a daemon that has reached `ready` stops it in
-  about a second (0.8 to 0.9 seconds measured with podman on the ripgrep
-  sample, with and without an attached `rlm-connect` window). The container
-  then reports exit code `143` (terminated by SIGTERM), not `0`, and an
-  attached window's bridge ends. A stop during the cold index or a re-index
-  takes several seconds, because the daemon first cancels the doc index build
-  and then tears down the analyzer: about 3 to 3.5 seconds during a re-index
-  after `refresh`, and about 5 to 5.6 seconds 7 to 10 seconds into a cold
-  start. In the first seconds of a cold start a stop can take longer than
-  docker's 10-second default timeout. The engine then kills the container
-  (podman logs `resorting to SIGKILL`) and it reports exit code `137`, as
-  measured 2 seconds into a cold start (10.3 seconds). `docker stop -t 15
-  rlm-<ID>` avoids that: the same stop finished in 10.25 seconds with exit
-  code `143`. `docker rm rlm-<ID>` also removes the container; the volume,
-  with its cargo cache and doc index, stays.
+  about a second (0.8 seconds measured with podman on the ripgrep sample). The
+  container then reports exit code `143` (terminated by SIGTERM), not `0`, and
+  an attached window's bridge ends. A stop during the cold index takes longer,
+  because the daemon waits up to 10 seconds for the doc index build to stop
+  while the analyzer shuts down beside it: a stop 2 seconds into a cold start
+  took 10.9 to 11.9 seconds and also ended with exit code `143`. `rlm-connect`
+  creates the daemon with a 15-second stop timeout, so a plain `docker stop`
+  waits up to 15 seconds before the engine kills the container (podman logs
+  `resorting to SIGKILL`, exit code `137`). A container created before
+  `rlm-connect` set that timeout keeps the engine's 10-second default until
+  you run `docker rm -f rlm-<ID>` and start it again. `docker rm rlm-<ID>`
+  also removes the container; the volume, with its cargo cache and doc index,
+  stays.
 
 `RLM_IDLE_TIMEOUT_SECONDS` set in the environment that runs `rlm-connect`
 reaches the daemon only when `rlm-connect` creates the container. Starting a
@@ -210,7 +210,9 @@ RLM_IDLE_TIMEOUT_SECONDS=7200 rlm-connect --up /abs/path/to/project
 The compose daemon (`docker compose up -d rust-lsp-mcp`) uses
 `restart: on-failure`: a crash with a non-zero exit code restarts it, but after
 an idle exit (code `0`) it stays stopped until you run `docker compose up -d`
-again.
+again. It has the same 15-second stop grace period
+(`stop_grace_period: 15s`), so `docker compose stop` waits up to 15 seconds
+before the engine kills it.
 
 ## Recover an IDE window after the daemon stops
 

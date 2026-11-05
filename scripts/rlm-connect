@@ -124,9 +124,13 @@ def build_run_args(
 ) -> list[str]:
     """Build the engine arguments (after the engine name) that create the daemon."""
     env = os.environ if environ is None else environ
-    args = ["run", "-d", "--init", "--name", container]
+    # --stop-timeout 15: a stop early in a cold start waits on the doc-index
+    # and analyzer shutdown, which can outlast the engine's 10 s default.
+    args = ["run", "-d", "--init", "--stop-timeout", "15", "--name", container]
     if network == "none":
-        args += ["--network", "none"]
+        # Without CARGO_NET_OFFLINE, cargo on an unprimed volume retries the
+        # unreachable registry for minutes before it gives up.
+        args += ["--network", "none", "-e", "CARGO_NET_OFFLINE=true"]
     args += [
         "-e",
         f"RLM_PROJECT_ID={project_id}",

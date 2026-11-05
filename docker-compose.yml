@@ -88,6 +88,8 @@ services:
     # installed no SIGTERM handler ignores `docker stop` in stdio mode.
     # Inherited by rust-lsp-mcp-isolated through `extends`.
     init: true
+    # A stop early in a cold start waits on the doc-index and analyzer shutdown.
+    stop_grace_period: 15s
     volumes:
       # The target Rust project, read-only. Set RUST_PROJECT to its host path.
       # The `z` is the SHARED SELinux relabel (lowercase — never the private

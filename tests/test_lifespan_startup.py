@@ -31,13 +31,16 @@ Test coverage:
 """
 
 import asyncio
+import logging
 import pathlib
 import threading
+import time
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import chromadb
 import numpy as np
+import pytest
 
 import rust_lsp_mcp.analyzer as analyzer_mod
 import rust_lsp_mcp.core as core_mod
@@ -396,3 +399,72 @@ class TestAnalyzerLifespanStartShutdownWiring:
                 shutdown_mock.assert_awaited_once()
 
         asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
+
+
+# ---------------------------------------------------------------------------
+# 7. Backlog line 87 — the doc-store shutdown wait runs beside the analyzer
+#    drain instead of before it.
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanOverlappedShutdown:
+    def test_doc_store_wait_overlaps_analyzer_shutdown(self) -> None:
+        """A 0.5 s ``clear_doc_store`` and a 0.5 s ``AnalyzerManager.shutdown``
+        run side by side: the lifespan's exit takes under 0.9 s (in series it
+        would take 1.0 s) and returns only after both have finished."""
+        finished: list[str] = []
+
+        def _slow_clear() -> None:
+            time.sleep(0.5)
+            finished.append("doc_store")
+
+        async def _slow_shutdown(self: object) -> None:
+            await asyncio.sleep(0.5)
+            finished.append("analyzer")
+
+        async def _scenario() -> float:
+            with (
+                patch.object(analyzer_mod.AnalyzerManager, "start", AsyncMock()),
+                patch.object(analyzer_mod.AnalyzerManager, "shutdown", _slow_shutdown),
+                patch.object(core_mod, "init_doc_store_background", AsyncMock()),
+                patch.object(core_mod, "clear_doc_store", _slow_clear),
+            ):
+                cm = core_mod._lifespan(object())  # ty: ignore[invalid-argument-type]
+                await cm.__aenter__()
+                started = time.monotonic()
+                await cm.__aexit__(None, None, None)
+                return time.monotonic() - started
+
+        elapsed = asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
+        assert sorted(finished) == ["analyzer", "doc_store"]
+        assert elapsed < 0.9, f"lifespan exit took {elapsed:.2f} s; the waits ran in series"
+        assert core_mod._manager is None
+
+    def test_clear_doc_store_error_does_not_skip_analyzer_shutdown(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``clear_doc_store`` raising on its worker thread still lets
+        ``manager.shutdown()`` run, and the exception is logged."""
+
+        def _boom() -> None:
+            raise RuntimeError("clear boom")
+
+        shutdown_mock = AsyncMock()
+
+        async def _scenario() -> None:
+            with (
+                patch.object(analyzer_mod.AnalyzerManager, "start", AsyncMock()),
+                patch.object(analyzer_mod.AnalyzerManager, "shutdown", shutdown_mock),
+                patch.object(core_mod, "init_doc_store_background", AsyncMock()),
+                patch.object(core_mod, "clear_doc_store", _boom),
+            ):
+                async with core_mod._lifespan(object()):  # ty: ignore[invalid-argument-type]
+                    pass
+
+        with caplog.at_level(logging.ERROR, logger=core_mod.__name__):
+            asyncio.run(asyncio.wait_for(_scenario(), timeout=5))
+        shutdown_mock.assert_awaited_once()
+        records = [r for r in caplog.records if "shutdown wait failed" in r.getMessage()]
+        assert records, caplog.text
+        assert records[0].exc_info is not None
+        assert "clear boom" in str(records[0].exc_info[1])
