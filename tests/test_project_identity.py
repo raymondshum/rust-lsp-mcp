@@ -9,22 +9,28 @@ SAME ``chroma_path`` must each search only their own docs.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import pathlib
 import re
+import subprocess
 from typing import Any
 
 import chromadb
 import numpy as np
 import pytest
 
+import rust_lsp_mcp.doc_store as doc_store_mod
 from rust_lsp_mcp.doc_store import (
+    ProjectIdentityUnavailable,
     _project_fingerprint,
     clear_doc_store,
     doc_collection_name,
+    doc_store_state,
     init_doc_store,
     project_identity,
 )
+from rust_lsp_mcp.envelope import RECOVERY_REFRESH, STATUS_ERROR
 from rust_lsp_mcp.settings import Settings
 
 
@@ -251,4 +257,183 @@ def test_two_projects_on_same_path_and_volume_search_only_their_own_docs(
     assert any(alpha_token in t for t in _texts(alpha_store, alpha_token))
     assert not any(bravo_token in t for t in _texts(alpha_store, bravo_token))
     assert alpha_store._collection.name != bravo_store._collection.name
+    clear_doc_store()
+
+
+# (e) backlog line 29: a git timeout never derives a different identity --------
+
+
+def _git_ok(remote: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=["git"], returncode=0, stdout=remote + "\n", stderr="")
+
+
+def _timeout() -> subprocess.TimeoutExpired:
+    return subprocess.TimeoutExpired(cmd=["git"], timeout=5.0)
+
+
+class _FakeRun:
+    """Stand-in for ``subprocess.run`` that replays *outcomes* in order."""
+
+    def __init__(self, *outcomes: Any) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _identity_with(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, *outcomes: Any
+) -> tuple[str, _FakeRun]:
+    fake = _FakeRun(*outcomes)
+    monkeypatch.setattr(doc_store_mod.subprocess, "run", fake)
+    return project_identity(settings), fake
+
+
+def test_git_timeout_once_then_remote_gives_same_identity(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma")
+    remote = "https://example.invalid/repo.git"
+    clean, clean_run = _identity_with(monkeypatch, settings, _git_ok(remote))
+    retried, retried_run = _identity_with(monkeypatch, settings, _timeout(), _git_ok(remote))
+    assert retried == clean
+    assert clean_run.calls == 1
+    assert retried_run.calls == 2
+
+
+def test_git_timeout_twice_raises_project_identity_unavailable(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma")
+    fake = _FakeRun(_timeout(), _timeout())
+    monkeypatch.setattr(doc_store_mod.subprocess, "run", fake)
+    with pytest.raises(ProjectIdentityUnavailable) as excinfo:
+        project_identity(settings)
+    assert fake.calls == 2
+    root = tmp_path.resolve()
+    assert str(excinfo.value) == (
+        f"could not read the git remote of {root} (git timed out); set RLM_PROJECT_ID"
+        " to a fixed name, or call refresh to retry"
+    )
+
+
+def test_other_oserror_twice_raises_project_identity_unavailable(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma")
+    fake = _FakeRun(PermissionError("denied"), OSError("busy"))
+    monkeypatch.setattr(doc_store_mod.subprocess, "run", fake)
+    with pytest.raises(ProjectIdentityUnavailable):
+        project_identity(settings)
+    assert fake.calls == 2
+
+
+def _no_remote_identity(settings: Settings) -> str:
+    root = pathlib.Path(settings.project_root).resolve()
+    return hashlib.sha256("\n".join([str(root), "", ""]).encode()).hexdigest()[:16]
+
+
+def test_git_nonzero_exit_gives_no_remote_identity_without_retry(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma")
+    absent = subprocess.CompletedProcess(args=["git"], returncode=1, stdout="", stderr="")
+    identity, fake = _identity_with(monkeypatch, settings, absent)
+    assert fake.calls == 1
+    assert identity == _no_remote_identity(settings)
+
+
+def test_git_binary_absent_gives_no_remote_identity(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma")
+    identity, fake = _identity_with(monkeypatch, settings, FileNotFoundError("git"))
+    assert fake.calls == 1
+    assert identity == _no_remote_identity(settings)
+
+
+def test_explicit_project_id_makes_no_git_call(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma", project_id="fixed")
+    identity, fake = _identity_with(monkeypatch, settings)
+    assert identity == "fixed"
+    assert fake.calls == 0
+
+
+_UNAVAILABLE = (
+    "could not read the git remote of /x (git timed out); set RLM_PROJECT_ID"
+    " to a fixed name, or call refresh to retry"
+)
+
+
+def _raise_unavailable(settings: Settings) -> str:
+    raise ProjectIdentityUnavailable(_UNAVAILABLE)
+
+
+def test_identity_unavailable_at_startup_reads_as_doc_index_error(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At startup the raise lands in ``_init_error`` before a store exists:
+    ``doc_store_state()`` reads ``error`` with the message, ``status`` reports
+    it with no rebuild in flight, and ``search_docs`` answers ``error`` with
+    ``recovery: "refresh"``."""
+    import rust_lsp_mcp.tools.search_docs as search_mod
+    import rust_lsp_mcp.tools.status as status_mod
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "README.md").write_text("# Docs\n\nSome text.\n", encoding="utf-8")
+    settings = _settings(project, tmp_path / "chroma")
+    clear_doc_store()
+    monkeypatch.setattr(doc_store_mod, "project_identity", _raise_unavailable)
+    with pytest.raises(ProjectIdentityUnavailable):
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+    expected = f"ProjectIdentityUnavailable: {_UNAVAILABLE}"
+    assert doc_store_mod.get_doc_store() is None
+    assert doc_store_state() == ("error", expected)
+    reply = asyncio.run(status_mod.status())
+    assert (reply["doc_index_state"], reply["doc_index_error"]) == ("error", expected)
+
+    result = asyncio.run(search_mod.search_docs(query="text", limit=3))
+    assert result["status"] == STATUS_ERROR
+    assert result["recovery"] == RECOVERY_REFRESH
+    assert _UNAVAILABLE in result["message"]
+    clear_doc_store()
+
+
+def test_identity_unavailable_in_refresh_rebuild_keeps_old_index_serving(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside a ``refresh`` rebuild on a ready store the raise fails the
+    rebuild only: ``doc_index_state`` stays ``ready`` with ``doc_index_error``
+    set, and the old index keeps answering."""
+    import rust_lsp_mcp.tools.status as status_mod
+    from rust_lsp_mcp.tools.refresh import _doc_rebuild_work
+
+    project = tmp_path / "project"
+    project.mkdir()
+    token = "zzzunique_identity_refresh_token"
+    (project / "README.md").write_text(f"# Docs\n\nMentions {token}.\n", encoding="utf-8")
+    settings = _settings(project, tmp_path / "chroma", project_id="before")
+    clear_doc_store()
+    store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+    assert doc_store_state() == ("ready", None)
+
+    monkeypatch.setattr(doc_store_mod, "project_identity", _raise_unavailable)
+    work = _doc_rebuild_work(
+        store, settings, init_doc_store, doc_store_mod.current_shutdown_generation()
+    )
+    work()  # the refresh worker body; never raises
+
+    expected = f"ProjectIdentityUnavailable: {_UNAVAILABLE}"
+    assert doc_store_state() == ("ready", expected)
+    reply = asyncio.run(status_mod.status())
+    assert (reply["doc_index_state"], reply["doc_index_error"]) == ("ready", expected)
+    assert any(token in r["text"] for r in store.search(token, n_results=3))
     clear_doc_store()

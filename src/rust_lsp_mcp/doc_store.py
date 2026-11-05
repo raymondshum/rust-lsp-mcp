@@ -211,8 +211,28 @@ _GIT_TIMEOUT_SECONDS = 5.0
 _NO_COMMIT = "none"
 
 
-def _git_remote_url(project_root: pathlib.Path) -> str:
-    """Return ``remote.origin.url`` for *project_root*, or ``""`` on any failure."""
+class ProjectIdentityUnavailable(Exception):
+    """The derived project identity could not be computed on this start.
+
+    Raised by :func:`project_identity` when ``git config --get
+    remote.origin.url`` timed out (or failed with an ``OSError`` other than
+    a missing git binary) twice in a row.  Such a failure can differ between
+    two starts, so deriving an identity from it would rename the doc
+    collection and orphan the old one; the callers record the error instead
+    (``doc_index_state`` ``"error"`` at startup, ``doc_index_error`` after a
+    failed ``refresh`` rebuild) and ``refresh`` retries.
+    """
+
+
+def _git_remote_url(project_root: pathlib.Path) -> str | None:
+    """Return ``remote.origin.url`` for *project_root*, ``""`` for none, ``None`` on failure.
+
+    ``""`` means a result that is the same on every start: git ran and
+    exited non-zero (``git config --get`` does for an absent key, and git
+    does outside a repository) or the git binary is absent.  ``None`` means
+    a failure that can differ between two starts: the call timed out or
+    raised another ``OSError``.
+    """
     try:
         result = subprocess.run(
             ["git", "-C", str(project_root), "config", "--get", "remote.origin.url"],
@@ -222,8 +242,10 @@ def _git_remote_url(project_root: pathlib.Path) -> str:
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except FileNotFoundError:
         return ""
+    except (OSError, subprocess.SubprocessError):
+        return None
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
@@ -366,9 +388,16 @@ def project_identity(settings: Settings) -> str:
     whitespace-only counts as unset).  Otherwise the identity is the first 16
     hex characters of the SHA-256 over three newline-joined parts: the
     resolved ``project_root``, the output of ``git -C <project_root> config
-    --get remote.origin.url`` (empty on any failure, 5-second timeout) and the
-    root package name (``[package].name`` of ``<project_root>/Cargo.toml``,
-    see :func:`_root_package_name`).
+    --get remote.origin.url`` (5-second timeout; empty when the repo has no
+    origin remote, the root is not a git repository or git is not installed)
+    and the root package name (``[package].name`` of
+    ``<project_root>/Cargo.toml``, see :func:`_root_package_name`).
+
+    A git call that times out (or fails with another ``OSError``) is retried
+    once; a second failure raises :class:`ProjectIdentityUnavailable` rather
+    than hashing an empty remote, so a slow git never derives a different
+    identity and renames the collection.  An explicit ``RLM_PROJECT_ID``
+    makes no git call.
 
     The derived identity collides for two different projects that share the
     mount path, share the git remote (or both have none) and have the same
@@ -380,6 +409,13 @@ def project_identity(settings: Settings) -> str:
         return explicit
     root = pathlib.Path(settings.project_root).resolve()
     remote = _git_remote_url(root)
+    if remote is None:
+        remote = _git_remote_url(root)
+    if remote is None:
+        raise ProjectIdentityUnavailable(
+            f"could not read the git remote of {root} (git timed out); set RLM_PROJECT_ID"
+            " to a fixed name, or call refresh to retry"
+        )
     package_name = _root_package_name(root)
     digest = hashlib.sha256("\n".join([str(root), remote, package_name]).encode())
     return digest.hexdigest()[:16]
