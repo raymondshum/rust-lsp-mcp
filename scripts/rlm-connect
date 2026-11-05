@@ -18,7 +18,8 @@ It then inspects the container: absent -> ``run -d`` (detached daemon in
 streamable-HTTP mode, read-only project mount, per-project volume,
 ``--network none`` unless ``--network default``); stopped -> ``start``;
 running -> left alone. A name conflict from a simultaneous start counts as
-success. Without ``--up`` it replaces itself (``os.execvp``) with
+success once that container reports running (polled for up to 10 s). Without
+``--up`` it replaces itself (``os.execvp``) with
 ``<engine> exec -i rlm-<ID> /app/.venv/bin/rust-lsp mcp-bridge``, which relays
 MCP messages between this process's stdio and the daemon's in-container
 127.0.0.1 listener (no port is ever published on the host).
@@ -42,6 +43,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 
 DEFAULT_IMAGE = "rust-lsp-mcp"
@@ -53,6 +55,13 @@ IDLE_TIMEOUT_ENV = "RLM_IDLE_TIMEOUT_SECONDS"
 ABSENT = "absent"
 STOPPED = "stopped"
 RUNNING = "running"
+
+# After a name conflict the winner's container may exist but not run yet, so
+# the loser polls inspect_state() every CONFLICT_POLL_SECONDS for up to
+# CONFLICT_WAIT_SECONDS before it attaches (module-level so tests can shorten
+# them). A winner's ``run -d`` reaches RUNNING in about 0.3 s under podman.
+CONFLICT_POLL_SECONDS = 0.25
+CONFLICT_WAIT_SECONDS = 10.0
 
 
 def _err(message: str) -> None:
@@ -151,6 +160,21 @@ def _is_name_conflict(proc: subprocess.CompletedProcess[str]) -> bool:
     return "already in use" in text
 
 
+def _wait_until_running(engine: str, container: str) -> bool:
+    """Poll a simultaneous start's container until RUNNING; False after the wait."""
+    deadline = time.monotonic() + CONFLICT_WAIT_SECONDS
+    while True:
+        if inspect_state(engine, container) == RUNNING:
+            return True
+        if time.monotonic() >= deadline:
+            _err(
+                f"{container} was created by a simultaneous start but is not running after"
+                f" {CONFLICT_WAIT_SECONDS:g} s; run rlm-connect again"
+            )
+            return False
+        time.sleep(CONFLICT_POLL_SECONDS)
+
+
 def ensure_running(
     engine: str,
     real_path: str,
@@ -182,7 +206,7 @@ def ensure_running(
         return True
     if _is_name_conflict(proc):
         _err(f"{container} was created by a simultaneous start; reusing it")
-        return True
+        return _wait_until_running(engine, container)
     _err(f"`{engine} run` failed with exit code {proc.returncode}")
     return False
 

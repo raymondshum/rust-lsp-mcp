@@ -4,7 +4,8 @@ The launcher is a stdlib-only script with no ``.py`` suffix, so it is loaded
 as a module through ``SourceFileLoader`` for its pure helpers, and run as a
 subprocess against a fake ``docker`` on ``PATH`` for the engine-facing
 behaviour. The fake records each invocation's argv (one line per call) and
-answers ``inspect`` as absent, stopped or running from ``FAKE_STATE``.
+answers ``inspect`` as absent, stopped or running from ``FAKE_STATE``, or
+from the next line of the file named by ``FAKE_STATE_SEQ`` when that is set.
 """
 
 from __future__ import annotations
@@ -27,6 +28,11 @@ FAKE_DOCKER = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_LOG"
 case "$1" in
   inspect)
+    if [ -n "$FAKE_STATE_SEQ" ]; then
+      FAKE_STATE=$(head -n 1 "$FAKE_STATE_SEQ")
+      tail -n +2 "$FAKE_STATE_SEQ" > "$FAKE_STATE_SEQ.next"
+      mv "$FAKE_STATE_SEQ.next" "$FAKE_STATE_SEQ"
+    fi
     case "$FAKE_STATE" in
       running) echo true; exit 0 ;;
       stopped) echo false; exit 0 ;;
@@ -205,12 +211,70 @@ def test_default_folder_is_cwd(rlm: ModuleType, fake_env: dict[str, str], projec
     assert proc.stdout == f"{container}\n{volume}\n"
 
 
-def test_name_conflict_on_run_counts_as_success(fake_env: dict[str, str], project: Path) -> None:
-    fake_env["FAKE_STATE"] = "absent"
+def test_name_conflict_on_run_counts_as_success(
+    fake_env: dict[str, str], project: Path, tmp_path: Path
+) -> None:
+    """The loser of a simultaneous start polls until the winner's container
+    runs (backlog line 75): absent, then a name conflict, then STOPPED for two
+    polls and RUNNING on the third, then the attach."""
+    seq = tmp_path / "states"
+    seq.write_text("absent\nstopped\nstopped\nrunning\n")
+    fake_env["FAKE_STATE_SEQ"] = str(seq)
     fake_env["FAKE_RUN_CONFLICT"] = "1"
-    proc = _run(["--up", str(project)], fake_env)
+    proc = _run([str(project)], fake_env)
     assert proc.returncode == 0, proc.stderr
     assert "already in use" in proc.stderr
+    assert "EXEC-REACHED" in proc.stdout
+    calls = _calls(fake_env)
+    verbs = [c.split(" ", 1)[0] for c in calls]
+    # one inspect before the run, three polls after the conflict, then exec
+    assert verbs == ["inspect", "run", "inspect", "inspect", "inspect", "exec"]
+
+
+def test_name_conflict_loser_returns_true_after_third_poll(
+    rlm: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    states = [rlm.ABSENT, rlm.STOPPED, rlm.STOPPED, rlm.RUNNING]
+    seen: list[str] = []
+
+    def fake_inspect(engine: str, container: str) -> str:
+        seen.append(states[len(seen)])
+        return seen[-1]
+
+    conflict = subprocess.CompletedProcess(
+        args=["docker"], returncode=125, stdout="", stderr='name "/rlm-x" is already in use'
+    )
+    monkeypatch.setattr(rlm, "inspect_state", fake_inspect)
+    monkeypatch.setattr(rlm, "_run_engine", lambda engine, args: conflict)
+    monkeypatch.setattr(rlm, "CONFLICT_POLL_SECONDS", 0.0)
+    assert rlm.ensure_running("docker", "/p", "x", "rlm-x", "rlm-x-data", "img", "none") is True
+    # the first inspect precedes the run; the RUNNING answer is the third poll
+    assert seen == states
+
+
+def test_name_conflict_loser_gives_up_when_never_running(
+    rlm: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[str] = []
+
+    def fake_inspect(engine: str, container: str) -> str:
+        calls.append(container)
+        return rlm.ABSENT if len(calls) == 1 else rlm.STOPPED
+
+    conflict = subprocess.CompletedProcess(
+        args=["docker"], returncode=125, stdout="", stderr='name "/rlm-x" is already in use'
+    )
+    monkeypatch.setattr(rlm, "inspect_state", fake_inspect)
+    monkeypatch.setattr(rlm, "_run_engine", lambda engine, args: conflict)
+    monkeypatch.setattr(rlm, "CONFLICT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(rlm, "CONFLICT_WAIT_SECONDS", 0.1)
+    assert rlm.ensure_running("docker", "/p", "x", "rlm-x", "rlm-x-data", "img", "none") is False
+    assert len(calls) > 2  # polled more than once before giving up
+    err = capsys.readouterr().err
+    assert (
+        "rlm-x was created by a simultaneous start but is not running after 0.1 s;"
+        " run rlm-connect again"
+    ) in err
 
 
 def test_idle_timeout_env_reaches_run_argv(fake_env: dict[str, str], project: Path) -> None:
