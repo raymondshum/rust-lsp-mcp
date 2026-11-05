@@ -27,9 +27,9 @@ stdout carries MCP messages only once the bridge runs, so every diagnostic
 goes to stderr. The only stdout writes are the container name under ``--up``
 and the two names under ``--print-names``; both exit without exec.
 
-``RLM_IDLE_TIMEOUT_SECONDS`` set in the caller's environment is passed to the
-daemon only when this launcher creates the container: ``start`` reuses the
-environment the container was created with.
+``RLM_IDLE_TIMEOUT_SECONDS`` set to a non-empty value in the caller's
+environment is passed to the daemon only when this launcher creates the
+container: ``start`` reuses the environment the container was created with.
 
 Python 3 standard library only, so it runs on any host with python3.
 """
@@ -126,8 +126,10 @@ def build_run_args(
         "-e",
         f"RLM_HTTP_PORT={DAEMON_PORT}",
     ]
-    idle = env.get(IDLE_TIMEOUT_ENV)
-    if idle is not None:
+    # An empty or whitespace-only value counts as unset: forwarded as "", it
+    # fails the daemon's integer parse and the container exits 3.
+    idle = env.get(IDLE_TIMEOUT_ENV, "").strip()
+    if idle:
         args += ["-e", f"{IDLE_TIMEOUT_ENV}={idle}"]
     args += [
         "--memory",

@@ -201,3 +201,64 @@ def test_compose_names_come_from_variables() -> None:
     text = _compose_text()
     for variable in ("RLM_CONTAINER_NAME", "RLM_DATA_VOLUME", "RLM_PROJECT_ID"):
         assert variable in text, f"docker-compose.yml does not reference {variable} (SW-11)"
+
+
+# ---------------------------------------------------------------------------
+# Backlog lines 55 and 66: every launch path runs under an init, so dead
+# proc-macro-srv children are reaped and `docker stop` reaches the server.
+# ---------------------------------------------------------------------------
+
+
+def _compose_service_block(name: str) -> list[str]:
+    """Return the lines of service *name* (two-space indented key) in docker-compose.yml."""
+    lines = _compose_text().splitlines()
+    start = lines.index(f"  {name}:")
+    block: list[str] = []
+    for line in lines[start + 1 :]:
+        if line and not line.startswith("   ") and not line.lstrip().startswith("#"):
+            break
+        block.append(line)
+    return block
+
+
+def test_compose_base_service_runs_under_init() -> None:
+    block = [line.strip() for line in _compose_service_block("rust-lsp-mcp")]
+    assert "init: true" in block, "docker-compose.yml rust-lsp-mcp service lacks `init: true`"
+
+
+def test_compose_no_service_disables_init() -> None:
+    assert "init: false" not in _compose_text()
+
+
+def test_compose_isolated_service_inherits_init_through_extends() -> None:
+    block = [line.strip() for line in _compose_service_block("rust-lsp-mcp-isolated")]
+    assert "extends:" in block
+    assert "service: rust-lsp-mcp" in block
+    assert not any(line.startswith("init:") for line in block)
+
+
+def _readme_run_arg_lists() -> list[list[str]]:
+    """Return the `args` list of every JSON code block in README.md that starts with `run`."""
+    import json
+    import re
+    import textwrap
+
+    text = (REPO_ROOT / "README.md").read_text()
+    lists: list[list[str]] = []
+    for body in re.findall(r"```json\n(.*?)```", text, flags=re.DOTALL):
+        try:
+            data = json.loads(textwrap.dedent(body))
+        except json.JSONDecodeError:
+            continue
+        for server in data.get("mcpServers", {}).values():
+            args = server.get("args", [])
+            if args[:1] == ["run"]:
+                lists.append(args)
+    return lists
+
+
+def test_readme_docker_run_arg_lists_pass_init() -> None:
+    lists = _readme_run_arg_lists()
+    assert len(lists) == 2, f"expected the two README `docker run` arg lists, found {len(lists)}"
+    for args in lists:
+        assert "--init" in args, f"README `docker run` arg list lacks --init: {args}"
