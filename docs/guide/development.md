@@ -236,21 +236,24 @@ podman build -t "$IMAGE" .
 podman run --rm --init --pids-limit -1 \
   -v "$PWD":/workspaces/rust-lsp-mcp:z -w /workspaces/rust-lsp-mcp \
   -e UV_PROJECT_ENVIRONMENT=/opt/rlm-test-venv \
+  -e PYTHONDONTWRITEBYTECODE=1 \
   --entrypoint sh "$IMAGE" \
-  -c 'uv sync --frozen && uv run pytest -m "not integration" -p no:cacheprovider -q'
+  -c 'uv sync --frozen && uv run --frozen pytest -m "not integration" -p no:cacheprovider -q'
 ```
 
 The image has no pytest (it installs with `--no-dev`), so `uv sync --frozen`
 installs the dev dependencies first, which needs network access. The
 `UV_PROJECT_ENVIRONMENT` path is inside the container, so your checkout's own
-`.venv` is untouched, and `-p no:cacheprovider` keeps pytest from writing a
-`.pytest_cache` into the checkout. `docker` works in place of `podman`.
+`.venv` is untouched. `-p no:cacheprovider` and `PYTHONDONTWRITEBYTECODE=1`
+keep pytest and Python from writing `.pytest_cache` and `__pycache__` into the
+checkout, and `--frozen` on both uv commands keeps `uv.lock` unchanged.
+`docker` works in place of `podman`.
 
 `--pids-limit -1` lifts the container's process and thread cap (podman's
-default is 2048). The fast tier starts more threads than that over one run,
-and under the default cap the later tests fail with `can't start new thread`
-or a ChromaDB `Resource temporarily unavailable (os error 11)`, or the run
-hangs.
+default is 2048). Earlier tests leave threads running, so more than 2048
+threads are alive at once over one run. Under the default cap the later tests
+fail with `can't start new thread` or a ChromaDB `Resource temporarily
+unavailable (os error 11)`, or the run hangs.
 
 The image sets `RLM_PROJECT_ROOT`, `RLM_CHROMA_PATH`, `RLM_RUST_ANALYZER_BIN`
 and `RLM_DOC_COLLECTION` (see the `Dockerfile`); the settings tests that assert

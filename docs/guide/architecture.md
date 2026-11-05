@@ -191,7 +191,7 @@ and the store logic in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py).
 
 ## 7. Refreshing the index
 
-> **Blast radius**: `refresh` restarts the single shared analyzer. The navigation tools (`goto_definition`, `find_references`, `hover`, `find_symbol`, `document_symbols`) return `not_ready` to all clients until re-indexing completes. Avoid calling `refresh` mid-task unless the index is stale or failed.
+> **Blast radius**: `refresh` restarts the single shared analyzer. The navigation tools (`goto_definition`, `find_references`, `hover`, `find_symbol`, `document_symbols`) and `probe` return `not_ready` to all clients until re-indexing completes. Avoid calling `refresh` mid-task unless the index is stale or failed.
 
 The `refresh` tool executes two recovery steps:
 

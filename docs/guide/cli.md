@@ -257,7 +257,7 @@ Check `rust-lsp status` before refreshing. Only trigger `refresh` when code chan
 | `docker exec: no such container` | Container was not started or has a different name. | Run `docker ps` to verify container name. |
 | Exit `127`: `rust-lsp not found` | Command was invoked without full path. | Invoke `/app/.venv/bin/rust-lsp` directly. |
 | `state: "ready"` with `chunk_count: 0` | SELinux denied container read access to the project mount. | Ensure mount includes `:ro,z` suffix, or run `chcon -Rt container_file_t /path/to/project`. |
-| Multiple containers conflicting on `/data` | Several server processes share one ChromaDB volume. They take turns on the doc-store lock, so a second server waits while the first builds or rebuilds the doc index, and a `refresh` in one rebuilds the index the other serves. | Give each project its own volume (`rlm-<project-name>-data`). |
+| Multiple containers conflicting on `/data` | Several server processes share one ChromaDB volume. They take turns on the doc-store lock for start-up and rebuilds. With the same `RLM_PROJECT_ID`, a `refresh` in one rebuilds the index the other serves; different projects keep separate collections. | Give each project its own volume (`rlm-<project-name>-data`). |
 
 ## Related pages
 

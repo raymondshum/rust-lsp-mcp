@@ -7,8 +7,8 @@
 # as a stdio "warm-start" — a second stdio *server* process re-using the same
 # rust-analyzer/Chroma state across sessions. That story is gone: this compose
 # file's entrypoint already runs one long-lived server against the `/data`
-# Chroma store. A second server on the same volume (e.g. one opened via
-# `docker exec`) takes turns with the first on the doc-store lock, which
+# Chroma store. A second server on the same volume takes turns with the
+# first on the doc-store lock, which
 # covers the store's construction, the adopt check and every rebuild, and a
 # `refresh` in one rebuilds the index the other serves (KI-13, resolved; see
 # docs/impl/known-issues.md).

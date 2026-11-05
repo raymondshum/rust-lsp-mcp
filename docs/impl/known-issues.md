@@ -217,7 +217,7 @@ Check this list at these lifecycle checkpoints (see
   [docker-compose.yml](../../docker-compose.yml)'s entrypoint now runs the
   daemon directly (`RLM_TRANSPORT=streamable-http`), the old `sleep infinity`
   + `docker exec … rust-lsp-mcp` stdio warm-start path is retired, and the
-  single-writer mandate is spelled out in the compose header comment, the
+  single-writer mandate was then spelled out in the compose header comment, the
   README's [CLI access](../../README.md#cli-access-for-agents-without-mcp)
   section, and [docs/guide/cli.md](../guide/cli.md)'s troubleshooting table.
   On that date the entry remained open per the stronger-guard note above.
@@ -269,9 +269,10 @@ Check this list at these lifecycle checkpoints (see
   project_docs_ab332e26137a after another process replaced it`. Guarded by
   `TestCollectionDeletedByAnotherProcess` in
   [tests/test_doc_store.py](../../tests/test_doc_store.py), which runs the
-  second client in a subprocess. Two servers on one volume still serialise
-  their builds through the flock, and the one-writer guidance for serving
-  stands; nothing in this entry remains open.
+  second client in a subprocess. Two servers on one volume take turns on the
+  doc-store lock for start-up and rebuilds, and with the same
+  `RLM_PROJECT_ID` a `refresh` in one rebuilds the index the other serves;
+  nothing in this entry remains open.
 
 ### SW-10 — `refresh` blocked on the doc re-embed after deleting the old index
 - **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)
