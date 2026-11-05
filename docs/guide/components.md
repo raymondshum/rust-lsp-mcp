@@ -4,54 +4,54 @@ type: Guide
 title: Components — source code tour
 description: Module-by-module tour of the rust-lsp-mcp server and the rust-lsp CLI client source.
 tags: [guide, tier-b, components]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/core.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/analyzer.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/server.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/envelope.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/positions.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/settings.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/doc_chunking.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/_main.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/__main__.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/__init__.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/diagnostics.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_cli/cli.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_cli/client.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -326,8 +326,12 @@ The key settings are:
   `/usr/local/cargo/bin/rust-analyzer`)
 - `RLM_CHROMA_PATH` — path for the ChromaDB persistent storage (default:
   `/workspaces/chroma`)
-- `RLM_DOC_COLLECTION` — name of the ChromaDB collection holding the doc index
-  (default: `project_docs`)
+- `RLM_DOC_COLLECTION` — prefix of the ChromaDB collection name holding the doc
+  index (default: `project_docs`). The live name is
+  `<prefix>_<12 hex characters of the SHA-256 of the project identity>`, where
+  the identity is `RLM_PROJECT_ID` when set, else a value derived from the
+  project path, its git remote and its root package name, so projects that
+  share one Chroma path get separate collections.
 - `RLM_DOC_GLOB_PATTERNS` — comma-separated globs selecting Markdown files to
   index (default: `**/*.md`)
 - `RLM_DOC_EXCLUDE_PATTERNS` — comma-separated globs to exclude from the index
@@ -394,25 +398,34 @@ the estimated cap.
 cosine-distance similarity search to find the chunks most relevant to a natural-
 language query.
 
-**`DocStore`** wraps a ChromaDB `PersistentClient`. At startup, `init_doc_store`
-checks whether a complete collection already exists on disk. If it does (and has
-the completion marker described below), the store adopts it without re-embedding
-— the full build can take a while, and bind-mounted storage survives container
-rebuilds. If no usable collection exists, `rebuild()` is called.
+**`DocStore`** wraps a ChromaDB `PersistentClient`. At startup, one exclusive
+flock on `<chroma_path>/.rlm-doc-store.lock` covers the store's construction,
+the adopt check and any rebuild, so two processes starting on one volume take
+turns: the second waits, then adopts what the first one built. The adopt check
+reuses the on-disk collection without re-embedding only when all of these hold:
+it was built for the same project (identity and fingerprint), with the same
+build settings (doc globs, exclusions, chunker version and embedding model),
+from the same tree (its stamped commit equals the current `HEAD` and its doc
+digest equals the current one; when the git call fails, the digest alone
+decides), and it carries the `build_complete` sentinel. Otherwise `rebuild()`
+runs under the same flock.
 
-**`rebuild()`** drops and recreates the ChromaDB collection, globs all
-Markdown files matching `doc_glob_patterns` (minus any matching
-`doc_exclude_patterns`), chunks each file with `chunk_markdown`, and adds all
-chunks to the collection in batches of 500. Before flipping `is_ready` to
-`True`, it writes a `build_complete` sentinel into the collection's metadata.
-This sentinel is the key to safe adoption: a collection that has documents but
-no sentinel was killed mid-build and is treated as incomplete — it is rebuilt
-rather than adopted.
+**`rebuild()`** builds into a staging collection named `<live name>_staging`
+while the old index keeps answering searches. It selects the Markdown files
+matching `doc_glob_patterns` (minus any matching `doc_exclude_patterns`), copies
+the chunks and embeddings of each file whose path and SHA-256 match the live
+collection, and chunks and embeds the rest with `chunk_markdown`. It then swaps
+the staging collection in: it deletes the live collection and renames staging
+to the live name with its metadata, including the `build_complete` sentinel.
+The sentinel is the key to safe adoption: a collection without it was killed
+mid-build and is rebuilt rather than adopted. A `rebuild()` that `refresh`
+calls on a running store takes the same flock.
 
-**Readiness flag.** `is_ready` is `False` while a build is in progress and
-`True` only after the build and sentinel write both complete. The `search_docs`
-tool gates on this flag, so a caller never receives a partial or misleading
-result during a rebuild.
+**Readiness flag.** `is_ready` is `False` during the first build on an empty
+store and `True` once a collection with the sentinel is published; a rebuild
+over an existing index keeps it `True`, because the old collection answers
+until the swap. The `search_docs` tool gates on this flag, so a caller never
+receives a partial or misleading result during a build.
 
 **`search(query, n_results=5)`** queries the collection and returns up to
 `n_results` matches, each as a dict with `file`, `breadcrumb`, `text`, and
@@ -455,7 +468,7 @@ dropping a new file in `tools/` — no central registry edit is needed.
 | [`search_docs.py`](../../src/rust_lsp_mcp/tools/search_docs.py) | `search_docs` — semantic search over the indexed Markdown documentation |
 | [`status.py`](../../src/rust_lsp_mcp/tools/status.py) | `status` — full status report: analyzer state/staleness (indexed vs. current commit), doc-index state/chunk count, and advisory startup preflight warnings |
 | [`diagnostics.py`](../../src/rust_lsp_mcp/tools/diagnostics.py) | `analyzer_status` (minimal one-field readiness check) and `probe` (gated no-op for testing the readiness gate) |
-| [`refresh.py`](../../src/rust_lsp_mcp/tools/refresh.py) | `refresh` — tear down the analyzer and doc store and rebuild both from scratch |
+| [`refresh.py`](../../src/rust_lsp_mcp/tools/refresh.py) | `refresh` — restart the analyzer and rebuild the doc index in the background (build-and-swap; unchanged files keep their embeddings) |
 | [`validate_file_path.py`](../../src/rust_lsp_mcp/tools/validate_file_path.py) | `validate_file_path` — check whether a workspace path exists and report its absolute path and size; an analyzer-free filesystem probe, ungated |
 
 See the [Tools / API reference](tools.md) for inputs, outputs, and examples for
@@ -482,8 +495,10 @@ imports `rust_lsp_mcp` at all (that would pull in the full server, including a
 second Chroma client). Exit codes are exact: `0` ok/not_found, `1` error, `2`
 not_ready, `3` daemon unreachable (`EXIT_OK` / `EXIT_ERROR` /
 `EXIT_NOT_READY` / `EXIT_UNREACHABLE`). `--wait SECS` polls `status` every 2s
-until the daemon reports `state == "ready"`, riding through daemon boot
-(connection-refused → not_ready → ready).
+until the daemon reports both `state == "ready"` and
+`doc_index_state == "ready"`, riding through daemon boot
+(connection-refused → not_ready → ready); a `doc_index_state` of `"error"`
+ends the wait at once.
 
 **`client.py`** is the streamable-HTTP MCP client half: `call_tool_sync` opens
 one connection per call, calls a tool, and parses the envelope from

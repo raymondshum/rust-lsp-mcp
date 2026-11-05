@@ -4,30 +4,30 @@ type: Guide
 title: Tool reference
 description: Every MCP tool the server exposes, with its inputs and exact envelope responses.
 tags: [guide, tier-a, tools]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/diagnostics.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/envelope.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -556,6 +556,7 @@ means "no committed changes since indexing began," not a freshness guarantee.
   "doc_index_chunk_count": 42,
   "doc_indexed_commit": "a3f1c9d",
   "doc_stale": false,
+  "doc_unreadable_files": 0,
   "preflight_warnings": [],
   "server_version": "0.4.0",
   "multilspy_version": "0.0.15",
@@ -624,9 +625,10 @@ before issuing navigation queries.
 workspace, and the doc index rebuilds in the background. `refresh` returns
 once the doc rebuild thread has started; it does not wait for the rebuild.
 The rebuild writes a staging collection and swaps it in when it succeeds, so
-`search_docs` serves the old index meanwhile. Only Markdown files whose
-content changed since the last build are re-embedded; unchanged files keep
-their stored embeddings. Follow the rebuild through `status`'s
+`search_docs` serves the old index meanwhile. Unchanged Markdown files keep
+their stored embeddings; a changed or renamed file is re-embedded, and every
+file is re-embedded when there is no complete live index for this project or
+the chunker version or the embedding model changed. Follow the rebuild through `status`'s
 `doc_index_progress`.
 
 **Doc-index recovery detail:** if the documentation index was never

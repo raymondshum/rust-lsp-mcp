@@ -4,22 +4,22 @@ type: Guide
 title: Architecture
 description: How rust-lsp-mcp's server, analyzer, and doc-search pieces fit together and why.
 tags: [guide, tier-b, architecture]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/server.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/core.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/analyzer.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/doc_chunking.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/envelope.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/positions.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 cite:
   - src/rust_lsp_mcp/positions.py:external_to_lsp
 ---
@@ -208,7 +208,7 @@ The server starts immediately without blocking on background indexing:
 
 - **Code analyzer**: Starts in a background task. The server accepts MCP connections immediately and returns `not_ready` until indexing finishes.
 - **Documentation index**:
-  - **Warm restart**: If a valid collection exists on disk, the server adopts it synchronously without re-embedding text.
+  - **Warm restart**: If a valid collection exists on disk, the server adopts it on the background worker without re-embedding text. `doc_index_state` reads `"building"` until the adopt completes.
   - **Cold start**: The server builds the index in a background thread. `doc_index_state` reports `"building"` until complete.
   - **Error handling**: Failures are captured and exposed via `status` as `doc_index_state == "error"`. Code navigation tools remain usable.
   - **Chunk count verification**: `status` exposes `doc_index_chunk_count`. A count of `0` helps identify misconfigured Markdown paths or unmounted project directories.

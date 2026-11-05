@@ -4,22 +4,22 @@ type: Guide
 title: Development setup
 description: How to set up the dev container, run the server locally, and run the test tiers.
 tags: [guide, tier-b, development]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: Dockerfile
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: docker-compose.yml
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: .devcontainer/devcontainer.json
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: .devcontainer/Dockerfile
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: scripts/setup.sh
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: scripts/clone-ripgrep.sh
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: pyproject.toml
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -166,21 +166,24 @@ docker build -t rust-lsp-mcp .
 **Run per session:**
 
 ```bash
-docker run -i --rm \
+docker run -i --rm --init \
   -v /abs/path/to/your/rust/project:/project:ro \
-  -v rust-lsp-mcp-data:/data \
+  -e RLM_PROJECT_ID=<project-name> \
+  -v rlm-<project-name>-data:/data \
   rust-lsp-mcp
 ```
 
+- `-i` — keeps stdin open so the MCP client communicates over stdio; `--rm` removes the container on exit.
+- `--init` — runs a minimal init as PID 1, which reaps rust-analyzer's child processes and passes `docker stop` on to the server.
 - `-v /abs/path/to/your/rust/project:/project:ro` — bind-mounts your Rust project read-only at `/project`.
-- `-v rust-lsp-mcp-data:/data` — persists the Chroma vector store, cargo registry, and build cache across runs.
-- `-i` — keeps stdin open so the MCP client communicates over stdio.
+- `-e RLM_PROJECT_ID=<project-name>` — names the project for the documentation index. Replace `<project-name>` with a short name, such as `ripgrep`. Without it the server derives a name from the project path, its git remote and its root package name.
+- `-v rlm-<project-name>-data:/data` — persists the Chroma vector store, cargo registry, and build cache across runs, in a volume named after the project. Give each project its own volume.
 
 > **SELinux note:** On SELinux-enforcing hosts (such as rootless Podman), append `,z` to the bind mount: `-v /abs/path/to/your/project:/project:ro,z`. Use lowercase `z` for shared access.
 
 Environment defaults (`RLM_PROJECT_ROOT=/project`, `RLM_CHROMA_PATH=/data/chroma`) work out of the box. See [Configuration](configuration.md) to override them.
 
-**Persistent daemon mode:** For agents without MCP tool access or when keeping rust-analyzer hot across many calls, use the CLI daemon: `docker compose up -d rust-lsp-mcp`. Commands run via `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd>`. See the [CLI reference](cli.md). Do not launch multiple server processes against the same Chroma data volume.
+**Persistent daemon mode:** For agents without MCP tool access or when keeping rust-analyzer hot across many calls, run a daemon. `rlm-connect` starts one daemon and one volume per project; see [Daemon mode](daemon.md). The compose path is `docker compose up -d rust-lsp-mcp`, with commands run via `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp <cmd>`; see the [CLI reference](cli.md). Do not launch multiple server processes against the same Chroma data volume.
 
 ---
 
