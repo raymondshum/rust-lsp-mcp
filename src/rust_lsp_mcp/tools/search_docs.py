@@ -31,7 +31,8 @@ from rust_lsp_mcp.envelope import (
 _log = logging.getLogger(__name__)
 
 # Canonical not_ready message for the doc-index-still-building case — shared by
-# all three not_ready branches below so they name the same poll tool/field
+# all five not_ready returns below (including the errored-store branches while
+# a rebuild is in flight) so they name the same poll tool/field
 # (mirrors analyzer.py's INDEXING_RETRY_MESSAGE for the analyzer side).
 DOC_INDEXING_RETRY_MESSAGE = (
     "The documentation index is still building. Retry after status reports "
@@ -56,7 +57,8 @@ def _errored_store_envelope(reason: str | None) -> dict[str, Any]:
     process deleted) and names refresh once.  Shared by the fast-path
     ``state == DOC_STATE_ERROR`` check and the ``DocStoreNotReady``
     handler's re-check (so a store that transitions to ERROR mid-search is
-    labelled ``error``, not a misleading ``not_ready``).  Call from the event
+    labelled ``error`` when no rebuild is in flight, and ``not_ready`` while
+    one is).  Call from the event
     loop, as :func:`doc_rebuild_in_progress` requires.
     """
     if doc_rebuild_in_progress():
@@ -175,9 +177,10 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
         # atomic snapshot.  This is the race window closing correctly — it
         # normally maps to not_ready (transient), never a misleading empty.
         # BUT if that concurrent rebuild transitioned the store to ERROR
-        # (permanent) between the fast-path check and the snapshot, re-read the
-        # state now and surface the same permanent error the fast-path uses,
-        # rather than briefly mislabelling a now-errored store as not_ready.
+        # between the fast-path check and the snapshot, re-read the state now
+        # and answer as the fast-path does for an errored store: the permanent
+        # error when no rebuild is in flight, not_ready while one is (the
+        # "building" state status reports, backlog line 117).
         if getattr(store, "state", None) == DOC_STATE_ERROR:
             return _errored_store_envelope(store.error_message)
         return not_ready(DOC_INDEXING_RETRY_MESSAGE)

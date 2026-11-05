@@ -832,3 +832,20 @@ def test_wait_flag_doc_error_still_stops_other_commands(
         assert cli.main(argv) == 2
     assert calls == []
     assert "run rust-lsp refresh to rebuild it." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["status", "refresh"])
+def test_wait_flag_doc_error_ending_in_period_prints_no_period_semicolon(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    """R-gate R1: a doc error reason that ends in "." prints without ".;" on
+    both the stop line (status) and the running-refresh line (refresh)."""
+    text = "Collection [abc] does not exist."
+    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (False, True, text))
+    monkeypatch.setattr(
+        client_mod, "call_tool_sync", lambda *_a: ({"status": "ok", "state": "indexing"}, None)
+    )
+    cli.main(["--wait", "5", command])
+    err = capsys.readouterr().err
+    assert ".;" not in err
+    assert "reports a doc index error: Collection [abc] does not exist; " in err

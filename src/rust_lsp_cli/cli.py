@@ -397,14 +397,14 @@ def main(argv: list[str] | None = None) -> int:
             # the wait lets it through instead of stopping it.
             print(
                 f"rust-lsp: the daemon at {base_url} reports a doc index error: "
-                f"{doc_error}; running refresh to rebuild it.",
+                f"{doc_error.rstrip().removesuffix('.')}; running refresh to rebuild it.",
                 file=sys.stderr,
             )
         elif not ready:
             if doc_error is not None:
                 print(
                     f"rust-lsp: the daemon at {base_url} reports a doc index error: "
-                    f"{doc_error}; run rust-lsp refresh to rebuild it.",
+                    f"{doc_error.rstrip().removesuffix('.')}; run rust-lsp refresh to rebuild it.",
                     file=sys.stderr,
                 )
                 return EXIT_NOT_READY
