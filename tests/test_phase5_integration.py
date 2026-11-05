@@ -14,6 +14,7 @@ Marked ``@pytest.mark.integration`` — runs only as the local QA gate, never in
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import chromadb
@@ -36,7 +37,7 @@ def _real_settings(tmp_chroma: pathlib.Path) -> Settings:
     """
     return Settings(
         chroma_path=str(tmp_chroma),
-        project_root="/workspaces/ripgrep",
+        project_root=os.environ.get("RLM_PROJECT_ROOT", "/workspaces/ripgrep"),
         doc_glob_patterns="**/*.md",
     )
 
@@ -62,7 +63,8 @@ class TestPhase5Integration:
         store = DocStore(settings)
         store.rebuild()
 
-        model_cache = pathlib.Path("/home/vscode/.cache/chroma/onnx_models/all-MiniLM-L6-v2")
+        # chromadb derives its model cache from Path.home() (Dockerfile lines 71-75).
+        model_cache = pathlib.Path.home() / ".cache/chroma/onnx_models/all-MiniLM-L6-v2"
         assert model_cache.exists(), (
             f"Expected model cache at {model_cache} — "
             "model may not have downloaded or bind mount is missing"

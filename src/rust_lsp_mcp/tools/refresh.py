@@ -116,7 +116,10 @@ async def refresh() -> dict[str, Any]:
           collection and swaps it in on success, so ``search_docs`` keeps
           answering from the old index meanwhile and ``doc_index_state`` stays
           ``"ready"`` (it reads ``"building"`` only for a first build on an
-          empty store).  Only files whose content changed are re-embedded.
+          empty store).  Unchanged files keep their stored embeddings; a
+          changed or renamed file is re-embedded, and every file is
+          re-embedded when there is no complete live index for this project
+          or the chunker version or the embedding model changed.
           ``status``'s ``doc_index_progress`` reports the rebuild's progress.
         - **No queued rebuilds**: while a doc build or rebuild is already
           running (from startup or an earlier ``refresh``), no second one is

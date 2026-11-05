@@ -7,13 +7,13 @@ tags: [guide, tier-a, daemon, operations]
 timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: scripts/rlm-connect
-    commit: fee58df70db4be0c751eaf28663cf36ec5df7878
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_cli/bridge.py
-    commit: fee58df70db4be0c751eaf28663cf36ec5df7878
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/server.py
-    commit: fee58df70db4be0c751eaf28663cf36ec5df7878
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: docker-compose.yml
-    commit: fee58df70db4be0c751eaf28663cf36ec5df7878
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 cite:
   - scripts/rlm-connect:BRIDGE_ARGV
   - src/rust_lsp_cli/bridge.py:DEFAULT_LISTENER_TIMEOUT_SECONDS
@@ -27,8 +27,7 @@ cite:
 `rlm-connect` runs one long-lived `rust-lsp-mcp` daemon per project folder and
 connects every IDE window on that folder to it over stdio. rust-analyzer's cold
 start and the documentation embed happen once per daemon, not once per window,
-and the daemon is the only process that writes the project's volume
-([KI-13](../impl/known-issues.md)).
+and the daemon is the only process that writes the project's volume.
 
 How it fits together:
 
@@ -118,9 +117,14 @@ up in your shell instead of as a silent IDE hang.
      index was built; `doc_stale: true` means the same for the doc index. Run
      step 5.
 
-   On the ripgrep sample, the first start on a fresh volume reached this
-   envelope in about 55 seconds, most of it spent embedding the docs. A restart
-   that reuses the volume took about 5 seconds.
+   On the ripgrep sample, the first start on a fresh, primed volume reached
+   this envelope in about a minute, most of it spent embedding the docs. A
+   restart that reuses the volume took about 5 seconds. A first start on an
+   unprimed volume under `--network none` (the `rlm-connect` default) takes
+   about 10 minutes to reach `state: "ready"` and ends with a non-ok
+   `analyzer_health`, so `--wait 600` can expire first; its exit `2` then
+   means the daemon is still indexing. Stopping the daemon (`docker rm -f rlm-<ID>`), priming
+   the volume with step 2 and starting it again with step 3 is faster.
 
 5. **Refresh after a branch switch.** Run
    `docker exec rlm-528c33294931 /app/.venv/bin/rust-lsp refresh`. It returns at
@@ -156,8 +160,14 @@ up in your shell instead of as a silent IDE hang.
 
 Indexing and `refresh` always run inside the daemon, triggered through the
 `rust-lsp` CLI (steps 4 and 5) or an MCP tool call. No offline ingest command
-exists: a second process writing the project's volume next to the daemon is
-the cross-process hazard in [KI-13](../impl/known-issues.md).
+exists, so under `rlm-connect` the daemon is the only process that writes the
+project's volume. A second server started by hand on the same volume with the
+same `RLM_PROJECT_ID` (`rlm-connect` sets `RLM_PROJECT_ID=<ID>`) takes turns
+with the daemon on the doc-store lock, which covers the store's construction,
+the adopt check and every rebuild. Its doc search picks up the daemon's
+rebuilt index on its next call ([KI-13](../impl/known-issues.md), resolved).
+With another `RLM_PROJECT_ID`, or none, it builds and serves a separate
+collection on the volume.
 
 ## How a daemon ends
 
@@ -167,8 +177,9 @@ the cross-process hazard in [KI-13](../impl/known-issues.md).
   holds the timeout off. Only HTTP requests count as activity: indexing does
   not, so set the value above the daemon's cold start, or the daemon exits
   before `ready` on every start. On the ripgrep sample the cold start takes
-  about 55 seconds on a primed volume and about 10 minutes on an unprimed
-  volume under `--network none` (the `rlm-connect` default).
+  about a minute on a primed volume, and a first start on an unprimed
+  volume under `--network none` (the `rlm-connect` default) takes about 10
+  minutes to reach `state: "ready"` and ends with a non-ok `analyzer_health`.
   The next `rlm-connect` starts the stopped container again.
 - **`docker stop rlm-<ID>`** on a daemon that has reached `ready` stops it in
   about a second (0.8 to 0.9 seconds measured with podman on the ripgrep
@@ -267,4 +278,4 @@ build scripts need a live network.
 
 - [CLI reference](cli.md) — `rust-lsp` subcommands, `--wait`, and `mcp-bridge`.
 - [Configuration](configuration.md) — `RLM_IDLE_TIMEOUT_SECONDS` and the other settings.
-- [Known issues](../impl/known-issues.md) — KI-13 (one writer per volume) and KI-14 (`refresh` blast radius).
+- [Known issues](../impl/known-issues.md) — KI-13 (resolved: processes sharing a volume take turns on the doc-store lock) and KI-14 (`refresh` blast radius).

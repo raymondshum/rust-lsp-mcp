@@ -4,12 +4,12 @@ type: Guide
 title: Configuration reference
 description: Every rust-lsp-mcp setting -- environment variable, default, and precedence -- plus the CLI-only RLM_CLI_URL override.
 tags: [guide, tier-a, configuration]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/settings.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: env.sample
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -59,7 +59,7 @@ library.
 | `RLM_DOC_EXCLUDE_PATTERNS` | `**/CHANGELOG.md` | Which files to exclude even if they matched the include patterns above. The default leaves out `CHANGELOG.md`, whose long list of version-by-version change notes would otherwise crowd out more useful documentation in search results. |
 | `RLM_TRANSPORT` | `stdio` | How the server talks to its client. `stdio` (default) is the normal MCP-client mode: one process per session, communicating over standard input/output. `streamable-http` starts the server as a long-lived daemon instead, for the `rust-lsp` CLI to connect to (see [CLI reference](cli.md)) — used by `docker-compose.yml`, not by the default `docker run -i` MCP path. |
 | `RLM_HTTP_PORT` | `8000` | TCP port the daemon listens on when `RLM_TRANSPORT=streamable-http`. Ignored in `stdio` mode. The listener always binds to `127.0.0.1` — this is hard-coded, not configurable, and is never published outside the container (see the [CLI reference](cli.md) and the README security note). Range-validated (1–65535) at startup. |
-| `RLM_IDLE_TIMEOUT_SECONDS` | `3600` | Idle timeout of the daemon, in seconds (setting `idle_timeout_seconds`). In `streamable-http` mode the daemon exits with code `0` when no request has arrived for this long and none is in progress; `0` disables it. Only HTTP requests count as activity: indexing does not, so the value must exceed the daemon's cold start, or the daemon exits before `ready` on every start. On the ripgrep sample the cold start takes about 55 seconds on a primed volume and about 10 minutes on an unprimed volume under `--network none` (the `rlm-connect` default). Ignored in `stdio` mode. Set in the environment that runs `rlm-connect`, it reaches the daemon only when `rlm-connect` creates the container (see the [daemon runbook](daemon.md#how-a-daemon-ends)). |
+| `RLM_IDLE_TIMEOUT_SECONDS` | `3600` | Idle timeout of the daemon, in seconds (setting `idle_timeout_seconds`). In `streamable-http` mode the daemon exits with code `0` when no request has arrived for this long and none is in progress; `0` disables it. Only HTTP requests count as activity: indexing does not, so the value must exceed the daemon's cold start, or the daemon exits before `ready` on every start. On the ripgrep sample the cold start takes about a minute on a primed volume, and a first start on an unprimed volume under `--network none` (the `rlm-connect` default) takes about 10 minutes to reach `state: "ready"` and ends with a non-ok `analyzer_health`. Ignored in `stdio` mode. Set in the environment that runs `rlm-connect`, it reaches the daemon only when `rlm-connect` creates the container (see the [daemon runbook](daemon.md#how-a-daemon-ends)). |
 
 ---
 

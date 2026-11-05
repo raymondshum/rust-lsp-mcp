@@ -4,14 +4,14 @@ type: Guide
 title: Administrative & Diagnostic Tools
 description: Detailed reference for status, refresh, and validate_file_path tools.
 tags: [guide, tier-a, tools, admin]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 ---
 
 [← Back to Tool Reference](../tools.md) · [Documentation index](../index.md)
@@ -68,7 +68,7 @@ Restarts the language server process and rebuilds the documentation index in the
 
 > **Blast radius warning**: `refresh` resets the shared language server. Concurrent navigation requests return `not_ready` until re-indexing completes. `search_docs` keeps answering from the old doc index during the doc rebuild. Avoid calling `refresh` during active query workflows unless the index is stale or in an `"error"` state.
 
-The doc rebuild writes a staging collection and swaps it in on success, so the old index is served meanwhile and a failed rebuild loses nothing. Only Markdown files whose content changed are re-embedded. Follow it through `status`'s `doc_index_progress`.
+The doc rebuild writes a staging collection and swaps it in on success, so the old index is served meanwhile and a failed rebuild loses nothing. Unchanged Markdown files keep their stored embeddings; a changed or renamed file is re-embedded, and every file is re-embedded when there is no complete live index for this project or the chunker version or the embedding model changed. Follow it through `status`'s `doc_index_progress`.
 
 ### Inputs
 None.

@@ -4,12 +4,12 @@ type: Guide
 title: CLI reference (rust-lsp)
 description: Command-line client reference for rust-lsp -- subcommands, exit codes, and --wait semantics for agents without MCP tool access.
 tags: [guide, tier-a, cli]
-timestamp: 2026-07-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 source_pins:
   - path: src/rust_lsp_cli/cli.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
   - path: src/rust_lsp_cli/client.py
-    commit: b13c90f6e0dd0301198e3f2c324d956a4a14d74a
+    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
 cite:
   - src/rust_lsp_cli/cli.py:EXIT_NOT_READY
 ---
@@ -228,7 +228,7 @@ reached, the bridge answers the pending request with a JSON-RPC error (code
 `-32000`) on stdout, prints a hint on stderr, and carries on with the next
 message. It exits `0` when stdin closes. It imports nothing from the server
 package and opens no database, so it never acts as a second writer on the
-project volume ([KI-13](../impl/known-issues.md)).
+project volume.
 
 ## Daemon logs
 

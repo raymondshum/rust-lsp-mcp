@@ -28,6 +28,8 @@ Coverage:
 """
 
 import math
+import os
+import pathlib
 
 import pytest
 
@@ -1366,8 +1368,12 @@ class TestRealTokenizerGate:
     Skip gracefully if the ``tokenizers`` package or the model cache is absent.
     """
 
-    _TOKENIZER_PATH = "/home/vscode/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/tokenizer.json"
-    _RIPGREP_ROOT = "/workspaces/ripgrep"
+    # chromadb caches the model under Path.home(); the project root comes from
+    # RLM_PROJECT_ROOT, as scripts/clone-ripgrep.sh reads it.
+    _TOKENIZER_PATH = str(
+        pathlib.Path.home() / ".cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/tokenizer.json"
+    )
+    _RIPGREP_ROOT = os.environ.get("RLM_PROJECT_ROOT", "/workspaces/ripgrep")
     _WINDOW = 256  # MiniLM token budget (including [CLS] and [SEP] → effective 254 content)
 
     @staticmethod
