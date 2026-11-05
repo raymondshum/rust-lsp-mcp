@@ -15,12 +15,14 @@ from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, get_preflight_warnings, mcp
 from rust_lsp_mcp.doc_store import (
+    DOC_STATE_BUILDING,
+    DOC_STATE_ERROR,
     DOC_STATE_READY,
     doc_index_chunk_count,
     doc_index_progress,
-    doc_store_freshness,
+    doc_rebuild_in_progress,
     doc_store_state,
-    doc_store_unreadable,
+    doc_store_status_fields,
 )
 from rust_lsp_mcp.envelope import ok
 from rust_lsp_mcp.settings import get_settings
@@ -120,8 +122,13 @@ async def status() -> dict[str, Any]:
                            ``state`` above — see ``search_docs``).  Stays
                            ``"ready"`` during a rebuild over an existing
                            index (``search_docs`` keeps answering from the
-                           old index); ``"building"`` only for the first
-                           build on an empty store.
+                           old index); ``"building"`` for the first build
+                           on an empty store, and for an errored index
+                           while a ``refresh`` rebuild of it is in flight
+                           (``doc_index_error`` then reads ``null``).  Read
+                           again after the doc fields, so a reply whose
+                           chunk-count read found the collection deleted by
+                           another process reports ``"error"``.
     - ``doc_index_error`` — diagnostic message when ``doc_index_state ==
                            "error"``; also set with ``doc_index_state ==
                            "ready"`` when the last rebuild failed and the old
@@ -231,15 +238,30 @@ async def status() -> dict[str, Any]:
     # identical pattern).
     current_commit: str | None = await asyncio.to_thread(_git_head, repo_root)
     doc_chunk_count: int | None = await asyncio.to_thread(doc_index_chunk_count)
-    # SW-04: the doc freshness check runs a git call and a stat walk over the
-    # doc files — same DS-19 worker-thread offload.
-    doc_indexed_commit, doc_stale = await asyncio.to_thread(doc_store_freshness)
-    # Backlog line 63: the unreadable-file count stamped on the ready index.
-    doc_unreadable_files: int | None = await asyncio.to_thread(doc_store_unreadable)
+    # SW-04 / backlog line 63: doc_indexed_commit, doc_stale and
+    # doc_unreadable_files come from one snapshot of one ready collection
+    # (a metadata read and a stat walk over the doc files, no git call) —
+    # same DS-19 worker-thread offload.
+    doc_fields = await asyncio.to_thread(doc_store_status_fields)
+    doc_indexed_commit, doc_stale, doc_unreadable_files = doc_fields
+    # Re-read the doc state after the doc awaits (and before reconcile_head,
+    # which stays the last await): the chunk-count read can itself move the
+    # store from "ready" to "error" (a collection another process deleted,
+    # KI-13), and that reply must say so.
+    doc_state_now, doc_err_now = doc_store_state()
+    if doc_state == DOC_STATE_READY and doc_state_now != DOC_STATE_READY:
+        doc_state, doc_err = doc_state_now, doc_err_now
+    # An errored index whose refresh rebuild is in flight (for example a
+    # re-init waiting on another process's doc-store lock) reads "building",
+    # so a client polling for ready keeps waiting instead of acting on the
+    # error the rebuild is about to replace.
+    if doc_state == DOC_STATE_ERROR and doc_rebuild_in_progress():
+        doc_state, doc_err = DOC_STATE_BUILDING, None
     # Backlog line 50: the doc fields read after the awaits belong to the
-    # doc_state snapshotted above; a store that was not ready then reports
-    # null for all three, so one reply never pairs "building" with values.
+    # doc_state reported; a store that is not ready reports null for all of
+    # them, so one reply never pairs "building" or "error" with values.
     if doc_state != DOC_STATE_READY:
+        doc_chunk_count = None
         doc_indexed_commit = None
         doc_stale = None
         doc_unreadable_files = None

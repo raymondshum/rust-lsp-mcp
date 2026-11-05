@@ -680,6 +680,11 @@ class DocStore:
                     collection = self._recover_collection_locked()
                 except DocStoreNotReady:
                     return None
+                except Exception:
+                    # An OSError from the flock probe (mkdir, open, flock):
+                    # this accessor never raises (status calls it on every poll).
+                    _log.warning("doc_store: collection recovery failed", exc_info=True)
+                    return None
         try:
             return collection.count()
         except Exception:
@@ -1174,6 +1179,11 @@ class DocStore:
 
         Raises:
             DocStoreNotReady: no collection can be served now.
+            OSError: the flock probe failed (creating ``chroma_path``,
+                opening or locking the lock file); the state is unchanged.
+                ``chunk_count()`` reports ``None``; ``search()`` lets it
+                propagate, and ``search_docs`` maps it to its ``error``
+                envelope.
         """
         collection = self._open_live_complete()
         if collection is not None:
@@ -1432,20 +1442,43 @@ def doc_store_freshness() -> tuple[str | None, bool | None]:
     the event loop.  Never raises; an unexpected failure reads as
     ``(None, None)``.
     """
+    indexed_commit, stale, _unreadable = doc_store_status_fields()
+    return indexed_commit, stale
+
+
+def doc_store_status_fields() -> tuple[str | None, bool | None, int | None]:
+    """Return ``(doc_indexed_commit, doc_stale, doc_unreadable_files)`` from one snapshot.
+
+    All three come from one read of one ready collection's metadata, so a
+    swap during the digest walk cannot pair one collection's commit and
+    staleness with another's unreadable count.  ``doc_indexed_commit`` and
+    ``doc_stale`` are as in :func:`doc_store_freshness` and
+    ``doc_unreadable_files`` as in :func:`doc_store_unreadable`.
+    ``(None, None, None)`` when there is no ready store or the read fails.
+    Synchronous (the digest walk); async callers run it on a worker thread.
+    Never raises.
+    """
     snapshot = _ready_collection()
     if snapshot is None:
-        return None, None
+        return None, None, None
     store, collection = snapshot
     try:
-        meta = collection.metadata or {}
-        stamped_commit = meta.get("indexed_commit")
-        stamped_digest = meta.get("doc_digest")
+        meta = dict(collection.metadata or {})
         current_digest = doc_store_digest(store._settings)
     except Exception:
         _log.debug("doc_store: freshness check failed", exc_info=True)
-        return None, None
+        return None, None, None
+    stamped_commit = meta.get("indexed_commit")
     indexed_commit = stamped_commit if isinstance(stamped_commit, str) else None
-    return indexed_commit, stamped_digest != current_digest
+    return indexed_commit, meta.get("doc_digest") != current_digest, _unreadable_stamp(meta)
+
+
+def _unreadable_stamp(meta: dict[str, Any]) -> int | None:
+    """Return the integer ``unreadable_files`` stamp in *meta*, or ``None``."""
+    value = meta.get("unreadable_files")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def doc_store_unreadable() -> int | None:
@@ -1463,13 +1496,11 @@ def doc_store_unreadable() -> int | None:
         return None
     _store, collection = snapshot
     try:
-        value = (collection.metadata or {}).get("unreadable_files")
+        meta = dict(collection.metadata or {})
     except Exception:
         _log.debug("doc_store: unreadable-files read failed", exc_info=True)
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value
+    return _unreadable_stamp(meta)
 
 
 def _try_adopt(

@@ -48,7 +48,7 @@ Always returns `status: "ok"` with a health envelope:
 | `indexing_started_at` | string \| null | ISO 8601 UTC time the current indexing run began (reset by `refresh`). |
 | `analyzer_progress` | string \| null | Latest rust-analyzer progress title and message; `"<title> done"` (for example `"Indexing done"`) after that work ends. |
 | `analyzer_progress_at` | string \| null | ISO 8601 UTC time of the latest progress report. |
-| `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. Stays `"ready"` during a rebuild over an existing index (the old index keeps answering); `"building"` only for the first build on an empty store. |
+| `doc_index_state` | string | `"building"`, `"ready"`, or `"error"`. Stays `"ready"` during a rebuild over an existing index (the old index keeps answering); `"building"` for the first build on an empty store, and for an errored index while a `refresh` rebuild of it is in flight (`doc_index_error` then reads `null`). |
 | `doc_index_error` | string \| null | Error message if the documentation index build failed; also set with `doc_index_state` `"ready"` when the last rebuild failed and the old index is still served. |
 | `doc_index_progress` | object \| null | Progress of a running doc index rebuild: `files_total`, `files_done`, `started_at` (ISO 8601 UTC) and `phase` (`"starting"` while it waits for its locks, then `"scanning"`, `"embedding"` and `"swapping"`). `null` when no rebuild is running. |
 | `doc_index_chunk_count` | integer \| null | Total stored document chunks (`0` indicates unmounted or empty doc path). |

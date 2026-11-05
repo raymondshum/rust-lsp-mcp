@@ -2748,3 +2748,44 @@ class TestCollectionDeletedByAnotherProcess:
             "intro.md",
             "guide.md",
         }
+
+
+class TestRecoveryFailureNeverEscapes:
+    """T02 rework R1: an OSError inside the deleted-collection recovery (the
+    flock probe's mkdir, open or flock) never escapes chunk_count() or status,
+    and search_docs maps it to its error envelope."""
+
+    def _deleted(self, tmp_path: pathlib.Path) -> DocStore:
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        store = init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        _run_peer(settings.chroma_path, doc_collection_name(settings), "delete")
+        return store
+
+    def test_chunk_count_none_and_status_ok_when_lock_open_fails(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        import errno
+
+        from tests.test_status import _call_status
+
+        store = self._deleted(tmp_path)
+        emfile = OSError(errno.EMFILE, "Too many open files")
+        with patch("rust_lsp_mcp.doc_store.os.open", side_effect=emfile):
+            assert store.chunk_count() is None
+            result = _call_status(None, subprocess_raises=OSError("no git"))
+        assert result["status"] == "ok"
+        assert result["doc_index_chunk_count"] is None
+
+    def test_search_docs_error_envelope_when_lock_open_fails(self, tmp_path: pathlib.Path) -> None:
+        import errno
+
+        import rust_lsp_mcp.tools.search_docs as search_mod
+
+        self._deleted(tmp_path)
+        emfile = OSError(errno.EMFILE, "Too many open files")
+        with patch("rust_lsp_mcp.doc_store.os.open", side_effect=emfile):
+            envelope = asyncio.run(search_mod.search_docs(query="intro"))
+        assert envelope["status"] == "error"
+        assert "Too many open files" in envelope["message"]

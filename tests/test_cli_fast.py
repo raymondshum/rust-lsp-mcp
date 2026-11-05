@@ -712,3 +712,57 @@ class TestWaitFiniteGuard:
     def test_wait_finite_still_accepted(self) -> None:
         args = cli.build_parser().parse_args(["--wait", "180", "status"])
         assert args.wait == 180.0
+
+
+# ---------------------------------------------------------------------------
+# T02 rework round 1 (R2, R6): --wait against the real status tool, and the
+# printed doc-error line.
+# ---------------------------------------------------------------------------
+
+
+def test_wait_flag_exits_2_when_first_status_reply_flips_to_doc_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Any
+) -> None:
+    """R2: the first status reply is the one whose chunk-count read moved the
+    doc store to "error" (the deleted-collection recovery); --wait must stop
+    on it with exit 2, not report the stale "ready" snapshot and exit 0."""
+    from rust_lsp_mcp.analyzer import STATE_READY
+    from tests.test_status import _make_manager, status_reply_with_flip
+
+    manager = _make_manager(STATE_READY)
+    replies: list[dict[str, Any]] = []
+
+    def _status_check(_url: str) -> tuple[dict[str, Any] | None, Exception | None]:
+        reply = status_reply_with_flip(tmp_path / f"r{len(replies)}", manager)
+        replies.append(reply)
+        return reply, None
+
+    real_wait = client_mod.wait_for_ready
+    monkeypatch.setattr(
+        client_mod,
+        "wait_for_ready",
+        lambda url, secs: real_wait(url, secs, status_check=_status_check, sleep=lambda _s: None),
+    )
+    monkeypatch.setattr(
+        client_mod, "call_tool_sync", lambda *_a: ({"status": "ok", "state": "ready"}, None)
+    )
+    code = cli.main(["--wait", "5", "status"])
+    assert code == 2
+    assert len(replies) == 1
+    assert "reports a doc index error" in capsys.readouterr().err
+
+
+def test_wait_flag_deleted_collection_error_says_refresh_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R6: an error text that already ends in "call refresh" is printed with
+    one refresh instruction, not two."""
+    text = "the doc index collection was deleted by another process on this volume; call refresh"
+    monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (False, True, text))
+    code = cli.main(["--wait", "5", "status"])
+    assert code == 2
+    url = cli.default_base_url()
+    assert capsys.readouterr().err == (
+        f"rust-lsp: the daemon at {url} reports a doc index error: the doc index collection"
+        " was deleted by another process on this volume; run rust-lsp refresh to rebuild it.\n"
+    )
