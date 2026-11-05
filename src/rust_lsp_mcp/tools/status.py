@@ -154,7 +154,8 @@ async def status() -> dict[str, Any]:
                            same bytes (a switch to a branch that edits it
                            and back); ``false`` when none was, including
                            after a branch switch or commit that does not
-                           rewrite a covered doc file; ``null`` when
+                           add, remove or rewrite a covered doc file;
+                           ``null`` when
                            ``doc_index_state != "ready"``.  No running server
                            rebuilds the doc index on its own: ``doc_stale``
                            stays ``true`` until the next ``refresh`` or

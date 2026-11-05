@@ -164,9 +164,10 @@ Check this list at these lifecycle checkpoints (see
 
 ### KI-11 — Out-of-workspace navigation degrades to a misleading `not_found`
 - **Where:** [src/rust_lsp_mcp/core.py](../../src/rust_lsp_mcp/core.py)
-  `location_to_external` (line 438) · [src/rust_lsp_mcp/tools/goto_definition.py](../../src/rust_lsp_mcp/tools/goto_definition.py)
-  (the `mapped is None` skip at line 146, falling through to the same
-  `not_found` at line 153 as a genuine zero-result answer; lines at b4036f5).
+  `location_to_external` · [src/rust_lsp_mcp/tools/goto_definition.py](../../src/rust_lsp_mcp/tools/goto_definition.py)
+  `goto_definition` (the `mapped is None` skip, falling through to the
+  all-skipped branch, which returned the same `not_found` as a genuine
+  zero-result answer).
 - **What:** `location_to_external` drops std/dependency locations (they resolve
   outside `repo_root`), so `goto_definition` on e.g. `Vec` silently skips the
   location and reports "No definition found" — the identical message it uses

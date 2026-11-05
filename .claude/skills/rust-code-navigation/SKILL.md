@@ -151,9 +151,9 @@ project's source changed underneath it); don't call it speculatively or to
   index, and its only input is the doc files: it reads `true` when a Markdown
   file the index covers was added, removed, or changed in size or
   modification time since the build. A branch switch or commit that does not
-  rewrite a covered doc file keeps it `false`; a checkout that rewrites a
-  covered file with the same bytes (a switch to a branch that edits it and
-  back) reads `true` until `refresh` or a restart. A non-zero
+  add, remove or rewrite a covered doc file keeps it `false`; a checkout that
+  rewrites a covered file with the same bytes (a switch to a branch that
+  edits it and back) reads `true` until `refresh` or a restart. A non-zero
   `doc_unreadable_files` means that many matched doc files could not be read
   and are missing from the index.
 - **After a commit or a branch switch,** poll `status` until `stale` is
