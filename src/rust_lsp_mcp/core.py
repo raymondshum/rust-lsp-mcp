@@ -17,6 +17,8 @@ The ``rust_lsp_mcp.tools`` package auto-imports all submodules, so each new tool
 file self-registers with zero edits to a central registry.
 """
 
+import asyncio
+import contextlib
 import importlib.metadata
 import logging
 import os
@@ -144,28 +146,53 @@ async def _lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:  # type: ign
     # so this runs before anything else and cannot itself raise (see
     # _compute_preflight_warnings's docstring).
     _preflight_warnings = _compute_preflight_warnings(get_settings())
-    async with analyzer_lifespan(app) as ctx:
-        _manager = ctx["manager"]
-        try:
-            # Doc-store init runs after the analyzer context is up.  The heavy
-            # (embedding) part is offloaded to a background task by
-            # init_doc_store_background — the lifespan yields immediately
-            # rather than blocking server startup on the doc-index build.
-            # init_doc_store_background never raises, but the try/except is
-            # kept as defense-in-depth (log-and-swallow) so a bug there can
-            # never take down the analyzer/nav tools.
+    doc_store_stop: asyncio.Future[None] | None = None
+    try:
+        async with analyzer_lifespan(app) as ctx:
+            _manager = ctx["manager"]
             try:
-                await init_doc_store_background(get_settings())
-            except Exception:
-                _log.exception(
-                    "doc_store: init failed — search_docs will be unavailable; "
-                    "analyzer/nav tools continue normally"
-                )
-            yield ctx
-        finally:
-            _manager = None
-            _preflight_warnings = []
-            clear_doc_store()
+                # Doc-store init runs after the analyzer context is up.  The heavy
+                # (embedding) part is offloaded to a background task by
+                # init_doc_store_background — the lifespan yields immediately
+                # rather than blocking server startup on the doc-index build.
+                # init_doc_store_background never raises, but the try/except is
+                # kept as defense-in-depth (log-and-swallow) so a bug there can
+                # never take down the analyzer/nav tools.
+                try:
+                    await init_doc_store_background(get_settings())
+                except Exception:
+                    _log.exception(
+                        "doc_store: init failed — search_docs will be unavailable; "
+                        "analyzer/nav tools continue normally"
+                    )
+                yield ctx
+            finally:
+                _manager = None
+                _preflight_warnings = []
+                # Backlog line 87: clear_doc_store waits up to 10 s for a
+                # rebuild to stop, and analyzer_lifespan's exit then waits up
+                # to 10 s for the analyzer to drain.  Run in series, the two
+                # outlast a container's stop timeout during a cold start, so
+                # the doc-store wait starts on a worker thread here and runs
+                # beside the analyzer shutdown.
+                doc_store_stop = asyncio.get_running_loop().run_in_executor(None, clear_doc_store)
+                doc_store_stop.add_done_callback(_log_doc_store_stop_error)
+    finally:
+        if doc_store_stop is not None:
+            # shield: a cancelled teardown leaves the thread's future running
+            # to completion (the done callback still logs its error) instead of
+            # cancelling it.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(doc_store_stop)
+
+
+def _log_doc_store_stop_error(future: asyncio.Future[None]) -> None:
+    """Log an exception raised by ``clear_doc_store`` on its shutdown worker thread."""
+    if future.cancelled():
+        return
+    exc = future.exception()
+    if exc is not None:
+        _log.error("doc_store: shutdown wait failed", exc_info=exc)
 
 
 # ---------------------------------------------------------------------------

@@ -1927,9 +1927,10 @@ def clear_doc_store() -> None:
     between embedding batches and deletes its staging collection, so the live
     collection survives.  A rebuild still running after 10 seconds is logged
     at warning and left to
-    finish on its daemon thread.  The wait blocks the caller (the lifespan's
-    ``finally``) for at most 10 seconds, which is acceptable because the
-    lifespan is ending.
+    finish on its daemon thread.  The lifespan's ``finally`` runs this on a
+    worker thread while the analyzer shuts down, so the wait of at most 10
+    seconds overlaps the analyzer drain instead of preceding it, and the
+    lifespan ends when both have finished.
     """
     global _doc_store, _init_error, _build_task, _rebuild_thread, _shutdown_generation
     with _running_lock:

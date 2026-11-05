@@ -226,6 +226,14 @@ def test_compose_base_service_runs_under_init() -> None:
     assert "init: true" in block, "docker-compose.yml rust-lsp-mcp service lacks `init: true`"
 
 
+def test_compose_base_service_has_15s_stop_grace_period() -> None:
+    """Backlog line 87: a stop early in a cold start needs more than the 10 s default."""
+    block = [line.strip() for line in _compose_service_block("rust-lsp-mcp")]
+    assert "stop_grace_period: 15s" in block, (
+        "docker-compose.yml rust-lsp-mcp service lacks `stop_grace_period: 15s`"
+    )
+
+
 def test_compose_no_service_disables_init() -> None:
     assert "init: false" not in _compose_text()
 
