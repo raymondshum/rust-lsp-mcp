@@ -705,6 +705,40 @@ class TestRefreshAfterUndetectedDeath:
         assert not any("had already exited" in m for m in messages)
 
 
+class TestMultilspyShutdownFlag:
+    def test_received_shutdown_is_set_by_the_shutdown_reply_before_exit(self) -> None:
+        """``_exit_server_context`` reads multilspy's private
+        ``LanguageServerHandler._received_shutdown`` (through ``getattr``,
+        default False) to tell a healthy exit from a death under the
+        ``shutdown`` request.  A rename in a multilspy upgrade would send every
+        healthy restart down the cancel path, so pin the attribute on a real
+        handler (built without starting a process): it starts False, and
+        ``shutdown()`` sets it once the request's reply returns and before the
+        ``exit`` notification goes out."""
+        from multilspy.lsp_protocol_handler.server import (
+            LanguageServerHandler,
+            ProcessLaunchInfo,
+        )
+
+        handler = LanguageServerHandler(ProcessLaunchInfo(cmd="true"))
+        assert handler.process is None
+        assert handler._received_shutdown is False
+        flag_at_exit: list[bool] = []
+
+        async def _reply() -> None:
+            assert handler._received_shutdown is False
+            return None
+
+        def _exit() -> None:
+            flag_at_exit.append(handler._received_shutdown)
+
+        handler.send.shutdown = _reply  # ty: ignore[invalid-assignment]
+        handler.notify.exit = _exit  # ty: ignore[invalid-assignment]
+        asyncio.run(handler.shutdown())
+        assert handler._received_shutdown is True
+        assert flag_at_exit == [True]
+
+
 class TestExitDetection:
     def test_process_exit_is_seen_while_a_child_still_holds_stderr(self) -> None:
         """R-gate break 3: rust-analyzer's proc-macro-srv child inherits its

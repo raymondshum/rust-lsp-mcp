@@ -167,14 +167,24 @@ the cross-process hazard in [KI-13](../impl/known-issues.md).
   holds the timeout off. Only HTTP requests count as activity: indexing does
   not, so set the value above the daemon's cold start, or the daemon exits
   before `ready` on every start. On the ripgrep sample the cold start takes
-  about 55 seconds on a primed volume and about 10 minutes on an unprimed one.
+  about 55 seconds on a primed volume and about 10 minutes on an unprimed
+  volume under `--network none` (the `rlm-connect` default).
   The next `rlm-connect` starts the stopped container again.
-- **`docker stop rlm-<ID>`** stops it in about a second (0.8 to 0.9 seconds
-  measured with podman on the ripgrep sample, with and without an attached
-  `rlm-connect` window). The container then reports exit code `143`
-  (terminated by SIGTERM), not `0`, and an attached window's bridge ends.
-  `docker rm rlm-<ID>` also removes the container; the volume, with its cargo
-  cache and doc index, stays.
+- **`docker stop rlm-<ID>`** on a daemon that has reached `ready` stops it in
+  about a second (0.8 to 0.9 seconds measured with podman on the ripgrep
+  sample, with and without an attached `rlm-connect` window). The container
+  then reports exit code `143` (terminated by SIGTERM), not `0`, and an
+  attached window's bridge ends. A stop during the cold index or a re-index
+  takes several seconds, because the daemon first cancels the doc index build
+  and then tears down the analyzer: about 3 to 3.5 seconds during a re-index
+  after `refresh`, and about 5 to 5.6 seconds 7 to 10 seconds into a cold
+  start. In the first seconds of a cold start a stop can take longer than
+  docker's 10-second default timeout. The engine then kills the container
+  (podman logs `resorting to SIGKILL`) and it reports exit code `137`, as
+  measured 2 seconds into a cold start (10.3 seconds). `docker stop -t 15
+  rlm-<ID>` avoids that: the same stop finished in 10.25 seconds with exit
+  code `143`. `docker rm rlm-<ID>` also removes the container; the volume,
+  with its cargo cache and doc index, stays.
 
 `RLM_IDLE_TIMEOUT_SECONDS` set in the environment that runs `rlm-connect`
 reaches the daemon only when `rlm-connect` creates the container. Starting a
