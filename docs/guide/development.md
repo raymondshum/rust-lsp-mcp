@@ -168,16 +168,16 @@ docker build -t rust-lsp-mcp .
 ```bash
 docker run -i --rm --init \
   -v /abs/path/to/your/rust/project:/project:ro \
-  -e RLM_PROJECT_ID=<project-name> \
-  -v rlm-<project-name>-data:/data \
+  -e RLM_PROJECT_ID=ripgrep \
+  -v rlm-ripgrep-data:/data \
   rust-lsp-mcp
 ```
 
 - `-i` — keeps stdin open so the MCP client communicates over stdio; `--rm` removes the container on exit.
 - `--init` — runs a minimal init as PID 1, which reaps rust-analyzer's child processes and passes `docker stop` on to the server.
 - `-v /abs/path/to/your/rust/project:/project:ro` — bind-mounts your Rust project read-only at `/project`.
-- `-e RLM_PROJECT_ID=<project-name>` — names the project for the documentation index. Replace `<project-name>` with a short name, such as `ripgrep`. Without it the server derives a name from the project path, its git remote and its root package name.
-- `-v rlm-<project-name>-data:/data` — persists the Chroma vector store, cargo registry, and build cache across runs, in a volume named after the project. Give each project its own volume.
+- `-e RLM_PROJECT_ID=ripgrep` — names the project for the documentation index. Replace `ripgrep` with a short name for your project. Without it the server derives a name from the project path, its git remote and its root package name.
+- `-v rlm-ripgrep-data:/data` — persists the Chroma vector store, cargo registry, and build cache across runs, in a volume named after the project (`rlm-<your project name>-data`). Give each project its own volume.
 
 > **SELinux note:** On SELinux-enforcing hosts (such as rootless Podman), append `,z` to the bind mount: `-v /abs/path/to/your/project:/project:ro,z`. Use lowercase `z` for shared access.
 

@@ -122,9 +122,10 @@ by decorating functions with `@mcp.tool()`.
 **Lifespan wiring.** The `_lifespan` async context manager is passed to
 `FastMCP` at construction. When the server boots it calls `analyzer_lifespan`
 (from `analyzer.py`) to start rust-analyzer in the background, then calls
-`init_doc_store` to build the documentation index. If the doc store fails,
-the error is logged and swallowed — navigation tools continue to work normally.
-On shutdown both are cleaned up in reverse order.
+`init_doc_store_background`, which schedules the doc store's lock wait, adopt
+check and any build on a worker thread and returns at once. If the doc store
+fails, the error is logged and swallowed — navigation tools continue to work
+normally. On shutdown both are cleaned up in reverse order.
 
 **The readiness gate.** `require_ready()` is a single check that every
 navigation tool calls before doing anything. If rust-analyzer's background run
@@ -410,8 +411,12 @@ digest equals the current one; when the git call fails, the digest alone
 decides), and it carries the `build_complete` sentinel. Otherwise `rebuild()`
 runs under the same flock.
 
-**`rebuild()`** builds into a staging collection named `<live name>_staging`
-while the old index keeps answering searches. It selects the Markdown files
+**`rebuild()`** builds into a staging collection named `<live name>_staging`.
+On a store that has already published a collection (a `refresh` on a running
+server), that collection keeps answering searches until the swap. A rebuild at
+startup, after the adopt check refused the on-disk collection, serves nothing
+until the swap, though it still copies unchanged files from that collection.
+It selects the Markdown files
 matching `doc_glob_patterns` (minus any matching `doc_exclude_patterns`), copies
 the chunks and embeddings of each file whose path and SHA-256 match the live
 collection, and chunks and embeds the rest with `chunk_markdown`. It then swaps
@@ -421,10 +426,11 @@ The sentinel is the key to safe adoption: a collection without it was killed
 mid-build and is rebuilt rather than adopted. A `rebuild()` that `refresh`
 calls on a running store takes the same flock.
 
-**Readiness flag.** `is_ready` is `False` during the first build on an empty
-store and `True` once a collection with the sentinel is published; a rebuild
-over an existing index keeps it `True`, because the old collection answers
-until the swap. The `search_docs` tool gates on this flag, so a caller never
+**Readiness flag.** `is_ready` is `False` until the store publishes its first
+collection, by adopt or by build. That covers a first start, and any start or
+`refresh` re-initialisation whose adopt check fails, even when an older
+collection is on disk. After that, a rebuild keeps it `True`, because the
+published collection answers until the swap. The `search_docs` tool gates on this flag, so a caller never
 receives a partial or misleading result during a build.
 
 **`search(query, n_results=5)`** queries the collection and returns up to
@@ -437,7 +443,8 @@ into a single response (see `docs/audit/2026-07-02-usability-review.md`,
 UR-12).
 
 **Module-level singleton.** The live `DocStore` is held in a module-level
-variable, set by `init_doc_store` and cleared by `clear_doc_store` on shutdown.
+variable, set by `_prepare_store` (which both `init_doc_store` and
+`init_doc_store_background` run) and cleared by `clear_doc_store` on shutdown.
 Tools call `get_doc_store()` to retrieve it.
 
 ---

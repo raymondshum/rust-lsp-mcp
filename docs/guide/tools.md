@@ -628,8 +628,8 @@ The rebuild writes a staging collection and swaps it in when it succeeds, so
 `search_docs` serves the old index meanwhile. Unchanged Markdown files keep
 their stored embeddings; a changed or renamed file is re-embedded, and every
 file is re-embedded when there is no complete live index for this project or
-the chunker version or the embedding model changed. Follow the rebuild through `status`'s
-`doc_index_progress`.
+the chunker version or the embedding model changed. Follow the rebuild
+through `status`'s `doc_index_progress`.
 
 **Doc-index recovery detail:** if the documentation index was never
 initialised, or is currently in the `"error"` state, the rebuild worker

@@ -118,11 +118,12 @@ up in your shell instead of as a silent IDE hang.
      step 5.
 
    On the ripgrep sample, the first start on a fresh, primed volume reached
-   this envelope in about 55 seconds, most of it spent embedding the docs. A
+   this envelope in about a minute, most of it spent embedding the docs. A
    restart that reuses the volume took about 5 seconds. A first start on an
    unprimed volume under `--network none` (the `rlm-connect` default) takes
    about 10 minutes to reach `state: "ready"` and ends with a non-ok
-   `analyzer_health`. Stopping the daemon (`docker rm -f rlm-<ID>`), priming
+   `analyzer_health`, so `--wait 600` can expire first; its exit `2` then
+   means the daemon is still indexing. Stopping the daemon (`docker rm -f rlm-<ID>`), priming
    the volume with step 2 and starting it again with step 3 is faster.
 
 5. **Refresh after a branch switch.** Run
@@ -159,11 +160,14 @@ up in your shell instead of as a silent IDE hang.
 
 Indexing and `refresh` always run inside the daemon, triggered through the
 `rust-lsp` CLI (steps 4 and 5) or an MCP tool call. No offline ingest command
-exists, so the daemon stays the only process that writes the project's volume.
-A second server started by hand on the same volume takes turns with the daemon
-on the doc-store lock, which covers the store's construction, the adopt check
-and every rebuild, and its doc search picks up the daemon's rebuilt index on
-its next call ([KI-13](../impl/known-issues.md), resolved).
+exists, so under `rlm-connect` the daemon is the only process that writes the
+project's volume. A second server started by hand on the same volume with the
+same `RLM_PROJECT_ID` (`rlm-connect` sets `RLM_PROJECT_ID=<ID>`) takes turns
+with the daemon on the doc-store lock, which covers the store's construction,
+the adopt check and every rebuild. Its doc search picks up the daemon's
+rebuilt index on its next call ([KI-13](../impl/known-issues.md), resolved).
+With another `RLM_PROJECT_ID`, or none, it builds and serves a separate
+collection on the volume.
 
 ## How a daemon ends
 
@@ -173,7 +177,7 @@ its next call ([KI-13](../impl/known-issues.md), resolved).
   holds the timeout off. Only HTTP requests count as activity: indexing does
   not, so set the value above the daemon's cold start, or the daemon exits
   before `ready` on every start. On the ripgrep sample the cold start takes
-  about 55 seconds on a primed volume, and a first start on an unprimed
+  about a minute on a primed volume, and a first start on an unprimed
   volume under `--network none` (the `rlm-connect` default) takes about 10
   minutes to reach `state: "ready"` and ends with a non-ok `analyzer_health`.
   The next `rlm-connect` starts the stopped container again.
