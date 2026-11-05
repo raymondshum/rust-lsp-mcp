@@ -406,6 +406,60 @@ class TestGotoDefinitionNotFound:
         assert result["status"] == STATUS_NOT_FOUND
 
 
+def _outside_location(rel_tail: str) -> dict[str, Any]:
+    """An out-of-workspace location as multilspy builds it: ``..``-prefixed
+    ``relativePath`` and a ``uri`` outside the ``/fake/repo`` root."""
+    return {
+        "relativePath": f"../../usr/local/rustup/toolchains/x/lib/rustlib/src/{rel_tail}",
+        "uri": f"file:///usr/local/rustup/toolchains/x/lib/rustlib/src/{rel_tail}",
+        "range": {
+            "start": {"line": 10, "character": 4},
+            "end": {"line": 10, "character": 7},
+        },
+    }
+
+
+class TestOutOfWorkspaceDefinitions:
+    """Issue #114: an all-outside answer is told apart from a true miss."""
+
+    def test_single_outside_location_names_workspace_boundary(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        loc = _outside_location("alloc/src/vec/mod.rs")
+        result = _run_goto_definition(mgr, "src/main.rs", 3, 9, lsp_result=[loc])
+        assert result["status"] == STATUS_NOT_FOUND
+        assert result["message"] == (
+            "1 definition location(s) for src/main.rs:3:9 resolve outside the "
+            "workspace; only in-workspace definitions are returned (the standard "
+            "library and dependencies are not)."
+        )
+        assert "No definition found" not in result["message"]
+
+    def test_several_outside_locations_report_their_count(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        locs = [
+            _outside_location("alloc/src/vec/mod.rs"),
+            _outside_location("core/src/slice/mod.rs"),
+        ]
+        result = _run_goto_definition(mgr, "src/main.rs", 3, 9, lsp_result=locs)
+        assert result["status"] == STATUS_NOT_FOUND
+        assert result["message"].startswith("2 definition location(s) for src/main.rs:3:9 ")
+        assert "resolve outside the workspace" in result["message"]
+
+    def test_empty_result_keeps_no_definition_message(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        result = _run_goto_definition(mgr, "src/main.rs", 3, 9, lsp_result=[])
+        assert result["status"] == STATUS_NOT_FOUND
+        assert result["message"] == "No definition found at src/main.rs:3:9."
+
+    def test_mixed_inside_and_outside_returns_inside_only(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        inside = _make_location("src/lib.rs", 4, 0)
+        outside = _outside_location("alloc/src/vec/mod.rs")
+        result = _run_goto_definition(mgr, "src/main.rs", 3, 9, lsp_result=[outside, inside])
+        assert result["status"] == STATUS_OK
+        assert result["definitions"] == [{"file": "src/lib.rs", "line": 5, "character": 1}]
+
+
 # ---------------------------------------------------------------------------
 # Error cases
 # ---------------------------------------------------------------------------

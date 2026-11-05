@@ -149,10 +149,13 @@ project's source changed underneath it); don't call it speculatively or to
 - **`status` reports both indexes.** `stale` covers committed code changes
   (the indexed commit against the current `HEAD`); `doc_stale` covers the doc
   index, and its only input is the doc files: it reads `true` when a Markdown
-  file the index covers was added, removed or changed since the build. A
-  branch switch or commit that leaves the doc files byte-identical keeps it
-  `false`. A non-zero `doc_unreadable_files` means that many matched doc
-  files could not be read and are missing from the index.
+  file the index covers was added, removed, or changed in size or
+  modification time since the build. A branch switch or commit that does not
+  add, remove or rewrite a covered doc file keeps it `false`; a checkout that
+  rewrites a covered file with the same bytes (a switch to a branch that
+  edits it and back) reads `true` until `refresh` or a restart. A non-zero
+  `doc_unreadable_files` means that many matched doc files could not be read
+  and are missing from the index.
 - **After a commit or a branch switch,** poll `status` until `stale` is
   `false`. It returns to `false` on the next `status` call once rust-analyzer
   is quiescent, a switch that changes no Rust or Cargo file included. Call
@@ -161,11 +164,13 @@ project's source changed underneath it); don't call it speculatively or to
   rebuilds on its own.** After a Markdown file the index covers was added,
   removed or changed, `doc_stale` reads `true`, in `status` and in the
   `search_docs` reply itself, until the next `refresh` or server restart;
-  call `refresh` when it reads `true` and the answer depends on current docs. During a rebuild over an existing index,
-  `doc_index_state` stays `"ready"`, `search_docs` keeps answering from the
-  old index, and `status`'s `doc_index_progress` shows the rebuild's
-  progress; `doc_index_state` reads `"building"` only for the first build on
-  an empty store.
+  call `refresh` when it reads `true` and the answer depends on current
+  docs. During a rebuild over a ready index, `doc_index_state` stays
+  `"ready"`, `search_docs` keeps answering from the old index, and
+  `status`'s `doc_index_progress` shows the rebuild's progress.
+  `doc_index_state` reads `"building"` for the first build on an empty store
+  and while `refresh` rebuilds an errored or absent doc index; `search_docs`
+  answers `not_ready` meanwhile.
 
 ## When NOT to use it
 - **Not a Rust project** → the server can't help; use normal search.

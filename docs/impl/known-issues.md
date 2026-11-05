@@ -49,26 +49,6 @@ Check this list at these lifecycle checkpoints (see
   as [#113](https://github.com/raymondshum/rust-lsp-mcp/issues/113).
   Reference: [docs/audit/2026-07-02-usability-review.md](../audit/2026-07-02-usability-review.md) UR-17.
 
-### KI-11 — Out-of-workspace navigation degrades to a misleading `not_found`
-- **Where:** [src/rust_lsp_mcp/core.py](../../src/rust_lsp_mcp/core.py)
-  `location_to_external` (~line 364) · [src/rust_lsp_mcp/tools/goto_definition.py](../../src/rust_lsp_mcp/tools/goto_definition.py)
-  (the `mapped is None` skip at line 143, falling through to the same
-  `not_found` at line 150 as a genuine zero-result answer).
-- **What:** `location_to_external` drops std/dependency locations (they resolve
-  outside `repo_root`), so `goto_definition` on e.g. `Vec` silently skips the
-  location and reports "No definition found" — the identical message it uses
-  when there really is no definition — teaching agents the symbol doesn't
-  exist. `find_symbol`'s Batch-A message (PR #108) now explains the workspace
-  boundary for that tool, but `goto_definition`'s `not_found` path does not.
-- **Why it matters:** An agent asking "where is `Vec` defined?" gets a
-  false-negative indistinguishable from "you misspelled this / it doesn't
-  exist," which is worse than an honest "outside workspace" answer and can
-  send the agent down an unproductive debugging path.
-- **Status:** open. Tracked as
-  [#114](https://github.com/raymondshum/rust-lsp-mcp/issues/114).
-  Reference: docs/audit/2026-07-02-usability-review.md,
-  Cross-cutting findings, completeness critic (CC-2).
-
 ### KI-14 — `refresh` blast radius on a shared daemon
 - **Where:** `refresh` MCP tool ([src/rust_lsp_mcp/tools/refresh.py](../../src/rust_lsp_mcp/tools/refresh.py))
   and the `rust-lsp refresh` CLI subcommand
@@ -181,6 +161,36 @@ Check this list at these lifecycle checkpoints (see
 ---
 
 ## Resolved
+
+### KI-11 — Out-of-workspace navigation degrades to a misleading `not_found`
+- **Where:** [src/rust_lsp_mcp/core.py](../../src/rust_lsp_mcp/core.py)
+  `location_to_external` · [src/rust_lsp_mcp/tools/goto_definition.py](../../src/rust_lsp_mcp/tools/goto_definition.py)
+  `goto_definition` (the `mapped is None` skip, falling through to the
+  all-skipped branch, which returned the same `not_found` as a genuine
+  zero-result answer).
+- **What:** `location_to_external` drops std/dependency locations (they resolve
+  outside `repo_root`), so `goto_definition` on e.g. `Vec` silently skips the
+  location and reports "No definition found" — the identical message it uses
+  when there really is no definition — teaching agents the symbol doesn't
+  exist. `find_symbol`'s Batch-A message (PR #108) now explains the workspace
+  boundary for that tool, but `goto_definition`'s `not_found` path does not.
+- **Why it matters:** An agent asking "where is `Vec` defined?" gets a
+  false-negative indistinguishable from "you misspelled this / it doesn't
+  exist," which is worse than an honest "outside workspace" answer and can
+  send the agent down an unproductive debugging path.
+- **Status:** resolved. Tracked as
+  [#114](https://github.com/raymondshum/rust-lsp-mcp/issues/114).
+  Reference: docs/audit/2026-07-02-usability-review.md,
+  Cross-cutting findings, completeness critic (CC-2).
+- **Resolved:** 2026-11-05 (remediation-3 T02). When rust-analyzer returns
+  definition locations and every one maps to `None` in `location_to_external`,
+  `goto_definition` now returns a `not_found` whose message reads "<n>
+  definition location(s) for <file>:<line>:<character> resolve outside the
+  workspace; only in-workspace definitions are returned (the standard library
+  and dependencies are not)." An empty result keeps "No definition found at
+  <file>:<line>:<character>.", and a mix of inside and outside locations
+  returns `ok` with the inside ones. Regression tests in
+  `tests/test_goto_definition.py` (`TestOutOfWorkspaceDefinitions`).
 
 ### KI-13 — ChromaDB cross-process single-writer hazard on a shared `/data` volume
 - **Where:** [src/rust_lsp_mcp/doc_store.py](../../src/rust_lsp_mcp/doc_store.py)

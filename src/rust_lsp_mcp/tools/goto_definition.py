@@ -71,9 +71,12 @@ async def goto_definition(
       Multiple definitions are a normal multi-site list (e.g. for trait
       methods with multiple impls).  The caller picks the right one.
 
-    - ``not_found`` — the LSP returned no definition for that position.  This
-      is a normal outcome for whitespace, comments, or unknown symbols; it is
-      NOT the same as ``ok``+empty.
+    - ``not_found`` — no in-workspace definition for that position; it is NOT
+      the same as ``ok``+empty.  Two cases, each with its own message: the
+      LSP returned no definition ("No definition found at ..."), a normal
+      outcome for whitespace, comments, or unknown symbols; or every
+      definition it returned lies outside the workspace (the standard library
+      or a dependency), and the message says so and gives their count.
 
     - ``not_ready`` — the analyzer is still indexing; retry after
       ``analyzer_status`` reports ``"ready"``.  Carries
@@ -148,8 +151,13 @@ async def goto_definition(
             continue
         definitions.append(mapped)
 
-    # Step 8: empty list / all-skipped → not_found
+    # Step 8: every returned location was skipped → not_found that names the
+    # workspace boundary, distinct from the no-location answer above (#114).
     if not definitions:
-        return not_found(f"No definition found at {file}:{line}:{character}.")
+        return not_found(
+            f"{len(locs)} definition location(s) for {file}:{line}:{character} resolve "
+            "outside the workspace; only in-workspace definitions are returned (the "
+            "standard library and dependencies are not)."
+        )
 
     return ok(definitions=definitions)

@@ -1497,6 +1497,29 @@ class TestDocStoreFreshnessStamp:
         _bump_file(corpus / "guide.md", "# Guide\n\nEdited after the build.\n")
         assert doc_store_freshness() == ("none", True)
 
+    def test_freshness_true_after_covered_doc_added(self, tmp_path: pathlib.Path) -> None:
+        """The covered path set is part of the digest: a new doc file, with no
+        existing file rewritten, reads stale."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_freshness() == ("none", False)
+
+        (corpus / "added.md").write_text("# Added\n\nA new doc file.\n", encoding="utf-8")
+        assert doc_store_freshness() == ("none", True)
+
+    def test_freshness_true_after_covered_doc_removed(self, tmp_path: pathlib.Path) -> None:
+        """Removing a covered doc file, with no other file rewritten, reads stale."""
+        corpus = tmp_path / "corpus"
+        _write_corpus(corpus)
+        settings = _make_settings(tmp_path, corpus)
+        init_doc_store(settings, embedding_function=FakeEmbeddingFunction())
+        assert doc_store_freshness() == ("none", False)
+
+        (corpus / "guide.md").unlink()
+        assert doc_store_freshness() == ("none", True)
+
     def test_freshness_false_when_head_moves_with_identical_docs(
         self, tmp_path: pathlib.Path
     ) -> None:

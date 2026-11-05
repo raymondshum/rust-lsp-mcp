@@ -93,7 +93,7 @@ Locate where a symbol is defined, given a source location.
 | Status | Payload fields |
 |---|---|
 | `ok` | `definitions`: list of target location objects. |
-| `not_found` | `message`: no definition exists at this location. |
+| `not_found` | `message`: either rust-analyzer returned no definition for the position ("No definition found at ..."), or every definition it returned lies outside the project root, such as in the standard library or a dependency (a message that says so and gives their count). |
 | `not_ready` | `message`, `recovery: "poll_status"` — analyzer indexing. |
 | `error` | `message`, `recovery`: `"fix_input"` (path escape) or `"unknown"`. |
 
