@@ -29,6 +29,7 @@ only).
 """
 
 import contextlib
+import os
 from collections.abc import AsyncIterator
 
 import anyio
@@ -44,7 +45,12 @@ from rust_lsp_mcp.settings import Settings
 # ---------------------------------------------------------------------------
 
 
-def test_transport_defaults_to_stdio() -> None:
+def test_transport_defaults_to_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    # _env_file=None still reads the environment, and a daemon container sets
+    # RLM_TRANSPORT and RLM_HTTP_PORT, so clear every RLM_* variable first.
+    for name in list(os.environ):
+        if name.startswith("RLM_"):
+            monkeypatch.delenv(name, raising=False)
     s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
     assert s.transport == "stdio"
     assert s.http_port == 8000

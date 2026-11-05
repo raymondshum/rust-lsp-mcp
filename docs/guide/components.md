@@ -4,54 +4,54 @@ type: Guide
 title: Components — source code tour
 description: Module-by-module tour of the rust-lsp-mcp server and the rust-lsp CLI client source.
 tags: [guide, tier-b, components]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/core.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/analyzer.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/server.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/envelope.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/positions.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/settings.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/doc_chunking.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/_main.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/__main__.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/__init__.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/diagnostics.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_cli/cli.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_cli/client.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -125,7 +125,9 @@ by decorating functions with `@mcp.tool()`.
 `init_doc_store_background`, which schedules the doc store's lock wait, adopt
 check and any build on a worker thread and returns at once. If the doc store
 fails, the error is logged and swallowed — navigation tools continue to work
-normally. On shutdown both are cleaned up in reverse order.
+normally. On shutdown the doc store's stop (`clear_doc_store`, which waits up
+to 10 seconds for a running rebuild) starts on a worker thread and runs beside
+the analyzer shutdown, and the lifespan ends when both have finished.
 
 **The readiness gate.** `require_ready()` is a single check that every
 navigation tool calls before doing anything. If rust-analyzer's background run
@@ -505,7 +507,8 @@ not_ready, `3` daemon unreachable (`EXIT_OK` / `EXIT_ERROR` /
 until the daemon reports both `state == "ready"` and
 `doc_index_state == "ready"`, riding through daemon boot
 (connection-refused → not_ready → ready); a `doc_index_state` of `"error"`
-ends the wait at once.
+ends the wait at once: `--wait SECS refresh` then runs the refresh, because
+`refresh` is the recovery, and every other command exits `2`.
 
 **`client.py`** is the streamable-HTTP MCP client half: `call_tool_sync` opens
 one connection per call, calls a tool, and parses the envelope from

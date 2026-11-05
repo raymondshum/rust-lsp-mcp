@@ -9,6 +9,7 @@ Covers:
 Run in CI (pytest -m "not integration"); no external services.
 """
 
+import os
 import pathlib
 import warnings
 
@@ -46,19 +47,31 @@ def test_project_root_wins_over_alias_without_warning(monkeypatch: pytest.Monkey
     assert s.project_root == "/tmp/new"
 
 
-def test_doc_collection_default_and_override() -> None:
+def test_doc_collection_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """doc_collection defaults to the repo-agnostic name and is overridable."""
+    # _env_file=None still reads the environment, and the product image bakes
+    # RLM_* variables (RLM_DOC_COLLECTION among them), so clear them all first.
+    for name in list(os.environ):
+        if name.startswith("RLM_"):
+            monkeypatch.delenv(name, raising=False)
     s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
     assert s.doc_collection == "project_docs"
     assert Settings(doc_collection="custom", _env_file=None).doc_collection == "custom"  # ty: ignore[unknown-argument]
 
 
-def test_stale_dotenv_key_is_ignored(tmp_path: pathlib.Path) -> None:
+def test_stale_dotenv_key_is_ignored(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A removed setting left in a .env file must not crash startup (extra=ignore).
 
     Regression: removing RLM_CHROMA_MODEL_CACHE made an existing .env containing it
     raise extra_forbidden. extra="ignore" must let the rest of the config load.
     """
+    # The environment outranks the .env file, and the product image bakes
+    # RLM_* variables (RLM_PROJECT_ROOT among them), so clear them all first.
+    for name in list(os.environ):
+        if name.startswith("RLM_"):
+            monkeypatch.delenv(name, raising=False)
     env = tmp_path / ".env"
     env.write_text("RLM_PROJECT_ROOT=/tmp/x\nRLM_CHROMA_MODEL_CACHE=/old/no/longer/a/setting\n")
     s = Settings(_env_file=str(env))  # ty: ignore[unknown-argument]

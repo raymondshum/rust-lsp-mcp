@@ -5,6 +5,9 @@ They confirm the package is importable and the settings layer initialises cleanl
 """
 
 import importlib
+import os
+
+import pytest
 
 
 def test_package_importable() -> None:
@@ -20,11 +23,15 @@ def test_main_callable() -> None:
     assert callable(main)
 
 
-def test_settings_defaults() -> None:
+def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Settings must initialise from code defaults with no .env present."""
     from rust_lsp_mcp.settings import Settings
 
-    # Instantiate with no env_file to avoid picking up any local .env.
+    # _env_file=None skips any local .env but still reads the environment, and
+    # the product image bakes RLM_* variables, so clear them all first.
+    for name in list(os.environ):
+        if name.startswith("RLM_"):
+            monkeypatch.delenv(name, raising=False)
     s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
     assert s.project_root == "/workspaces/ripgrep"
     assert s.rust_analyzer_bin == "/usr/local/cargo/bin/rust-analyzer"

@@ -4,18 +4,18 @@ type: Guide
 title: Code Navigation Tools
 description: Detailed reference for find_symbol, goto_definition, find_references, hover, and document_symbols.
 tags: [guide, tier-a, tools, navigation]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 ---
 
 [← Back to Tool Reference](../tools.md) · [Documentation index](../index.md)

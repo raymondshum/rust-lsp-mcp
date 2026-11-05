@@ -5,13 +5,13 @@
 # SUPERSEDED: this file used to keep the container alive with `sleep infinity`
 # and have an MCP client `docker exec -i … /app/.venv/bin/rust-lsp-mcp` into it
 # as a stdio "warm-start" — a second stdio *server* process re-using the same
-# rust-analyzer/Chroma state across sessions. That story is gone. Post-flip,
-# repeating it is actively dangerous: this compose file's entrypoint already
-# runs one long-lived server against the shared `/data` Chroma store, and a
-# second stdio server opened via `docker exec` against the SAME store is an
-# unguarded cross-process SQLite writer — silent index corruption risk (see
-# docs/impl/known-issues.md KI-13). **Exactly one server process per Chroma
-# path, always.**
+# rust-analyzer/Chroma state across sessions. That story is gone: this compose
+# file's entrypoint already runs one long-lived server against the `/data`
+# Chroma store. A second server on the same volume takes turns with the
+# first on the doc-store lock, which
+# covers the store's construction, the adopt check and every rebuild, and a
+# `refresh` in one rebuilds the index the other serves (KI-13, resolved; see
+# docs/impl/known-issues.md).
 #
 # What replaces it:
 #   - MCP clients (Claude Desktop, etc.) — UNCHANGED. Keep using the default,
@@ -52,9 +52,10 @@
 #     `--wait` (see docs/guide/cli.md) must come BEFORE the subcommand.
 #
 #     (Name the service explicitly — a bare `up -d` would ALSO start the
-#     `rust-lsp-mcp-isolated` variant below, giving you two servers on one
-#     volume, the same double-writer hazard as above. `podman compose` /
-#     `podman exec` work identically.)
+#     `rust-lsp-mcp-isolated` variant below, giving you two servers sharing
+#     one volume: they take turns on the doc-store lock, and a `refresh` in
+#     either rebuilds the index both serve. `podman compose` / `podman exec`
+#     work identically.)
 #
 # NEVER add a `ports:` mapping to either service below. The daemon's HTTP
 # listener is intentionally loopback-only (127.0.0.1, hard-coded, not
@@ -128,10 +129,10 @@ volumes:
     # `<project>_rlm-data`, and priming the default volume would warm a DIFFERENT
     # cache than the isolated service reads — shipping degraded offline analysis.
     #
-    # Both services above point at this SAME volume/Chroma path. Per KI-13's
-    # single-writer mandate, run at most ONE of them (or any other server
-    # process against this volume) at a time; use a differently-named volume
-    # (RLM_DATA_VOLUME) if you genuinely need two servers live concurrently.
+    # Both services above point at this SAME volume/Chroma path. Servers on
+    # one volume take turns on the doc-store lock (KI-13, resolved), and a
+    # `refresh` in one rebuilds the index the other serves; give each project
+    # its own volume (RLM_DATA_VOLUME).
     # The default stays rust-lsp-mcp-data so the prime-cache.sh default keeps
     # warming the volume this file mounts.
     name: "${RLM_DATA_VOLUME:-rust-lsp-mcp-data}"

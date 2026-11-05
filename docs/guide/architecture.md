@@ -4,22 +4,22 @@ type: Guide
 title: Architecture
 description: How rust-lsp-mcp's server, analyzer, and doc-search pieces fit together and why.
 tags: [guide, tier-b, architecture]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/server.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/core.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/analyzer.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/doc_chunking.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/envelope.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/positions.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 cite:
   - src/rust_lsp_mcp/positions.py:external_to_lsp
 ---
@@ -191,12 +191,12 @@ and the store logic in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py).
 
 ## 7. Refreshing the index
 
-> **Blast radius**: `refresh` restarts the single shared analyzer. All tools return `not_ready` to all clients until re-indexing completes. Avoid calling `refresh` mid-task unless the index is stale or failed.
+> **Blast radius**: `refresh` restarts the single shared analyzer. The navigation tools (`goto_definition`, `find_references`, `hover`, `find_symbol`, `document_symbols`) and `probe` return `not_ready` to all clients until re-indexing completes. Avoid calling `refresh` mid-task unless the index is stale or failed.
 
 The `refresh` tool executes two recovery steps:
 
 1. **Restarts rust-analyzer**: The server sets state to `"indexing"` before shutting down the old instance. This prevents race conditions where callers observe `"ready"` during shutdown. The restart runs in the background. Callers should poll `status` until it returns `"ready"`.
-2. **Rebuilds documentation search**: The server rebuilds the ChromaDB documentation index synchronously. If the index never initialized or is in an `"error"` state, `refresh` executes the full startup sequence.
+2. **Rebuilds documentation search**: `refresh` starts the ChromaDB documentation index rebuild on a background thread and returns at once. The rebuild writes a staging collection and swaps it in on success, so over a ready index the old index answers `search_docs` until the swap. If the index never initialized or is in an `"error"` state, `refresh` re-initialises it: `status` reports `doc_index_state: "building"`, and `search_docs` answers `not_ready` until the re-initialised index is ready.
 
 `refresh` preserves rust-analyzer's on-disk cache. Re-indexing is significantly faster than a cold start because the analyzer reuses prior build artifacts.
 

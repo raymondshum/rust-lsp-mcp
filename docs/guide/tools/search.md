@@ -4,12 +4,12 @@ type: Guide
 title: Documentation Search Tool
 description: Detailed reference for search_docs semantic search over project Markdown files.
 tags: [guide, tier-a, tools, search]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: 72b605385dc5f3568be456b5fd18e685ceb1d20b
+    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
 ---
 
 [← Back to Tool Reference](../tools.md) · [Documentation index](../index.md)
@@ -47,13 +47,14 @@ Empty or whitespace-only queries return `error` with `recovery: "fix_input"`. Ou
 ### Match Object
 ```json
 {
-  "content": "Full Markdown passage text...",
+  "text": "Markdown passage body...",
   "breadcrumb": "GUIDE.md > Configuration > Persistence",
   "file": "docs/guide/configuration.md",
   "distance": 0.284
 }
 ```
 
+- `text`: The chunk body, with the breadcrumb prefix stripped (`""` for a heading with no body).
 - `distance`: Cosine distance score (`0.0` represents identical meaning).
 - `breadcrumb`: Hierarchical heading trail locating the passage in the source document.
 - `file`: Path to the source Markdown document relative to project root.
