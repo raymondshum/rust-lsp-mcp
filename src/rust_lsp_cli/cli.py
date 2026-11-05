@@ -324,20 +324,6 @@ def _exit_code_for_envelope(envelope: dict[str, Any]) -> int:
     return EXIT_ERROR
 
 
-def _strip_refresh_hint(doc_error: str) -> str:
-    """Drop a trailing "call refresh" from *doc_error* (and its separator).
-
-    The ``--wait`` diagnostic adds its own "run rust-lsp refresh" instruction,
-    and some server messages already end in "call refresh", so the printed
-    line names refresh once.
-    """
-    text = doc_error.rstrip().rstrip(".")
-    hint = "call refresh"
-    if text.lower().endswith(hint):
-        text = text[: -len(hint)].rstrip().rstrip(";,.").rstrip()
-    return text or doc_error
-
-
 def _client_version() -> str | None:
     import importlib.metadata
 
@@ -406,11 +392,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.wait is not None:
         ready, ever_connected, doc_error = client.wait_for_ready(base_url, args.wait)
-        if not ready:
+        if not ready and doc_error is not None and args.command == "refresh":
+            # Backlog line 110: refresh is the recovery from a doc error, so
+            # the wait lets it through instead of stopping it.
+            print(
+                f"rust-lsp: the daemon at {base_url} reports a doc index error: "
+                f"{doc_error}; running refresh to rebuild it.",
+                file=sys.stderr,
+            )
+        elif not ready:
             if doc_error is not None:
                 print(
                     f"rust-lsp: the daemon at {base_url} reports a doc index error: "
-                    f"{_strip_refresh_hint(doc_error)}; run rust-lsp refresh to rebuild it.",
+                    f"{doc_error}; run rust-lsp refresh to rebuild it.",
                     file=sys.stderr,
                 )
                 return EXIT_NOT_READY

@@ -755,14 +755,80 @@ def test_wait_flag_exits_2_when_first_status_reply_flips_to_doc_error(
 def test_wait_flag_deleted_collection_error_says_refresh_once(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """R6: an error text that already ends in "call refresh" is printed with
-    one refresh instruction, not two."""
-    text = "the doc index collection was deleted by another process on this volume; call refresh"
+    """R6, backlog lines 114, 119 and 122: the deleted-collection error text
+    names no refresh of its own, so the printed line names refresh once and
+    keeps the text unchanged."""
+    from rust_lsp_mcp.doc_store import _DELETED_COLLECTION_ERROR
+
+    text = _DELETED_COLLECTION_ERROR
+    assert text == "the doc index collection was deleted by another process on this volume"
     monkeypatch.setattr(client_mod, "wait_for_ready", lambda *a, **k: (False, True, text))
     code = cli.main(["--wait", "5", "status"])
     assert code == 2
     url = cli.default_base_url()
-    assert capsys.readouterr().err == (
+    err = capsys.readouterr().err
+    assert err == (
         f"rust-lsp: the daemon at {url} reports a doc index error: the doc index collection"
         " was deleted by another process on this volume; run rust-lsp refresh to rebuild it.\n"
     )
+    assert err.count("refresh") == 1
+
+
+def test_wait_flag_doc_error_runs_refresh(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Backlog line 110: ``--wait N refresh`` on a daemon with a doc error
+    runs the refresh (the recovery) instead of stopping, and exits with the
+    refresh envelope's code."""
+    monkeypatch.setattr(
+        client_mod, "wait_for_ready", lambda *a, **k: (False, True, _DOC_ERROR_TEXT)
+    )
+    calls: list[str] = []
+
+    def _call(_url: str, name: str, _args: dict[str, Any]) -> tuple[dict[str, Any], None]:
+        calls.append(name)
+        return {"status": "ok", "state": "indexing", "doc_index_state": "building"}, None
+
+    monkeypatch.setattr(client_mod, "call_tool_sync", _call)
+    code = cli.main(["--wait", "5", "refresh"])
+    assert calls == ["refresh"]
+    assert code == 0
+    captured = capsys.readouterr()
+    url = cli.default_base_url()
+    assert captured.err == (
+        f"rust-lsp: the daemon at {url} reports a doc index error: {_DOC_ERROR_TEXT}; "
+        "running refresh to rebuild it.\n"
+    )
+    assert json.loads(captured.out)["status"] == "ok"
+
+
+def test_wait_flag_doc_error_refresh_returns_envelope_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresh run past a doc error exits with its own envelope's code."""
+    monkeypatch.setattr(
+        client_mod, "wait_for_ready", lambda *a, **k: (False, True, _DOC_ERROR_TEXT)
+    )
+    monkeypatch.setattr(
+        client_mod,
+        "call_tool_sync",
+        lambda *_a: ({"status": "error", "message": "x", "recovery": "unknown"}, None),
+    )
+    assert cli.main(["--wait", "5", "refresh"]) == 1
+
+
+def test_wait_flag_doc_error_still_stops_other_commands(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Backlog line 110: every command but refresh keeps the doc-error stop."""
+    monkeypatch.setattr(
+        client_mod, "wait_for_ready", lambda *a, **k: (False, True, _DOC_ERROR_TEXT)
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        client_mod, "call_tool_sync", lambda _u, name, _a: (calls.append(name), None)[1]
+    )
+    for argv in (["--wait", "5", "status"], ["--wait", "5", "search-docs", "x"]):
+        assert cli.main(argv) == 2
+    assert calls == []
+    assert "run rust-lsp refresh to rebuild it." in capsys.readouterr().err

@@ -28,7 +28,7 @@ import pathlib
 import threading
 import time
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import chromadb
 import numpy as np
@@ -38,6 +38,7 @@ from chromadb.config import Settings as ChromaSettings
 import rust_lsp_mcp.doc_store as doc_store_mod
 from rust_lsp_mcp.doc_store import (
     DOC_STATE_BUILDING,
+    DOC_STATE_ERROR,
     DOC_STATE_READY,
     DocStore,
     DocStoreNotReady,
@@ -2698,7 +2699,7 @@ class TestCollectionDeletedByAnotherProcess:
         assert doc_store_mod._DELETED_COLLECTION_ERROR in envelope["message"]
         assert store.state == "error"
         assert store.error_message == (
-            "the doc index collection was deleted by another process on this volume; call refresh"
+            "the doc index collection was deleted by another process on this volume"
         )
         assert store._collection is None
         assert doc_store_state() == ("error", store.error_message)
@@ -2789,3 +2790,61 @@ class TestRecoveryFailureNeverEscapes:
             envelope = asyncio.run(search_mod.search_docs(query="intro"))
         assert envelope["status"] == "error"
         assert "Too many open files" in envelope["message"]
+
+
+class TestReportedDocState:
+    """Backlog line 117: reported_doc_state() masks an errored store with a
+    rebuild in flight as ("building", None) and passes every other pair."""
+
+    def test_errored_store_with_rebuild_reads_building(self) -> None:
+        store = MagicMock()
+        store.state_snapshot.return_value = (DOC_STATE_ERROR, "RuntimeError: boom")
+        release = threading.Event()
+
+        def _held() -> None:
+            release.wait(30)
+
+        with patch.object(doc_store_mod, "_doc_store", store):
+            assert doc_store_mod.start_doc_rebuild(_held) is True
+            try:
+                assert doc_store_mod.reported_doc_state() == (DOC_STATE_BUILDING, None)
+                assert doc_store_mod.reported_doc_state(
+                    (DOC_STATE_ERROR, "RuntimeError: boom")
+                ) == (DOC_STATE_BUILDING, None)
+                assert doc_store_state() == (DOC_STATE_ERROR, "RuntimeError: boom")
+            finally:
+                release.set()
+                thread = doc_store_mod._rebuild_thread
+                if thread is not None:
+                    thread.join(timeout=30)
+            assert doc_store_mod.reported_doc_state() == (
+                DOC_STATE_ERROR,
+                "RuntimeError: boom",
+            )
+
+    @pytest.mark.parametrize(
+        "pair",
+        [
+            (DOC_STATE_READY, None),
+            (DOC_STATE_READY, "rebuild failed"),
+            (DOC_STATE_BUILDING, None),
+            (DOC_STATE_ERROR, "RuntimeError: boom"),
+        ],
+    )
+    def test_unmasked_without_rebuild(self, pair: tuple[str, str | None]) -> None:
+        store = MagicMock()
+        store.state_snapshot.return_value = pair
+        with (
+            patch.object(doc_store_mod, "_doc_store", store),
+            patch.object(doc_store_mod, "doc_rebuild_in_progress", return_value=False),
+        ):
+            assert doc_store_mod.reported_doc_state() == pair
+            assert doc_store_mod.reported_doc_state(pair) == pair
+
+    @pytest.mark.parametrize(
+        "pair",
+        [(DOC_STATE_READY, None), (DOC_STATE_READY, "rebuild failed"), (DOC_STATE_BUILDING, None)],
+    )
+    def test_non_error_unmasked_with_rebuild(self, pair: tuple[str, str | None]) -> None:
+        with patch.object(doc_store_mod, "doc_rebuild_in_progress", return_value=True):
+            assert doc_store_mod.reported_doc_state(pair) == pair

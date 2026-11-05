@@ -13,6 +13,7 @@ from rust_lsp_mcp.core import mcp
 from rust_lsp_mcp.doc_store import (
     DOC_STATE_ERROR,
     DocStoreNotReady,
+    doc_rebuild_in_progress,
     doc_store_freshness,
     doc_store_state,
     get_doc_store,
@@ -44,16 +45,24 @@ DOC_INDEXING_RETRY_MESSAGE = (
 MAX_DOC_RESULTS = 50
 
 
-def _errored_build_envelope(reason: str | None) -> dict[str, Any]:
-    """Return the ``error`` envelope for a permanently-failed doc-index build.
+def _errored_store_envelope(reason: str | None) -> dict[str, Any]:
+    """Return the reply for an errored doc store: ``not_ready`` or ``error``.
 
-    Shared by the fast-path ``state == DOC_STATE_ERROR`` check and the
-    ``DocStoreNotReady`` handler's re-check (so a store that transitions to
-    ERROR mid-search is labelled ``error``, not a misleading ``not_ready``),
-    keeping the message string single-sourced.
+    While a rebuild is in flight (a ``refresh`` re-initialising the errored
+    index), the reply is ``not_ready``, matching the ``"building"`` state
+    ``status`` and ``refresh`` report (backlog line 117).  Otherwise it is
+    the ``error`` envelope, whose message names no cause because *reason*
+    carries it (a failed build or initialisation, or a collection another
+    process deleted) and names refresh once.  Shared by the fast-path
+    ``state == DOC_STATE_ERROR`` check and the ``DocStoreNotReady``
+    handler's re-check (so a store that transitions to ERROR mid-search is
+    labelled ``error``, not a misleading ``not_ready``).  Call from the event
+    loop, as :func:`doc_rebuild_in_progress` requires.
     """
+    if doc_rebuild_in_progress():
+        return not_ready(DOC_INDEXING_RETRY_MESSAGE)
     return error(
-        "The documentation index failed to build and is unavailable: "
+        "The documentation index is unavailable: "
         f"{reason or 'unknown error'}. Run the refresh tool to rebuild it.",
         recovery=RECOVERY_REFRESH,
     )
@@ -91,7 +100,8 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
       ``null`` when unknown (same value as ``status.doc_stale``).
 
     - ``not_ready`` — the doc index is absent or is currently being built
-      (``doc_index_state == "building"``, see ``status``).  This is a
+      (``doc_index_state == "building"``, see ``status``), including while a
+      ``refresh`` re-initialises an errored index.  This is a
       *transient* state.  The caller **must not** interpret this as "no
       matching docs"; the store may be mid-build.  Retry after ``status``
       reports ``doc_index_state == "ready"``, or after ``refresh`` returns.
@@ -100,8 +110,9 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
     - ``error`` — (a) ``query`` is empty or whitespace-only (rejected before
       any readiness check or search, mirroring the position tools'
       input-validation style; carries ``recovery: "fix_input"``), (b) the doc
-      index failed to build or initialise (``doc_index_state == "error"``) —
-      this is a *permanent* condition until ``refresh`` rebuilds it, unlike
+      index is unavailable (``doc_index_state == "error"``) because its build
+      or initialisation failed or another process on the volume deleted its
+      collection — this is a *permanent* condition until ``refresh`` rebuilds it, unlike
       the transient ``not_ready`` case above (carries ``recovery:
       "refresh"``) — or (c) an unexpected exception from the search layer
       itself (carries ``recovery: "unknown"``).  Either way the message
@@ -140,9 +151,11 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
     # ``!= DOC_STATE_ERROR``, so such fakes correctly fall through to the
     # is_ready check below rather than being misread as errored.
     if store is not None and getattr(store, "state", None) == DOC_STATE_ERROR:
-        return _errored_build_envelope(store.error_message)
+        return _errored_store_envelope(store.error_message)
     if store is None:
         doc_state, doc_err = doc_store_state()
+        if doc_state == DOC_STATE_ERROR and doc_rebuild_in_progress():
+            return not_ready(DOC_INDEXING_RETRY_MESSAGE)
         if doc_state == DOC_STATE_ERROR:
             return error(
                 "The documentation index failed to initialise and is unavailable: "
@@ -166,7 +179,7 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
         # state now and surface the same permanent error the fast-path uses,
         # rather than briefly mislabelling a now-errored store as not_ready.
         if getattr(store, "state", None) == DOC_STATE_ERROR:
-            return _errored_build_envelope(store.error_message)
+            return _errored_store_envelope(store.error_message)
         return not_ready(DOC_INDEXING_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("search_docs: store.search raised for query %r", query)

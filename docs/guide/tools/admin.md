@@ -74,7 +74,7 @@ The doc rebuild writes a staging collection and swaps it in on success, so the o
 None.
 
 ### Returns
-- `ok`: `state` (`"indexing"`: the analyzer restart has begun; poll `status` until `state` is `"ready"`), `doc_index_state` as it stands at return (`"ready"` while the old index is served), `doc_rebuild_started` (`true` when this call started the doc rebuild; `false` when a doc build or rebuild was already running, in which case none is queued), `doc_index_progress` (the running rebuild's progress or `null`) and `message`.
+- `ok`: `state` (`"indexing"`: the analyzer restart has begun; poll `status` until `state` is `"ready"`), `doc_index_state` as it stands at return (`"ready"` while the old index is served; `"building"` when `refresh` re-initialises an errored or absent index), `doc_rebuild_started` (`true` when this call started the doc rebuild; `false` when a doc build or rebuild was already running, in which case none is queued), `doc_index_progress` (the running rebuild's progress or `null`) and `message`, which follows `doc_index_state`: when it reads `"building"`, the message says `search_docs` answers `not_ready` until `status` reports `doc_index_state` `"ready"`.
 - `error`: the analyzer is not running (`recovery: "unknown"`), or the doc rebuild thread could not start (`recovery: "refresh"`; the analyzer restart is already under way). A doc rebuild that fails later is reported by `status` in `doc_index_error`, not by `refresh`.
 
 ---

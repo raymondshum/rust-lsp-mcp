@@ -13,13 +13,14 @@ from mcp.types import ToolAnnotations
 
 from rust_lsp_mcp.core import get_manager, mcp
 from rust_lsp_mcp.doc_store import (
+    DOC_STATE_BUILDING,
     DOC_STATE_ERROR,
     DocRebuildCancelled,
     current_shutdown_generation,
     doc_index_progress,
-    doc_store_state,
     get_doc_store,
     init_doc_store,
+    reported_doc_state,
     start_doc_rebuild,
 )
 from rust_lsp_mcp.envelope import RECOVERY_REFRESH, error, ok
@@ -113,10 +114,13 @@ async def refresh() -> dict[str, Any]:
         - **Non-blocking (doc index)**: starts the doc index rebuild on a
           background thread and returns once that thread has started, with
           ``doc_rebuild_started: true``.  The rebuild writes a staging
-          collection and swaps it in on success, so ``search_docs`` keeps
-          answering from the old index meanwhile and ``doc_index_state`` stays
-          ``"ready"`` (it reads ``"building"`` only for a first build on an
-          empty store).  Unchanged files keep their stored embeddings; a
+          collection and swaps it in on success, so over a ready index
+          ``search_docs`` keeps answering from the old index meanwhile and
+          ``doc_index_state`` stays ``"ready"``.  Over an errored or absent
+          index there is no old index to answer from: ``doc_index_state``
+          reads ``"building"`` (as for a first build on an empty store) and
+          ``search_docs`` returns ``not_ready`` until the re-init finishes.
+          Unchanged files keep their stored embeddings; a
           changed or renamed file is re-embedded, and every file is
           re-embedded when there is no complete live index for this project
           or the chunker version or the embedding model changed.
@@ -154,9 +158,13 @@ async def refresh() -> dict[str, Any]:
     Returns:
         ``ok`` envelope with ``state`` (the analyzer state snapshotted right
         after ``restart()``, normally ``"indexing"``), ``doc_index_state``
-        (as it stands at return), ``doc_rebuild_started``,
-        ``doc_index_progress`` (the running rebuild's progress or ``null``)
-        and a polling hint ``message``; an ``error`` envelope if the analyzer
+        (as it stands at return, masked as ``status`` reports it:
+        ``"building"`` while a rebuild re-initialises an errored or absent
+        index, ``"ready"`` while a rebuild runs over a ready one),
+        ``doc_rebuild_started``, ``doc_index_progress`` (the running
+        rebuild's progress or ``null``) and a polling hint ``message`` that
+        follows ``doc_index_state`` (it names ``not_ready`` when the state is
+        ``"building"``); an ``error`` envelope if the analyzer
         manager is not running (default ``recovery: "unknown"``, a rare
         startup-ordering case), or, with ``recovery: "refresh"``, if the doc
         rebuild thread could not be started (the analyzer re-index is
@@ -195,25 +203,45 @@ async def refresh() -> dict[str, Any]:
             recovery=RECOVERY_REFRESH,
         )
 
-    doc_state, _doc_err = doc_store_state()
-    if started:
-        message = (
-            "Re-index started; poll status until state is 'ready'. The doc index "
-            "rebuilds in the background (status.doc_index_progress); search_docs "
-            "keeps answering from the old index meanwhile."
-        )
-    else:
-        message = (
-            "Re-index started; poll status until state is 'ready'. A doc index "
-            "rebuild was already running, so no new one was started "
-            "(status.doc_index_progress)."
-        )
+    doc_state, _doc_err = reported_doc_state()
+    message = _reply_message(doc_state, started)
     return ok(
         state=refresh_state,
         doc_index_state=doc_state,
         doc_rebuild_started=started,
         doc_index_progress=doc_index_progress(),
         message=message,
+    )
+
+
+def _reply_message(doc_state: str, started: bool) -> str:
+    """Return the ``refresh`` reply's polling hint for *doc_state* (line 115).
+
+    Only a ready index has an old index that ``search_docs`` answers from
+    while the rebuild runs; a building index answers ``not_ready`` and an
+    errored one an ``error`` envelope.
+    """
+    opening = "Re-index started; poll status until state is 'ready'."
+    if doc_state == DOC_STATE_BUILDING:
+        return (
+            f"{opening} The doc index is being built in the background "
+            "(status.doc_index_progress); search_docs answers not_ready until "
+            "status reports doc_index_state 'ready'."
+        )
+    if doc_state == DOC_STATE_ERROR:
+        return (
+            f"{opening} The doc index is unavailable (status.doc_index_error); "
+            "search_docs returns an error envelope until a rebuild succeeds."
+        )
+    if started:
+        return (
+            f"{opening} The doc index rebuilds in the background "
+            "(status.doc_index_progress); search_docs keeps answering from the "
+            "old index meanwhile."
+        )
+    return (
+        f"{opening} A doc index rebuild was already running, so no new one was "
+        "started (status.doc_index_progress)."
     )
 
 
