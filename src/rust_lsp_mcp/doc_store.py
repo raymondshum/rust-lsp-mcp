@@ -228,10 +228,11 @@ def _git_remote_url(project_root: pathlib.Path) -> str | None:
     """Return ``remote.origin.url`` for *project_root*, ``""`` for none, ``None`` on failure.
 
     ``""`` means a result that is the same on every start: git ran and
-    exited non-zero (``git config --get`` does for an absent key, and git
-    does outside a repository) or the git binary is absent.  ``None`` means
-    a failure that can differ between two starts: the call timed out or
-    raised another ``OSError``.
+    exited with a positive non-zero status (``git config --get`` does for
+    an absent key, and git does outside a repository) or the git binary is
+    absent.  ``None`` means a failure that can differ between two starts:
+    the call timed out, raised another ``OSError`` or git was killed by a
+    signal (a negative ``returncode``).
     """
     try:
         result = subprocess.run(
@@ -245,6 +246,10 @@ def _git_remote_url(project_root: pathlib.Path) -> str | None:
     except FileNotFoundError:
         return ""
     except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode < 0:
+        # Killed by a signal (for example SIGKILL under memory pressure):
+        # transient, so it takes the retry-then-raise path.
         return None
     if result.returncode != 0:
         return ""
@@ -393,8 +398,8 @@ def project_identity(settings: Settings) -> str:
     and the root package name (``[package].name`` of
     ``<project_root>/Cargo.toml``, see :func:`_root_package_name`).
 
-    A git call that times out (or fails with another ``OSError``) is retried
-    once; a second failure raises :class:`ProjectIdentityUnavailable` rather
+    A git call that times out, fails with another ``OSError`` or is killed
+    by a signal is retried once; a second failure raises :class:`ProjectIdentityUnavailable` rather
     than hashing an empty remote, so a slow git never derives a different
     identity and renames the collection.  An explicit ``RLM_PROJECT_ID``
     makes no git call.

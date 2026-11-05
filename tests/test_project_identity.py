@@ -437,3 +437,30 @@ def test_identity_unavailable_in_refresh_rebuild_keeps_old_index_serving(
     assert (reply["doc_index_state"], reply["doc_index_error"]) == ("ready", expected)
     assert any(token in r["text"] for r in store.search(token, n_results=3))
     clear_doc_store()
+
+
+def _killed() -> subprocess.CompletedProcess[str]:
+    """A git run killed by a signal (SIGKILL): ``returncode`` -9."""
+    return subprocess.CompletedProcess(args=["git"], returncode=-9, stdout="", stderr="")
+
+
+def test_git_killed_by_signal_once_then_remote_gives_same_identity(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma")
+    remote = "https://example.invalid/repo.git"
+    clean, _ = _identity_with(monkeypatch, settings, _git_ok(remote))
+    retried, fake = _identity_with(monkeypatch, settings, _killed(), _git_ok(remote))
+    assert retried == clean
+    assert fake.calls == 2
+
+
+def test_git_killed_by_signal_twice_raises_project_identity_unavailable(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path, tmp_path / "chroma")
+    fake = _FakeRun(_killed(), _killed())
+    monkeypatch.setattr(doc_store_mod.subprocess, "run", fake)
+    with pytest.raises(ProjectIdentityUnavailable):
+        project_identity(settings)
+    assert fake.calls == 2
