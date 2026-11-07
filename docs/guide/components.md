@@ -136,7 +136,8 @@ with `recovery="refresh"`. If rust-analyzer is stalled (`status` reports
 `analyzer_stall`), it returns an `error` envelope with `recovery="refresh"`,
 whatever `state` reads. Otherwise, if it is still indexing (or hasn't
 started), it returns a `not_ready` envelope. If the analyzer is ready it
-returns `None` and the tool proceeds. The pattern in every tool file looks like:
+returns `None` and the tool proceeds. The pattern in every tool file looks
+like:
 
 ```python
 if (guard := require_ready()) is not None:
@@ -510,13 +511,13 @@ second Chroma client). Exit codes are exact: `0` ok/not_found, `1` error, `2`
 not_ready, `3` daemon unreachable, `4` request timed out after the daemon was
 reached (`EXIT_OK` / `EXIT_ERROR` / `EXIT_NOT_READY` / `EXIT_UNREACHABLE` /
 `EXIT_TIMEOUT`). `--wait SECS` polls `status` every 2s until the daemon
-reports `state == "ready"`, riding through daemon boot
-(connection-refused → not_ready → ready); for `search-docs`, `status` and
-`refresh` it also waits for `doc_index_state == "ready"`, and a
-`doc_index_state` of `"error"` ends the wait at once: `--wait SECS refresh`
-then runs the refresh, because `refresh` is the recovery, and `search-docs`
-and `status` exit `2`. A navigation command under `--wait` waits on `state`
-alone and runs past a doc index error.
+reports `state == "ready"`, riding through daemon boot (connection-refused →
+not_ready → ready); for `search-docs`, `status`, `refresh` and `version` it
+also waits for `doc_index_state == "ready"`, and a `doc_index_state` of
+`"error"` ends the wait at once: `--wait SECS refresh` then runs the refresh,
+because `refresh` is the recovery, and `search-docs` and `status` exit `2`. A
+navigation command under `--wait` waits on `state` alone and runs past a doc
+index error.
 
 **`client.py`** is the streamable-HTTP MCP client half: `call_tool_sync` opens
 one connection per call, calls a tool, and parses the envelope from

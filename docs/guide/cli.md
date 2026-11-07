@@ -159,12 +159,13 @@ global options ahead of the subcommand).
 
 With `--wait SECS` given, `rust-lsp` polls the daemon's `status` tool every 2
 seconds, for up to `SECS` seconds, before running your actual command. For
-`search-docs`, `status` and `refresh`, the wait ends only when **both**
-indexes are ready: `state == "ready"` (the code index) and `doc_index_state
-== "ready"` (the documentation index), so a `search-docs` call right after a
-successful wait does not exit `2`. Every other command (the navigation
-commands, which never read the doc index) waits for the code index alone:
-`state == "ready"` ends the wait whatever `doc_index_state` reads. This
+`search-docs`, `status`, `refresh` and `version`, the wait ends only when
+**both** indexes are ready: `state == "ready"` (the code index) and
+`doc_index_state == "ready"` (the documentation index), so a `search-docs`
+call right after a successful wait does not exit `2`. The navigation
+commands and `validate-file-path`, which never read the doc index, wait for
+the code index alone: `state == "ready"` ends the wait whatever
+`doc_index_state` reads. This
 is meant to absorb the daemon's first-use indexing window (which can take
 minutes on a large project) in one command instead of a hand-rolled retry
 loop. It rides through the *entire* boot sequence, not just the "already
