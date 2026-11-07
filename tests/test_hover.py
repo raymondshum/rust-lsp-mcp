@@ -439,6 +439,42 @@ class TestHoverPositionBoundary:
         assert captured["rel_path"] == "src/nested/bar.rs"
 
 
+class TestHoverPositionAboveU32:
+    """A 1-indexed value whose 0-indexed form does not fit LSP's u32 is fix_input."""
+
+    def _run(self, line: int, character: int) -> tuple[dict[str, Any], AsyncMock]:
+        import rust_lsp_mcp.core as core
+        import rust_lsp_mcp.tools.hover as hover_mod
+
+        mgr = _make_manager(STATE_READY)
+        delegate = AsyncMock(return_value=None)
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_hover", new=delegate),
+            ):
+                return await hover_mod.hover("crates/core/main.rs", line, character)
+
+        return asyncio.run(_inner()), delegate
+
+    def test_line_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, delegate = self._run(4294967297, 1)
+        assert result["status"] == "error"
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:4294967297:1" in result["message"]
+        delegate.assert_not_called()
+
+    def test_character_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, delegate = self._run(1, 4294967297)
+        assert result["recovery"] == "fix_input"
+        delegate.assert_not_called()
+
+    def test_line_at_u32_bound_reaches_delegate(self) -> None:
+        _result, delegate = self._run(4294967296, 1)
+        delegate.assert_called_once()
+
+
 class TestHoverOutOfRangePosition:
     """Backlog line 172: rust-analyzer's "Invalid offset" maps to fix_input."""
 

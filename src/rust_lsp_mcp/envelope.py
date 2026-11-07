@@ -117,6 +117,30 @@ def error(message: str, recovery: str = RECOVERY_UNKNOWN) -> dict[str, Any]:
 # (InternalError), the code rust-analyzer also uses for request panics.
 INVALID_OFFSET_TEXT = "Invalid offset"
 
+# LSP positions are u32 (0-indexed), so the largest 1-indexed line or
+# character a tool can forward is 2**32.  rust-analyzer rejects a larger
+# value as a JSON-RPC -32602 deserialization error ("expected u32"), which
+# would otherwise reach the catch-all as recovery "unknown" (R-gate,
+# 2026-11-07, backlog line 172).
+MAX_EXTERNAL_POSITION = 2**32
+
+
+def position_out_of_range(file: str, line: int, character: int) -> dict[str, Any] | None:
+    """Return a ``fix_input`` envelope when a 1-indexed position cannot reach LSP, else None.
+
+    Called by ``goto_definition``, ``hover`` and ``find_references`` beside
+    their ``>= 1`` check, before the readiness gate: a non-integer value, or
+    one above :data:`MAX_EXTERNAL_POSITION`, never reaches rust-analyzer.
+    """
+    for value in (line, character):
+        if isinstance(value, bool) or not isinstance(value, int) or value > MAX_EXTERNAL_POSITION:
+            return error(
+                f"The position {file}:{line}:{character} is out of range: line and "
+                f"character must be integers from 1 to {MAX_EXTERNAL_POSITION}.",
+                recovery=RECOVERY_FIX_INPUT,
+            )
+    return None
+
 
 def lsp_failure(
     exc: Exception, context: str = "", *, position: str | None = None

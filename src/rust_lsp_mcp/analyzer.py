@@ -1665,7 +1665,11 @@ class AnalyzerManager:
         line 150): neither multilspy nor rust-analyzer times a request out, so
         a stalled analyzer would otherwise pin the caller until the client's
         own read timeout.  On expiry both tasks are cancelled and reaped and
-        :class:`AnalyzerRequestTimeoutError` is raised.
+        :class:`AnalyzerRequestTimeoutError` is raised.  Limit: only the
+        Python await is cancelled; no ``$/cancelRequest`` goes to
+        rust-analyzer, and multilspy keeps the request's
+        ``_response_handlers`` entry until a response arrives, which a stalled
+        analyzer may never send.
         """
         event = self._shutdown_event
         if event.is_set():

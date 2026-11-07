@@ -137,7 +137,9 @@ class Settings(BaseSettings):
 
     # Seconds the server waits for rust-analyzer to answer one request before
     # it cancels the request and returns an error envelope. Kept under the
-    # CLI's 300 s read timeout. 0 disables the timeout.
+    # CLI's 300 s read timeout (under 150 s for find_references with
+    # include_declaration, which makes two requests, each bounded on its
+    # own). 0 disables the timeout.
     # Env: RLM_REQUEST_TIMEOUT_SECONDS.
     request_timeout_seconds: float = Field(default=120, ge=0)
 

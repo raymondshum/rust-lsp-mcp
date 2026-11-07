@@ -536,6 +536,50 @@ class TestOutOfRangePosition:
         assert "Retry the request once" in result["message"]
 
 
+class TestPositionAboveU32:
+    """A 1-indexed value whose 0-indexed form does not fit LSP's u32 is fix_input."""
+
+    def _run(self, line: int, character: int) -> tuple[dict[str, Any], AsyncMock]:
+        from rust_lsp_mcp.tools.goto_definition import goto_definition
+
+        mgr = _make_manager(STATE_READY)
+        delegate = AsyncMock(return_value=[])
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_definition", new=delegate),
+            ):
+                return await goto_definition("crates/core/main.rs", line, character)
+
+        return asyncio.run(_inner()), delegate
+
+    def test_line_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, delegate = self._run(4294967297, 1)
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:4294967297:1" in result["message"]
+        assert "4294967296" in result["message"]
+        delegate.assert_not_called()
+
+    def test_character_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, delegate = self._run(1, 4294967297)
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:1:4294967297" in result["message"]
+        delegate.assert_not_called()
+
+    def test_line_at_u32_bound_reaches_delegate(self) -> None:
+        _result, delegate = self._run(4294967296, 1)
+        delegate.assert_called_once()
+
+    def test_huge_and_non_integer_values_are_fix_input(self) -> None:
+        """The R-gate's 99999999999999999999 (sent on as 1e+20) and a float."""
+        for line in (10**20, 1e20):
+            result, delegate = self._run(line, 1)  # ty: ignore[invalid-argument-type]
+            assert result["recovery"] == "fix_input", line
+            delegate.assert_not_called()
+
+
 class TestStalledAnalyzer:
     """FW1 (backlog line 150): a stalled analyzer returns refresh, no delegate call."""
 

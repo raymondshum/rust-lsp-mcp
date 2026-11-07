@@ -404,6 +404,33 @@ def test_request_timeout_zero_disables_bound() -> None:
     asyncio.run(_scenario())
 
 
+def test_cancel_during_timeout_reap_propagates_cancelled_error() -> None:
+    """An external cancel landing while the timed-out request acknowledges its
+    own cancellation propagates as CancelledError, not as a timeout error."""
+    mgr = _manager()
+    mgr.request_timeout_seconds = 0.05
+
+    async def _scenario() -> None:
+        reaping = asyncio.Event()
+
+        async def _slow_to_cancel() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                reaping.set()
+                await asyncio.sleep(0.1)
+                raise
+
+        task = asyncio.create_task(mgr._race_teardown(_slow_to_cancel(), "definition"))
+        await reaping.wait()  # the timeout fired and the reap is in progress
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.15)  # let the abandoned request finish its cancel
+
+    asyncio.run(_scenario())
+
+
 def test_teardown_still_wins_before_timeout() -> None:
     mgr = _manager()
     mgr.request_timeout_seconds = 5

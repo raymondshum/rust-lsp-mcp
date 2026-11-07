@@ -688,6 +688,73 @@ class TestErrorHandling:
         assert "crates/core/main.rs:99999:1" in result["message"]
         assert "past the end" in result["message"]
 
+    def test_invalid_offset_from_definition_call_returns_fix_input(self) -> None:
+        """include_declaration=True: the second delegate's "Invalid offset" is fix_input."""
+        from multilspy.lsp_protocol_handler.server import Error
+
+        exc = Error(
+            -32603,  # ty: ignore[invalid-argument-type]
+            "Invalid offset LineCol { line: 99998, col: 0 } (line index length: 18464)",
+        )
+        mgr = _make_manager(STATE_READY)
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=AsyncMock(return_value=[])),
+                patch.object(mgr, "request_definition", new=AsyncMock(side_effect=exc)),
+            ):
+                return await find_references(
+                    file="crates/core/main.rs", line=99999, character=1, include_declaration=True
+                )
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:99999:1" in result["message"]
+
+
+class TestPositionAboveU32:
+    """A 1-indexed value whose 0-indexed form does not fit LSP's u32 is fix_input."""
+
+    def _run(self, line: int, character: int) -> tuple[dict[str, Any], AsyncMock, AsyncMock]:
+        mgr = _make_manager(STATE_READY)
+        refs = AsyncMock(return_value=[])
+        defs = AsyncMock(return_value=[])
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=refs),
+                patch.object(mgr, "request_definition", new=defs),
+            ):
+                return await find_references(
+                    file="crates/core/main.rs",
+                    line=line,
+                    character=character,
+                    include_declaration=True,
+                )
+
+        return asyncio.run(_inner()), refs, defs
+
+    def test_line_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, refs, defs = self._run(4294967297, 1)
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:4294967297:1" in result["message"]
+        refs.assert_not_called()
+        defs.assert_not_called()
+
+    def test_character_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, refs, defs = self._run(1, 4294967297)
+        assert result["recovery"] == "fix_input"
+        refs.assert_not_called()
+        defs.assert_not_called()
+
+    def test_line_at_u32_bound_reaches_delegate(self) -> None:
+        _result, refs, _defs = self._run(4294967296, 1)
+        refs.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # UR-11 (revised): total / truncated

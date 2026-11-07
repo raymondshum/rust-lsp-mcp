@@ -210,6 +210,23 @@ class TestStallRecovery:
         assert result["recovery"] == RECOVERY_REFRESH
         assert "PrimeCaches#1" in result["message"]
 
+    def test_require_ready_timer_stall_returns_refresh(self, monkeypatch: Any) -> None:
+        """The progress_timeout signal (a stale clock) also gates to refresh."""
+        import rust_lsp_mcp.analyzer as analyzer_mod
+
+        mgr = _make_manager(STATE_READY)
+        mgr._reindex_inflight = frozenset({"rustAnalyzer/cachePriming"})
+        mgr._quiescent = False
+        mgr._progress_message = "Indexing 63/64 (rg)"
+        mgr._progress_at = "2026-11-06T01:30:00+00:00"
+        mgr._progress_monotonic = 100.0
+        monkeypatch.setattr(analyzer_mod, "_monotonic", lambda: 100.0 + 181)
+        result = _with_manager(mgr, core.require_ready)
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == RECOVERY_REFRESH
+        assert "Indexing 63/64 (rg)" in result["message"]
+        assert "has not moved for 181 s" in result["message"]
+
     def test_require_ready_without_stall_unchanged(self) -> None:
         assert _with_manager(_make_manager(STATE_READY), core.require_ready) is None
         result = _with_manager(_make_manager(STATE_INDEXING), core.require_ready)
