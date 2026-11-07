@@ -22,7 +22,15 @@ from rust_lsp_mcp.core import (
     require_ready,
     validate_workspace_file,
 )
-from rust_lsp_mcp.envelope import RECOVERY_FIX_INPUT, error, lsp_failure, not_found, not_ready, ok
+from rust_lsp_mcp.envelope import (
+    RECOVERY_FIX_INPUT,
+    error,
+    lsp_failure,
+    not_found,
+    not_ready,
+    ok,
+    position_out_of_range,
+)
 from rust_lsp_mcp.positions import external_to_lsp
 
 _log = logging.getLogger(__name__)
@@ -89,7 +97,12 @@ async def goto_definition(
       the workspace root (absolute paths and ``..``-escaping paths are
       rejected immediately, without calling the analyzer).  Carries
       ``recovery: "fix_input"`` for the position/path validation failures
-      above, or ``"unknown"`` for the catch-all LSP-exception fallback.
+      above, for a line or character above 4294967296 (2**32, rejected
+      before the analyzer is called), and for a position past the end of
+      the file (rust-analyzer's
+      "Invalid offset"), ``"refresh"`` while ``status`` reports an
+      ``analyzer_stall``, or ``"unknown"`` for the catch-all LSP-exception
+      fallback.
 
     Requires an exact position (file + 1-indexed line/character) such as one
     returned by ``find_symbol`` or ``document_symbols``; if you only have a
@@ -97,7 +110,10 @@ async def goto_definition(
     where is it defined?" in one turn, call ``hover`` and ``goto_definition``
     at the same position in parallel rather than sequentially.
     """
-    # Step 1: validate 1-indexed inputs
+    # Step 1: validate 1-indexed inputs (an integer that fits LSP's u32
+    # once 0-indexed, then >= 1)
+    if (guard := position_out_of_range(file, line, character)) is not None:
+        return guard
     if line < 1 or character < 1:
         return error("line and character are 1-indexed; must be >= 1", recovery=RECOVERY_FIX_INPUT)
 
@@ -136,7 +152,7 @@ async def goto_definition(
         return guard if guard is not None else not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("goto_definition: LSP error for %r line=%d char=%d", file, line, character)
-        return lsp_failure(exc)
+        return lsp_failure(exc, position=f"{file}:{line}:{character}")
 
     # Step 7: map results to external (1-indexed) positions
     if not locs:

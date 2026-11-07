@@ -288,7 +288,9 @@ def require_ready() -> dict[str, Any] | None:
         background run failed (``state == "error"`` — permanent until
         ``refresh`` recovers it): ``rust-analyzer is not running (exited with
         code <n>); call refresh`` when the process died, else the "failed to
-        start" message, a ``not_ready`` envelope
+        start" message; an ``error`` envelope (``recovery: "refresh"``) with
+        the stall message while ``AnalyzerManager.stall_report()`` reports a
+        rust-analyzer stall, whatever ``state`` reads; a ``not_ready`` envelope
         (``recovery: "poll_status"``) if it is still indexing or the manager
         has not started, else ``None`` once ready.
     """
@@ -307,6 +309,15 @@ def require_ready() -> dict[str, Any] | None:
             "(e.g. RLM_RUST_ANALYZER_BIN).",
             recovery=RECOVERY_REFRESH,
         )
+    if _manager is not None:
+        # FW1 (backlog line 150): a stalled rust-analyzer never finishes on
+        # its own, so refresh is the recovery.  Checked before the not-ready
+        # branch: a stall can form while state still reads "indexing" (the
+        # run never reached its first quiescent: true), and that caller
+        # needs refresh, not poll_status.
+        stall = _manager.stall_report()
+        if isinstance(stall, dict):
+            return error(stall["message"], recovery=RECOVERY_REFRESH)
     if _manager is None or not _manager.is_ready:
         return not_ready(INDEXING_RETRY_MESSAGE)
     return None

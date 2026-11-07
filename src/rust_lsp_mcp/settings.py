@@ -123,6 +123,26 @@ class Settings(BaseSettings):
     # Env: RLM_IDLE_TIMEOUT_SECONDS.
     idle_timeout_seconds: int = Field(default=3600, ge=0)
 
+    # -----------------------------------------------------------------------
+    # rust-analyzer stall detection (FW1, backlog line 150)
+    # -----------------------------------------------------------------------
+
+    # Seconds a re-index progress token may sit with no progress notification,
+    # while rust-analyzer reports itself busy, before status reports an
+    # analyzer_stall and every analyzer tool returns error with recovery
+    # "refresh". Too low a value flags a healthy but slow re-index. 0 disables
+    # this timer signal; the cache-priming panic signal stays on.
+    # Env: RLM_STALL_THRESHOLD_SECONDS.
+    stall_threshold_seconds: float = Field(default=180, ge=0)
+
+    # Seconds the server waits for rust-analyzer to answer one request before
+    # it cancels the request and returns an error envelope. Kept under the
+    # CLI's 300 s read timeout (under 150 s for find_references with
+    # include_declaration, which makes two requests, each bounded on its
+    # own). 0 disables the timeout.
+    # Env: RLM_REQUEST_TIMEOUT_SECONDS.
+    request_timeout_seconds: float = Field(default=120, ge=0)
+
     @model_validator(mode="after")
     def _warn_deprecated_ripgrep_src(self) -> "Settings":
         """Emit a DeprecationWarning when the legacy RLM_RIPGREP_SRC env var is

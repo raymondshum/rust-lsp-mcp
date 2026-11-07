@@ -127,10 +127,15 @@ Full reference, including every flag: `docs/guide/cli.md`.
 |------|---------------------------------------|-----------------------------------------------------------------------------------------------|
 | 0    | `ok` **or** `not_found`               | `not_found` is an ANSWER, not a failure (same empty≠error doctrine as above) — don't retry it. |
 | 1    | tool `error`                          | Read the JSON envelope's `message`/`recovery` field on stdout. If EVERY nav call errors with a generic "File read failed"-style message (or `status` is `ready` with `doc_index_chunk_count: 0`), don't retry — that's a mount-permission/SELinux issue; see docs/guide/cli.md Troubleshooting. |
-| 2    | daemon reachable but `not_ready`      | Retry with `--wait`. (Argparse usage errors — bad/missing arguments — also exit 2; tell them apart by stderr usage text plus empty stdout: a real envelope always prints JSON to stdout.) |
+| 2    | daemon reachable but `not_ready`      | Retry with `--wait`. Exception: when stderr says the daemon `reports a doc index error` (a `--wait` on `search-docs` or `status`), another `--wait` exits 2 again — run `rust-lsp refresh` instead. (Argparse usage errors — bad/missing arguments — also exit 2; tell them apart by stderr usage text plus empty stdout: a real envelope always prints JSON to stdout.) |
 | 3    | daemon unreachable                    | Start it from the rust-lsp-mcp repo directory: `RUST_PROJECT=/abs/path/to/project docker compose up -d rust-lsp-mcp`. |
+| 4    | daemon reached, request timed out     | The daemon is up but rust-analyzer gave no reply within 300 s. Check `rust-lsp status` for `analyzer_stall`, then run `rust-lsp refresh`. Don't restart the daemon. |
 
 The envelope JSON always goes to stdout; diagnostics/hints go to stderr.
+An `error` envelope with `recovery: "refresh"` (exit 1) while `status` reports
+`analyzer_stall` means rust-analyzer is stalled and will not recover on its
+own: run one `rust-lsp refresh`, then `rust-lsp --wait 180 status` before the
+next call.
 
 ### `refresh` is shared — use it carefully
 

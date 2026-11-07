@@ -95,7 +95,7 @@ Locate where a symbol is defined, given a source location.
 | `ok` | `definitions`: list of target location objects. |
 | `not_found` | `message`: either rust-analyzer returned no definition for the position ("No definition found at ..."), or every definition it returned lies outside the project root, such as in the standard library or a dependency (a message that says so and gives their count). |
 | `not_ready` | `message`, `recovery: "poll_status"` — analyzer indexing. |
-| `error` | `message`, `recovery`: `"fix_input"` (path escape) or `"unknown"`. |
+| `error` | `message`, `recovery`: `"fix_input"` (path escape, or a position past the end of the file), `"refresh"` (rust-analyzer stalled) or `"unknown"`. |
 
 ---
 
@@ -120,7 +120,7 @@ Locate all references to the symbol at the given position.
 | `ok` | `references`: list of reference locations, `total`, `truncated`. |
 | `not_found` | `message`: no symbol at position. |
 | `not_ready` | `message`, `recovery: "poll_status"`. |
-| `error` | `message`, `recovery`. |
+| `error` | `message`, `recovery`: `"fix_input"` (bad position or path, including a position past the end of the file), `"refresh"` (rust-analyzer stalled) or `"unknown"`. |
 
 ---
 
@@ -143,7 +143,7 @@ Inspect type signatures and documentation for the symbol at the specified positi
 | `ok` | `contents`: Markdown-formatted hover text containing type and doc comments. |
 | `not_found` | `message`: no hover information at position. |
 | `not_ready` | `message`, `recovery: "poll_status"`. |
-| `error` | `message`, `recovery`. |
+| `error` | `message`, `recovery`: `"fix_input"` (bad position or path, including a position past the end of the file), `"refresh"` (rust-analyzer stalled) or `"unknown"`. |
 
 ---
 

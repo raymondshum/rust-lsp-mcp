@@ -496,3 +496,111 @@ class TestGotoDefinitionError:
             delegate_raises=ValueError("bad state"),
         )
         assert result["status"] == STATUS_ERROR
+
+
+# rust-analyzer's out-of-range error as step 1a recorded it live (rust-analyzer
+# 1.99.1, 2026-11-07): multilspy.lsp_protocol_handler.server.Error, -32603.
+_INVALID_OFFSET = "Invalid offset LineCol { line: 99998, col: 0 } (line index length: 18464)"
+
+
+def _invalid_offset_error() -> Exception:
+    from multilspy.lsp_protocol_handler.server import Error
+
+    return Error(-32603, _INVALID_OFFSET)  # ty: ignore[invalid-argument-type]
+
+
+class TestOutOfRangePosition:
+    """Backlog line 172: a position past the end of the file is fix_input."""
+
+    def test_invalid_offset_returns_fix_input_naming_position(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        result = _run_goto_definition(
+            mgr,
+            "crates/core/main.rs",
+            99999,
+            1,
+            lsp_result=[],
+            delegate_raises=_invalid_offset_error(),
+        )
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:99999:1" in result["message"]
+        assert "past the end" in result["message"]
+
+    def test_unrelated_exception_stays_unknown(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        result = _run_goto_definition(
+            mgr, "src/main.rs", 1, 1, lsp_result=[], delegate_raises=RuntimeError("boom")
+        )
+        assert result["recovery"] == "unknown"
+        assert "Retry the request once" in result["message"]
+
+
+class TestPositionAboveU32:
+    """A 1-indexed value whose 0-indexed form does not fit LSP's u32 is fix_input."""
+
+    def _run(self, line: int, character: int) -> tuple[dict[str, Any], AsyncMock]:
+        from rust_lsp_mcp.tools.goto_definition import goto_definition
+
+        mgr = _make_manager(STATE_READY)
+        delegate = AsyncMock(return_value=[])
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_definition", new=delegate),
+            ):
+                return await goto_definition("crates/core/main.rs", line, character)
+
+        return asyncio.run(_inner()), delegate
+
+    def test_line_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, delegate = self._run(4294967297, 1)
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:4294967297:1" in result["message"]
+        assert "4294967296" in result["message"]
+        delegate.assert_not_called()
+
+    def test_character_above_u32_is_fix_input_without_delegate(self) -> None:
+        result, delegate = self._run(1, 4294967297)
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:1:4294967297" in result["message"]
+        delegate.assert_not_called()
+
+    def test_line_at_u32_bound_reaches_delegate(self) -> None:
+        _result, delegate = self._run(4294967296, 1)
+        delegate.assert_called_once()
+
+    def test_huge_and_non_integer_values_are_fix_input(self) -> None:
+        """The R-gate's 99999999999999999999 (sent on as 1e+20) and a float."""
+        for line in (10**20, 1e20):
+            result, delegate = self._run(line, 1)  # ty: ignore[invalid-argument-type]
+            assert result["recovery"] == "fix_input", line
+            delegate.assert_not_called()
+
+
+class TestStalledAnalyzer:
+    """FW1 (backlog line 150): a stalled analyzer returns refresh, no delegate call."""
+
+    def test_stalled_manager_returns_refresh_without_delegate(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        mgr._stall_panic_at = "2026-11-06T01:35:00+00:00"
+        mgr._stall_panic_thread = "PrimeCaches#1"
+        mgr._stall_panic_line = "thread 'PrimeCaches#1' (9085) panicked at file_set.rs:31:34:"
+        delegate = AsyncMock(return_value=[])
+
+        from rust_lsp_mcp.tools.goto_definition import goto_definition
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_definition", new=delegate),
+            ):
+                return await goto_definition("src/main.rs", 1, 1)
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "refresh"
+        assert "PrimeCaches#1" in result["message"]
+        delegate.assert_not_called()

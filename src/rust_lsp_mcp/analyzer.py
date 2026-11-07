@@ -177,6 +177,22 @@ WATCH_FAILURE_MARKER = "notify error:"
 # on the index (backlog line 86, deferred), so it is not a watch failure.
 WATCH_BENIGN_TEXT = "No path was found"
 
+# A Rust panic on rust-analyzer's stderr reads ``thread '<name>' (<tid>)
+# panicked at <file>:<line>:<col>:``, then the message and the backtrace,
+# ended by a blank line (FW1, NOTES.md § 4.1 step 2: ``thread
+# 'PrimeCaches#1' (9085) panicked at
+# src/tools/rust-analyzer/crates/vfs/src/file_set.rs:31:34:`` then ``no entry
+# found for key``).  The panic line and up to PANIC_LOG_MAX_LINES lines of its
+# block log at WARNING.
+PANIC_MARKER = "panicked at"
+PANIC_LOG_MAX_LINES = 40
+# The thread-name prefix of rust-analyzer's cache-priming workers
+# (``crates/ide-db/src/prime_caches.rs``).  A priming worker that panics
+# leaves its coordinator waiting, so the ``cachePriming`` ``end`` and
+# ``quiescent: true`` never come (FW1): that panic marks a stall.  A
+# ``Worker`` thread panic (a request handler) does not.
+PRIME_CACHES_THREAD = "'PrimeCaches#"
+
 
 # How long a changed Rust or Cargo file must sit unmodified before
 # reconcile_head counts it as settled (backlog line 49): an mtime within this
@@ -190,6 +206,26 @@ HEAD_GIT_TIMEOUT_SECONDS: float = 10.0
 def _is_watch_failure_line(line: str) -> bool:
     """Return whether a rust-analyzer stderr *line* reports a file-watch failure."""
     return WATCH_FAILURE_MARKER in line and WATCH_BENIGN_TEXT not in line
+
+
+def _is_prime_caches_panic_line(line: str) -> bool:
+    """Return whether a rust-analyzer stderr *line* is a cache-priming worker's panic."""
+    return PANIC_MARKER in line and PRIME_CACHES_THREAD in line
+
+
+def _panic_thread_name(line: str) -> str | None:
+    """Return the thread name of a ``thread '<name>' ... panicked at`` *line*, or None."""
+    start = line.find("thread '")
+    if start < 0:
+        return None
+    start += len("thread '")
+    end = line.find("'", start)
+    return line[start:end] if end > start else None
+
+
+# Monotonic clock seam for the stall timer; tests replace it to advance time
+# without sleeping.
+_monotonic: Callable[[], float] = time.monotonic
 
 
 def _utc_now_iso() -> str:
@@ -273,6 +309,25 @@ def _tree_matches_head(repo_root: str, old_commit: str, new_commit: str, now: fl
 class AnalyzerTornDownError(RuntimeError):
     """The analyzer run serving an in-flight request was torn down (restart/shutdown)
     before the request completed.  Maps to a not_ready envelope at the tool layer."""
+
+
+class AnalyzerRequestTimeoutError(RuntimeError):
+    """rust-analyzer did not answer a request within ``request_timeout_seconds``.
+
+    Raised by :meth:`AnalyzerManager._race_teardown`, which cancels the
+    request first.  Deliberately not a subclass of ``AnalyzerTornDownError``
+    or ``AnalyzerNotReadyError``: the tools map both of those to
+    ``not_ready``, and a timed-out request must reach the catch-all
+    ``lsp_failure``, which tells a stall (``recovery: "refresh"``) from a slow
+    request on a healthy analyzer (``recovery: "unknown"``).
+    """
+
+    def __init__(self, op: str, timeout_seconds: float) -> None:
+        self.op = op
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"rust-analyzer did not answer the {op} request within {timeout_seconds:g} seconds"
+        )
 
 
 class AnalyzerNotReadyError(RuntimeError):
@@ -563,8 +618,30 @@ class AnalyzerManager:
     _reindex_inflight: frozenset[Any] = frozenset()
     _quiescent_reads: int = 0
     _generation: int = 0
+    # Stall detection (FW1, backlog line 150), same reason.  The panic
+    # signal: the first cache-priming worker panic line read since the last
+    # quiescent: true, with its read time and thread name.  The timer signal
+    # reads _progress_monotonic, the monotonic time of the run's latest
+    # progress notification.
+    _stall_panic_at: str | None = None
+    _stall_panic_thread: str | None = None
+    _stall_panic_line: str | None = None
+    _progress_monotonic: float | None = None
+    # Defaults equal to the settings' (settings.py); analyzer_lifespan sets
+    # them from the settings.  0 disables the timer signal / the timeout.
+    stall_threshold_seconds: float = 180.0
+    request_timeout_seconds: float = 120.0
 
-    def __init__(self, rust_analyzer_bin: str, repository_root: str) -> None:
+    def __init__(
+        self,
+        rust_analyzer_bin: str,
+        repository_root: str,
+        *,
+        stall_threshold_seconds: float = 180.0,
+        request_timeout_seconds: float = 120.0,
+    ) -> None:
+        self.stall_threshold_seconds = stall_threshold_seconds
+        self.request_timeout_seconds = request_timeout_seconds
         self._rust_analyzer_bin = rust_analyzer_bin
         self._repository_root = repository_root
         self.state: str = STATE_INDEXING
@@ -614,6 +691,13 @@ class AnalyzerManager:
         # Quiescent HEAD reads of the status callback now in flight;
         # reconcile_head does not run while one is.
         self._quiescent_reads: int = 0
+        # Stall signals (see stall_report): the run's first cache-priming
+        # worker panic since the last quiescent: true, and the monotonic time
+        # of the latest progress notification.
+        self._stall_panic_at: str | None = None
+        self._stall_panic_thread: str | None = None
+        self._stall_panic_line: str | None = None
+        self._progress_monotonic: float | None = None
         # The last STDERR_TAIL_LINES lines of the current run's rust-analyzer
         # stderr; replaced with an empty deque at the top of every _run.
         self._stderr_lines: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
@@ -666,6 +750,88 @@ class AnalyzerManager:
     def progress_at(self) -> str | None:
         """ISO 8601 UTC time of the latest ``$/progress`` notification, or None."""
         return self._progress_at
+
+    @property
+    def quiescent(self) -> bool | None:
+        """rust-analyzer's latest ``quiescent`` report this run, or None before the first."""
+        return self._quiescent
+
+    @property
+    def reindex_inflight(self) -> list[str]:
+        """The re-index progress tokens with a ``begin`` and no ``end``, sorted."""
+        return sorted(str(token) for token in self._reindex_inflight)
+
+    def _progress_timed_out(self) -> bool:
+        """Return whether the timer stall signal holds (FW1, backlog line 150).
+
+        True when ``stall_threshold_seconds`` is above 0, a re-index token is
+        in flight, rust-analyzer reports ``quiescent: false``, and no progress
+        notification arrived for longer than the threshold.  Computed on read,
+        so it clears by itself when progress moves or ``quiescent`` turns true.
+        """
+        threshold = self.stall_threshold_seconds
+        last = self._progress_monotonic
+        return (
+            threshold > 0
+            and bool(self._reindex_inflight)
+            and self._quiescent is False
+            and last is not None
+            and _monotonic() - last > threshold
+        )
+
+    def _clear_stall_panic(self) -> None:
+        """Forget the panic stall signal (on quiescent: true, a new run, a restart)."""
+        self._stall_panic_at = None
+        self._stall_panic_thread = None
+        self._stall_panic_line = None
+
+    def stall_report(self) -> dict[str, str] | None:
+        """Return the current rust-analyzer stall, or None when none is detected.
+
+        Two signals mark a stall (FW1, backlog line 150):
+
+        - ``"panic"``: a cache-priming worker (``PrimeCaches#<n>``) panicked
+          on stderr since rust-analyzer's last ``quiescent: true`` in this
+          run.  Its coordinator then waits forever, so the priming run never
+          ends.  ``since`` is the time the panic line was read.
+        - ``"progress_timeout"``: a re-index token has been in flight with no
+          progress notification for longer than ``stall_threshold_seconds``
+          while rust-analyzer reports itself busy.  ``since`` is the time
+          progress last moved.
+
+        The panic signal wins when both hold.  Returns a dict with ``since``
+        (ISO 8601 UTC), ``signal`` and ``message`` (cause and recovery).
+        Pure reads, no I/O: callers on the event loop call it synchronously.
+        """
+        if self._stall_panic_at is not None:
+            line = self._stall_panic_line or ""
+            if len(line) > 200:
+                line = line[:197] + "..."
+            return {
+                "since": self._stall_panic_at,
+                "signal": "panic",
+                "message": (
+                    f"rust-analyzer's cache-priming thread {self._stall_panic_thread} "
+                    f"panicked ({line}); its indexing run will not finish, and requests "
+                    "may hang or fail. Call refresh to restart rust-analyzer."
+                ),
+            }
+        if self._progress_timed_out():
+            last = self._progress_monotonic
+            idle = int(_monotonic() - last) if last is not None else 0
+            progress = self._progress_message or "no message"
+            if len(progress) > 120:
+                progress = progress[:117] + "..."
+            return {
+                "since": self._progress_at or "",
+                "signal": "progress_timeout",
+                "message": (
+                    f"rust-analyzer's progress ({progress}) has not moved for {idle} s "
+                    "while it reports itself busy; requests may hang or fail. "
+                    "Call refresh to restart rust-analyzer."
+                ),
+            }
+        return None
 
     @property
     def rust_analyzer_version(self) -> str | None:
@@ -893,6 +1059,9 @@ class AnalyzerManager:
                 text = f"{title} done" if title else None
             self._progress_message = text
             self._progress_at = _utc_now_iso()
+            # The stall timer's clock (stall_report): wall-clock jumps must
+            # not fire or clear it.
+            self._progress_monotonic = _monotonic()
             if kind in ("begin", "end"):
                 _log.info("rust-analyzer progress: %s %s", title, message or "")
             if token not in REINDEX_PROGRESS_TOKENS:
@@ -947,6 +1116,10 @@ class AnalyzerManager:
             self.analyzer_health_message = new_message
             if new_health != previous and not (previous is None and new_health == "ok"):
                 _log.warning("rust-analyzer health %s: %s", new_health, new_message or "")
+            if quiescent is True:
+                # The panic stall signal is a priming panic "since the last
+                # quiescent: true" (stall_report): rust-analyzer finished.
+                self._clear_stall_panic()
             if isinstance(quiescent, bool) and quiescent != self._quiescent:
                 self._quiescent = quiescent
                 _log.info("rust-analyzer quiescent: %s", "true" if quiescent else "false")
@@ -1003,13 +1176,47 @@ class AnalyzerManager:
         "error"`` and ``watcher_message`` (the first such line of the run),
         while *gen* is current, and logs ``rust-analyzer file watcher failed:
         <line>`` at warning once per run.  A superseded run records nothing.
+
+        **Panics (FW1, backlog line 150).**  A line containing
+        :data:`PANIC_MARKER` (any thread) opens a panic block: it and each
+        later line, up to a blank line or :data:`PANIC_LOG_MAX_LINES` lines
+        counting the panic line, log at warning as ``rust-analyzer panic:
+        <line>`` instead of at debug.  A superseded run logs them at debug
+        only.  A cache-priming worker's panic line
+        (:func:`_is_prime_caches_panic_line`) of the current run records the
+        panic stall signal (:meth:`stall_report`), keeping the first such
+        line until it clears; a ``Worker`` thread panic (a request handler)
+        records none, because a one-off request panic on a healthy analyzer
+        has no later ``quiescent: true`` to clear it.
         """
         server = lsp.server
         logged_watch_failure = False
+        # Lines logged so far in the open panic block; 0 when none is open.
+        panic_block_lines = 0
+
+        def _log_line(line: str) -> None:
+            nonlocal panic_block_lines
+            if PANIC_MARKER in line:
+                panic_block_lines = 1
+            elif panic_block_lines:
+                if not line.strip() or panic_block_lines >= PANIC_LOG_MAX_LINES:
+                    panic_block_lines = 0
+                else:
+                    panic_block_lines += 1
+            if panic_block_lines and gen == self._generation:
+                _log.warning("rust-analyzer panic: %s", line)
+            else:
+                _log.debug("rust-analyzer stderr: %s", line)
 
         def _note_line(line: str) -> None:
             nonlocal logged_watch_failure
-            if gen != self._generation or not _is_watch_failure_line(line):
+            if gen != self._generation:
+                return
+            if _is_prime_caches_panic_line(line) and self._stall_panic_at is None:
+                self._stall_panic_at = _utc_now_iso()
+                self._stall_panic_thread = _panic_thread_name(line)
+                self._stall_panic_line = line
+            if not _is_watch_failure_line(line):
                 return
             if self.watcher_health != "error":
                 self.watcher_health = "error"
@@ -1037,7 +1244,7 @@ class AnalyzerManager:
                         continue
                     line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                     lines.append(line)
-                    _log.debug("rust-analyzer stderr: %s", line)
+                    _log_line(line)
                     _note_line(line)
             except (BrokenPipeError, ConnectionResetError, StopLoopException):
                 pass
@@ -1199,6 +1406,8 @@ class AnalyzerManager:
         self._indexing_started_at = _utc_now_iso()
         self._progress_message = None
         self._progress_at = None
+        self._progress_monotonic = None
+        self._clear_stall_panic()
         self.watcher_health = None
         self.watcher_message = None
         self._recapture_pending = False
@@ -1451,16 +1660,29 @@ class AnalyzerManager:
         event read here pairs with the _lsp the caller snapshotted.  multilspy's stop()
         never fails pending _response_handlers (verified, 0.0.15), so without this race
         an in-flight request awaits request.cv forever across a drain (issue #87).
+
+        Bounded by ``request_timeout_seconds`` when it is above 0 (FW1, backlog
+        line 150): neither multilspy nor rust-analyzer times a request out, so
+        a stalled analyzer would otherwise pin the caller until the client's
+        own read timeout.  On expiry both tasks are cancelled and reaped and
+        :class:`AnalyzerRequestTimeoutError` is raised.  Limit: only the
+        Python await is cancelled; no ``$/cancelRequest`` goes to
+        rust-analyzer, and multilspy keeps the request's
+        ``_response_handlers`` entry until a response arrives, which a stalled
+        analyzer may never send.
         """
         event = self._shutdown_event
         if event.is_set():
             coro.close()
             raise AnalyzerTornDownError(f"analyzer torn down before {op} request was issued")
+        timeout = self.request_timeout_seconds
         request_task = asyncio.ensure_future(coro)
         teardown_task = asyncio.create_task(event.wait())
         try:
             done, _ = await asyncio.wait(
-                {request_task, teardown_task}, return_when=asyncio.FIRST_COMPLETED
+                {request_task, teardown_task},
+                timeout=timeout if timeout > 0 else None,
+                return_when=asyncio.FIRST_COMPLETED,
             )
         except asyncio.CancelledError:
             request_task.cancel()
@@ -1490,6 +1712,19 @@ class AnalyzerManager:
                     request_task.exception()
                 raise asyncio.CancelledError
             return request_task.result()
+        if not done:
+            # Timed out: neither the request nor the teardown finished.
+            request_task.cancel()
+            teardown_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await request_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await teardown_task
+            # Same reap-window guard as the teardown path below.
+            cur = asyncio.current_task()
+            if cur is not None and cur.cancelling():
+                raise asyncio.CancelledError
+            raise AnalyzerRequestTimeoutError(op, timeout)
         request_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await request_task
@@ -1860,6 +2095,9 @@ class AnalyzerManager:
             self.watcher_message = None
             self._recapture_pending = False
             self._quiescent = None
+            # The stall signals: the panic is forgotten, and the timer needs
+            # _quiescent is False, so both read clear until the new run.
+            self._clear_stall_panic()
 
             # Step 3: forget the old indexed commit — during the re-index window
             # the previous value is no longer what's indexed; None → status
@@ -1882,6 +2120,7 @@ class AnalyzerManager:
             self.watcher_message = None
             self._recapture_pending = False
             self._quiescent = None
+            self._clear_stall_panic()
             self._indexed_commit = None
 
             # Step 6: fresh events — old ones are spent.
@@ -1919,6 +2158,8 @@ async def analyzer_lifespan(app: object) -> AsyncIterator[dict[str, AnalyzerMana
     manager = AnalyzerManager(
         rust_analyzer_bin=settings.rust_analyzer_bin,
         repository_root=settings.project_root,
+        stall_threshold_seconds=settings.stall_threshold_seconds,
+        request_timeout_seconds=settings.request_timeout_seconds,
     )
     await manager.start()
     try:

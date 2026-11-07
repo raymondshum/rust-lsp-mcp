@@ -4,22 +4,22 @@ type: Guide
 title: Development setup
 description: How to set up the dev container, run the server locally, and run the test tiers.
 tags: [guide, tier-b, development]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-06T00:00:00Z
 source_pins:
   - path: Dockerfile
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 554c7d7aa615cef9dd9b21c7ee568b28bfd78703
   - path: docker-compose.yml
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 554c7d7aa615cef9dd9b21c7ee568b28bfd78703
   - path: .devcontainer/devcontainer.json
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 554c7d7aa615cef9dd9b21c7ee568b28bfd78703
   - path: .devcontainer/Dockerfile
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 554c7d7aa615cef9dd9b21c7ee568b28bfd78703
   - path: scripts/setup.sh
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 554c7d7aa615cef9dd9b21c7ee568b28bfd78703
   - path: scripts/clone-ripgrep.sh
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 554c7d7aa615cef9dd9b21c7ee568b28bfd78703
   - path: pyproject.toml
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 554c7d7aa615cef9dd9b21c7ee568b28bfd78703
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)

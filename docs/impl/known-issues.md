@@ -158,6 +158,25 @@ Check this list at these lifecycle checkpoints (see
   user namespace, so a container write to the sysctl would change it for
   every container of that user.
 
+### KI-18 — A rust-analyzer 1.99.1 cache-priming panic stalls indexing while `state` can read `ready`
+- **Where:** rust-analyzer's cache priming in the image (rust-analyzer 1.99.1,
+  the rustup `stable` component the `Dockerfile` installs) · the stall
+  detection in [src/rust_lsp_mcp/analyzer.py](../../src/rust_lsp_mcp/analyzer.py)
+  (`stall_report`, fed by `_make_stderr_reader` and `_make_progress_handler`).
+- **What:** a file change landing while cache priming runs (for example a
+  code-only branch switch shortly after a `refresh`) can make a priming
+  worker panic in `FileSet::resolve_path` with "no entry found for key". The
+  priming run then never finishes, so `state` can read `ready` while
+  requests into the affected crate fail with that panic or hang.
+- **Why it matters:** before remediation-4 nothing in `status` showed it:
+  `state`, `analyzer_health` and `stale` all read healthy, and a hung
+  request ended only at the CLI's 300 s read timeout.
+- **Status:** decided: the server reports it as `analyzer_stall` in `status`
+  and answers every analyzer tool with `error` and `recovery: "refresh"`
+  while it lasts; one `refresh` clears it. The panic site is fixed upstream in
+  rust-analyzer PR #23120, which reaches the image with the Rust 1.100 stable
+  component.
+
 ---
 
 ## Resolved

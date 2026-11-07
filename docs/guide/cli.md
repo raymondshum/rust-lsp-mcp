@@ -141,8 +141,9 @@ branch on `$?` without parsing JSON:
 |---|---|
 | `0` | Envelope `status` was `ok` **or** `not_found`. Both are answers, not failures — `not_found` means "the thing you asked about doesn't exist," which is a fact, not an error, matching the same "empty is not an error" doctrine as the MCP tools (see the [Tools / API reference](tools.md#response-format)). |
 | `1` | Envelope `status` was `error`. Check the `message` field in the printed JSON, and `recovery` for a machine-readable hint at the next action. |
-| `2` | `not_ready` (`EXIT_NOT_READY`) — the daemon answered but the analyzer or doc index is still (re)building. Also used when a `--wait SECS` window expired while the daemon *was* reachable but never reported `ready`, and when `--wait` stopped because the daemon reported a doc index error (`doc_index_state: "error"`; stderr prints the error and says to run `rust-lsp refresh`). `rust-lsp --wait SECS refresh` does not stop there: it runs the refresh instead, and exits with the refresh envelope's code. |
-| `3` | The daemon could not be reached at all — connection refused, handshake failure, or timeout. Also used when a `--wait SECS` window expired without the daemon ever answering. Stderr prints a hint to start the daemon. |
+| `2` | `not_ready` (`EXIT_NOT_READY`) — the daemon answered but the analyzer or doc index is still (re)building. Also used when a `--wait SECS` window expired while the daemon *was* reachable but never reported `ready`, and when `--wait` on `search-docs` or `status` stopped because the daemon reported a doc index error (`doc_index_state: "error"`; stderr prints the error and says to run `rust-lsp refresh`). `rust-lsp --wait SECS refresh` does not stop there: it runs the refresh instead, and exits with the refresh envelope's code, or `3` when the daemon cannot be reached for the refresh call, or `4` when that call times out. |
+| `3` | The daemon could not be reached at all — connection refused, handshake failure, or connect timeout. Also used when a `--wait SECS` window expired without the daemon ever answering. Stderr prints a hint to start the daemon. |
+| `4` | `EXIT_TIMEOUT` — the daemon was reached, but the request timed out after 300 s with no reply (the CLI's read timeout). rust-analyzer may be stalled. Stderr prints `rust-lsp: the daemon at <url> was reached, but the request timed out after 300s with no reply; ...`, names `rust-lsp status` (`analyzer_stall`) and `rust-lsp refresh` as the next steps, and prints the innermost exception (for example `ReadTimeout`). The server bounds each rust-analyzer request at `RLM_REQUEST_TIMEOUT_SECONDS` (default 120 s), so this exit appears only when that setting is `0` or at least 300 (at least 150 for `find-references --include-declaration`, which makes two requests, each bounded on its own), or when a call hangs outside rust-analyzer. |
 | `2` (argparse) | A command-line usage error (bad or missing arguments, unknown subcommand) also exits `2`, from argparse's own default — this numerically collides with `not_ready` above but is never ambiguous in practice: a usage error happens *before* any network call and prints its own distinct usage message on stderr, whereas `not_ready` always comes with a printed JSON envelope on stdout. |
 
 ## `--wait SECS`: riding out daemon boot
@@ -157,10 +158,13 @@ rust-lsp --wait 180 status
 global options ahead of the subcommand).
 
 With `--wait SECS` given, `rust-lsp` polls the daemon's `status` tool every 2
-seconds, for up to `SECS` seconds, before running your actual command. The
-wait ends only when **both** indexes are ready: `state == "ready"` (the code
-index) and `doc_index_state == "ready"` (the documentation index), so a
-`search-docs` call right after a successful wait does not exit `2`. This
+seconds, for up to `SECS` seconds, before running your actual command. For
+`search-docs`, `status` and `refresh`, the wait ends only when **both**
+indexes are ready: `state == "ready"` (the code index) and `doc_index_state
+== "ready"` (the documentation index), so a `search-docs` call right after a
+successful wait does not exit `2`. Every other command (the navigation
+commands, which never read the doc index) waits for the code index alone:
+`state == "ready"` ends the wait whatever `doc_index_state` reads. This
 is meant to absorb the daemon's first-use indexing window (which can take
 minutes on a large project) in one command instead of a hand-rolled retry
 loop. It rides through the *entire* boot sequence, not just the "already
@@ -169,9 +173,9 @@ through connection-refused → `not_ready` → `ready`, and `--wait` treats a
 connection failure exactly like `not_ready` **as long as the window hasn't
 expired** — it keeps polling either way.
 
-A doc index in `"error"` stays failed until `refresh`, so `--wait` stops at
-the first `status` reply that reports `doc_index_state: "error"`, without
-waiting out the window. It prints `rust-lsp: the daemon at <url> reports a doc
+A doc index in `"error"` stays failed until `refresh`, so `--wait` on
+`search-docs` or `status` stops at the first `status` reply that reports
+`doc_index_state: "error"`, without waiting out the window. It prints `rust-lsp: the daemon at <url> reports a doc
 index error: <doc_index_error>; run rust-lsp refresh to rebuild it.` on stderr
 and exits `2` without running the command. `rust-lsp --wait SECS refresh` is
 the exception, because `refresh` is the recovery: it prints `rust-lsp: the
@@ -179,7 +183,8 @@ daemon at <url> reports a doc index error: <doc_index_error>; running refresh
 to rebuild it.` on stderr and runs the refresh instead of stopping. A
 `"ready"` doc index with
 `doc_index_error` set (a failed rebuild while the old index keeps answering)
-does not stop the wait.
+does not stop the wait. A navigation command under `--wait` does not stop on
+a doc index error at all: it runs once the code index is ready.
 
 The distinction that matters is what happens when the window *does* expire:
 
@@ -251,6 +256,7 @@ Check `rust-lsp status` before refreshing. Only trigger `refresh` when code chan
 | Symptom | Cause | Resolution |
 |---|---|---|
 | Exit `3`, "daemon not reachable" | The container is stopped or ports are misconfigured. | Run `RUST_PROJECT=/abs/path docker compose up -d rust-lsp-mcp`. Verify `RLM_HTTP_PORT`. |
+| Exit `4`, "was reached, but the request timed out" | The daemon is up, but rust-analyzer gave no answer within 300 s; it may be stalled. | Run `rust-lsp status`; if `analyzer_stall` is set, run `rust-lsp refresh`, then `rust-lsp --wait 180 status` before the next call. |
 | Exit `2` (`not_ready`) | Analyzer or documentation store is still indexing. | Check `rust-lsp status` or use `--wait 180` to poll until ready. |
 | Exit `2` with `state: "error"` | Background indexing failed permanently. | Run `docker exec rust-lsp-mcp /app/.venv/bin/rust-lsp refresh`. |
 | Exit `1` (`error`) | Malformed arguments or internal tool failure. | Check `message` and `recovery` in JSON output. Correct inputs if `recovery: "fix_input"`. |
