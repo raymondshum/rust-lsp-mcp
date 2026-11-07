@@ -97,17 +97,18 @@ async def search_docs(query: str, limit: int = 5) -> dict[str, Any]:
 
       Results are ordered best-first (ascending distance).  Also carries
       ``doc_stale``: ``true`` when a Markdown file the index covers was
-      added, removed or changed since the index was built (the results may
-      be out of date; ``refresh`` rebuilds it), ``false`` when none was, or
-      ``null`` when unknown (same value as ``status.doc_stale``).
+      added, removed, or changed in size or modification time since the
+      build, including a checkout that rewrites a covered file with the same
+      bytes (the results may be out of date; ``refresh`` rebuilds it),
+      ``false`` when none was, or ``null`` when unknown (same value as
+      ``status.doc_stale``).
 
     - ``not_ready`` — the doc index is absent or is currently being built
       (``doc_index_state == "building"``, see ``status``), including while a
       ``refresh`` re-initialises an errored index.  This is a
       *transient* state.  The caller **must not** interpret this as "no
       matching docs"; the store may be mid-build.  Retry after ``status``
-      reports ``doc_index_state == "ready"``, or after ``refresh`` returns.
-      Carries ``recovery: "poll_status"``.
+      reports ``doc_index_state == "ready"``.  Carries ``recovery: "poll_status"``.
 
     - ``error`` — (a) ``query`` is empty or whitespace-only (rejected before
       any readiness check or search, mirroring the position tools'
