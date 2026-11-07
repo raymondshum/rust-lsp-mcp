@@ -102,8 +102,9 @@ async def refresh() -> dict[str, Any]:
     ``status``/``analyzer_status`` reports ``state == "error"``, or you know
     the workspace changed since the last index).  Over a ready doc index,
     ``search_docs`` keeps answering from the old index while the doc rebuild
-    runs; over an errored or absent one it answers ``not_ready`` until the
-    re-initialised index is ready (see the doc-index bullet below).
+    runs; over an errored or absent one it answers ``not_ready`` while the
+    rebuild runs, after which ``doc_index_state`` reads ``"ready"`` or
+    ``"error"`` (see the doc-index bullet below).
 
     Behaviour contract:
         - **Unconditional**: every call restarts the analyzer regardless of
