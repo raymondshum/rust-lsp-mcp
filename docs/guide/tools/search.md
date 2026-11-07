@@ -4,12 +4,12 @@ type: Guide
 title: Documentation Search Tool
 description: Detailed reference for search_docs semantic search over project Markdown files.
 tags: [guide, tier-a, tools, search]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
 ---
 
 [← Back to Tool Reference](../tools.md) · [Documentation index](../index.md)

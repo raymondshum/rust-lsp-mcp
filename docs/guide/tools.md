@@ -4,30 +4,30 @@ type: Guide
 title: Tool reference
 description: Every MCP tool the server exposes, with its inputs and exact envelope responses.
 tags: [guide, tier-a, tools]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/diagnostics.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/envelope.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -130,7 +130,7 @@ modules.
 | `ok` | `results`: list of symbol objects (see below), at most 200; `total` (in-workspace matches before the cap) and `truncated` (`true` when rust-analyzer had more than 200 matches; see [List caps](#list-caps-total-and-truncated) above). |
 | `not_found` | `message` — no symbols matched the query, or rust-analyzer returned nothing. |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery: "unknown"` — unexpected failure from the LSP layer. |
+| `error` | `message`, `recovery` — rust-analyzer is stalled or its background run failed (`recovery: "refresh"`), or an unexpected failure from the LSP layer (`recovery: "unknown"`). |
 
 Each item in `results`:
 
@@ -197,7 +197,7 @@ List every symbol defined in one file, in declaration order.
 |---|---|
 | `ok` | `symbols`: list of symbol objects; `total` and `truncated`. Valid files with zero declarations return an empty list (`total: 0`). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — returns `recovery: "fix_input"` for invalid paths, or `recovery: "unknown"` for LSP read failures. |
+| `error` | `message`, `recovery` — returns `recovery: "fix_input"` for invalid paths, `recovery: "refresh"` while rust-analyzer is stalled or after its background run failed, or `recovery: "unknown"` for LSP read failures. |
 
 Each item in `symbols` (there is no `file` field — all entries belong to the
 file you passed in):
@@ -265,7 +265,7 @@ Find where the item at a given position is defined.
 | `ok` | `definitions`: list of location objects (see below). More than one is possible, e.g. a trait method that has several implementations. |
 | `not_found` | `message` — no in-workspace definition at that position. Each case has its own message: the position holds no symbol (whitespace, comment, or unknown token; "No definition found at ..."), or every returned location fell outside the project root, e.g. a standard-library or dependency definition, and was skipped (the message says the definitions resolve outside the workspace and gives their count). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected LSP failure (`recovery: "unknown"`). |
+| `error` | `message`, `recovery` — `line` or `character` is less than 1 or above 4294967296 (2**32), or `file` is an absolute path or escapes the project root via `..` (all rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected LSP failure (`recovery: "unknown"`). |
 
 Each item in `definitions`:
 
@@ -319,7 +319,7 @@ Find all uses of the item at a given position.
 | `ok` | `references`: list of location objects; `total` and `truncated` (see [List caps](#list-caps-total-and-truncated) above). The list may be empty — see note below (`total: 0`). References that resolve outside the project root (e.g. into the standard library) are silently skipped. |
 | `not_found` | `message` — no symbol at that position (whitespace, comment, or unknown token). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected failure (`recovery: "unknown"`). |
+| `error` | `message`, `recovery` — `line` or `character` is less than 1 or above 4294967296 (2**32), or `file` is an absolute path or escapes the project root via `..` (all rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected failure (`recovery: "unknown"`). |
 
 Each item in `references`:
 
@@ -408,7 +408,7 @@ Show the type signature and documentation for the item at a given position.
 | `ok` | `contents`: a Markdown string containing the type signature and any rustdoc comments, exactly as rust-analyzer produces them. |
 | `not_found` | `message` — nothing to show at that position (whitespace, comment, or unsupported construct). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected LSP failure (`recovery: "unknown"`). |
+| `error` | `message`, `recovery` — `line` or `character` is less than 1 or above 4294967296 (2**32), or `file` is an absolute path or escapes the project root via `..` (all rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected LSP failure (`recovery: "unknown"`). |
 
 **Example response**
 
@@ -614,7 +614,8 @@ shared by the whole server. Every navigation tool returns `not_ready` for
 every caller until re-indexing completes, which can take minutes on large
 projects. Over a ready doc index, `search_docs` keeps answering from the old
 index while the doc rebuild runs; over an errored or absent one it answers
-`not_ready` until the re-initialised index is ready. Do not invoke `refresh` mid-task unless the index is actually
+`not_ready` while the rebuild runs, after which `doc_index_state` reads
+`"ready"` or `"error"`. Do not invoke `refresh` mid-task unless the index is actually
 stale or broken — check `status`/`analyzer_status` first.
 
 **Inputs:** none.
@@ -669,7 +670,8 @@ has already returned: `status` reports it in `doc_index_error`, and
 **Diagnostic only.** Confirms the readiness gate works end-to-end. Returns
 `not_ready` (`recovery: "poll_status"`) while the analyzer is indexing, `error`
 (`recovery: "refresh"`) if the analyzer's background run failed
-(`state == "error"`), and `ok` with a short message once it is ready. This
+(`state == "error"`) or rust-analyzer is stalled (`analyzer_stall` set on
+`status`, whatever `state` reads), and `ok` with a short message once it is ready. This
 tool has no everyday use; it exists to verify the gating mechanism during
 development and testing.
 

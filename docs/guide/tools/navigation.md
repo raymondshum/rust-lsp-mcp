@@ -4,18 +4,18 @@ type: Guide
 title: Code Navigation Tools
 description: Detailed reference for find_symbol, goto_definition, find_references, hover, and document_symbols.
 tags: [guide, tier-a, tools, navigation]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
 ---
 
 [← Back to Tool Reference](../tools.md) · [Documentation index](../index.md)
@@ -51,7 +51,7 @@ modules.
 | `ok` | `results`: list of symbol objects, `total`: integer, `truncated`: boolean. |
 | `not_found` | `message`: confirmation that zero symbols matched the query. |
 | `not_ready` | `message`, `recovery: "poll_status"` — analyzer is indexing. |
-| `error` | `message`, `recovery: "unknown"` — internal LSP failure. |
+| `error` | `message`, `recovery`: `"refresh"` (rust-analyzer stalled, or its background run failed) or `"unknown"` (internal LSP failure). |
 
 `results` holds at most 200 symbols. `total` counts the in-workspace matches:
 the items rust-analyzer returned, minus any that resolve outside the project
@@ -95,7 +95,7 @@ Locate where a symbol is defined, given a source location.
 | `ok` | `definitions`: list of target location objects. |
 | `not_found` | `message`: either rust-analyzer returned no definition for the position ("No definition found at ..."), or every definition it returned lies outside the project root, such as in the standard library or a dependency (a message that says so and gives their count). |
 | `not_ready` | `message`, `recovery: "poll_status"` — analyzer indexing. |
-| `error` | `message`, `recovery`: `"fix_input"` (path escape, or a position past the end of the file), `"refresh"` (rust-analyzer stalled) or `"unknown"`. |
+| `error` | `message`, `recovery`: `"fix_input"` (path escape, a position below 1 or above 4294967296, or a position past the end of the file), `"refresh"` (rust-analyzer stalled) or `"unknown"`. |
 
 ---
 
@@ -163,4 +163,4 @@ List all symbols declared in a specific file in declaration order.
 |---|---|
 | `ok` | `symbols`: list of declared symbols, `total`, `truncated`. |
 | `not_ready` | `message`, `recovery: "poll_status"`. |
-| `error` | `message`, `recovery: "fix_input"` (invalid path) or `"unknown"`. |
+| `error` | `message`, `recovery: "fix_input"` (invalid path), `"refresh"` (rust-analyzer stalled, or its background run failed) or `"unknown"`. |
