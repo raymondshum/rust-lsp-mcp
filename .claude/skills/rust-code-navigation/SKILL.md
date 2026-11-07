@@ -141,11 +141,13 @@ next call.
 
 The daemon is one process shared by every caller of this project's tools.
 `refresh` tears down and rebuilds the whole index — every other caller's
-navigation calls will see `not_ready` until it finishes. `search_docs`
-keeps answering from the old doc index while the doc rebuild runs. Only run
-it when you have a specific reason to believe the index is stale (e.g. the
-project's source changed underneath it); don't call it speculatively or to
-"fix" an unrelated error.
+navigation calls will see `not_ready` until it finishes. Over a ready doc
+index, `search_docs` keeps answering from the old index while the doc
+rebuild runs; over an errored or absent one it answers `not_ready` while the
+rebuild runs, after which `doc_index_state` reads `"ready"` or `"error"`.
+Only run it when you have a specific reason to believe the index is stale
+(e.g. the project's source changed underneath it); don't call it
+speculatively or to "fix" an unrelated error.
 
 ## Freshness
 
@@ -167,10 +169,11 @@ project's source changed underneath it); don't call it speculatively or to
   `refresh` once only if `stale` still reads `true` after 60 seconds.
 - **`search_docs` answers from the doc index, which no running server
   rebuilds on its own.** After a Markdown file the index covers was added,
-  removed or changed, `doc_stale` reads `true`, in `status` and in the
-  `search_docs` reply itself, until the next `refresh` or server restart;
-  call `refresh` when it reads `true` and the answer depends on current
-  docs. During a rebuild over a ready index, `doc_index_state` stays
+  removed, or changed in size or modification time (a checkout that rewrites
+  it with the same bytes included), `doc_stale` reads `true`, in `status` and
+  in the `search_docs` reply itself, until the next `refresh` or server
+  restart; call `refresh` when it reads `true` and the answer depends on
+  current docs. During a rebuild over a ready index, `doc_index_state` stays
   `"ready"`, `search_docs` keeps answering from the old index, and
   `status`'s `doc_index_progress` shows the rebuild's progress.
   `doc_index_state` reads `"building"` for the first build on an empty store
