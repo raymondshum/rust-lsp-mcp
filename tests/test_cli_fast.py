@@ -389,7 +389,9 @@ def test_wait_flag_doc_index_error_prints_diagnostic_and_exits_2(
     monkeypatch.setattr(
         client_mod,
         "wait_for_ready",
-        lambda url, secs: real_wait(url, secs, status_check=fake_check, sleep=lambda _s: None),
+        lambda url, secs, **kw: real_wait(
+            url, secs, status_check=fake_check, sleep=lambda _s: None, **kw
+        ),
     )
     tool_calls: list[str] = []
     monkeypatch.setattr(
@@ -741,7 +743,9 @@ def test_wait_flag_exits_2_when_first_status_reply_flips_to_doc_error(
     monkeypatch.setattr(
         client_mod,
         "wait_for_ready",
-        lambda url, secs: real_wait(url, secs, status_check=_status_check, sleep=lambda _s: None),
+        lambda url, secs, **kw: real_wait(
+            url, secs, status_check=_status_check, sleep=lambda _s: None, **kw
+        ),
     )
     monkeypatch.setattr(
         client_mod, "call_tool_sync", lambda *_a: ({"status": "ok", "state": "ready"}, None)
@@ -849,3 +853,198 @@ def test_wait_flag_doc_error_ending_in_period_prints_no_period_semicolon(
     err = capsys.readouterr().err
     assert ".;" not in err
     assert "reports a doc index error: Collection [abc] does not exist; " in err
+
+
+# ---------------------------------------------------------------------------
+# FW2 (backlog line 171): a read timeout exits 4, not "daemon not reachable"
+# ---------------------------------------------------------------------------
+
+
+def test_read_timeout_exits_4_with_timeout_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The mcp client's ReadTimeout inside a TaskGroup group exits 4 and says
+    the daemon was reached; it never prints the unreachable hint."""
+    import httpx
+
+    group = ExceptionGroup("unhandled errors in a TaskGroup", [httpx.ReadTimeout("")])
+    monkeypatch.setattr(client_mod, "call_tool_sync", lambda *a, **k: (None, group))
+    code = cli.main(["goto-definition", "src/main.rs", "1", "1"])
+    assert code == 4
+    assert code == cli.EXIT_TIMEOUT
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "was reached" in captured.err
+    assert "timed out after 300" in captured.err
+    assert "rust-lsp refresh" in captured.err
+    assert "analyzer_stall" in captured.err
+    assert "ReadTimeout" in captured.err
+    assert "not reachable" not in captured.err
+
+
+def test_read_timeout_nested_group_resolves_innermost_leaf(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A nested group still exits 4, and the underlying error names the leaf."""
+    import httpx
+
+    inner = ExceptionGroup("inner", [httpx.ReadTimeout("read timed out")])
+    outer = ExceptionGroup("unhandled errors in a TaskGroup", [inner])
+    assert client_mod.innermost_exception(outer) is inner.exceptions[0]
+    assert client_mod.is_read_timeout(outer)
+    monkeypatch.setattr(client_mod, "call_tool_sync", lambda *a, **k: (None, outer))
+    code = cli.main(["status"])
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "underlying error: ReadTimeout: read timed out" in err
+
+
+def test_read_timeout_helpers_on_plain_exceptions() -> None:
+    """A non-group exception is its own innermost leaf; a refused connect is no
+    read timeout, and neither is a group without one."""
+    exc = ConnectionRefusedError("refused")
+    assert client_mod.innermost_exception(exc) is exc
+    assert not client_mod.is_read_timeout(exc)
+    assert not client_mod.is_read_timeout(ExceptionGroup("g", [OSError("x")]))
+
+
+def test_connection_refused_still_exits_3_with_unreachable_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        client_mod, "call_tool_sync", lambda *a, **k: (None, ConnectionRefusedError())
+    )
+    code = cli.main(["status"])
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "not reachable" in err
+    assert "timed out" not in err
+
+
+def test_client_passes_read_timeout_to_streamablehttp_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_connect_and_call`` hands READ_TIMEOUT_SECONDS to the mcp client, so
+    the printed N and the real timeout cannot drift."""
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_client(url: str, **kwargs: Any) -> Any:
+        seen["url"] = url
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(client_mod, "streamablehttp_client", fake_client)
+    _env, exc = client_mod.call_tool_sync("http://x/mcp", "status", {})
+    assert isinstance(exc, _Stop)
+    assert seen["sse_read_timeout"] == client_mod.READ_TIMEOUT_SECONDS == 300.0
+
+
+# ---------------------------------------------------------------------------
+# Backlog line 165: navigation under --wait runs past a doc index error
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("doc_state", ["error", "building"])
+def test_wait_for_ready_without_docs_ignores_doc_index_state(doc_state: str) -> None:
+    """need_docs=False: state=ready is ready whatever doc_index_state reads."""
+    calls, fake_check = _scripted(
+        [
+            ({"status": "ok", "state": "indexing", "doc_index_state": doc_state}, None),
+            (
+                {
+                    "status": "ok",
+                    "state": "ready",
+                    "doc_index_state": doc_state,
+                    "doc_index_error": _DOC_ERROR_TEXT if doc_state == "error" else None,
+                },
+                None,
+            ),
+        ]
+    )
+    _clock, monotonic, sleep = _fake_clock()
+    ready, ever_connected, doc_error = client_mod.wait_for_ready(
+        "http://x/mcp",
+        timeout_seconds=600,
+        status_check=fake_check,
+        sleep=sleep,
+        monotonic=monotonic,
+        need_docs=False,
+    )
+    assert (ready, ever_connected, doc_error) == (True, True, None)
+    assert calls["n"] == 2
+
+
+def test_wait_flag_navigation_passes_need_docs_false_and_calls_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_wait(url: str, secs: float, **kw: Any) -> tuple[bool, bool, str | None]:
+        seen.update(kw)
+        return True, True, None
+
+    tool_calls: list[str] = []
+    monkeypatch.setattr(client_mod, "wait_for_ready", fake_wait)
+    monkeypatch.setattr(
+        client_mod,
+        "call_tool_sync",
+        lambda _u, name, _a: (tool_calls.append(name), ({"status": "ok"}, None))[1],
+    )
+    assert cli.main(["--wait", "5", "find-symbol", "main"]) == 0
+    assert seen["need_docs"] is False
+    assert tool_calls == ["find_symbol"]
+
+
+@pytest.mark.parametrize("command", [["search-docs", "x"], ["status"], ["refresh"]])
+def test_wait_flag_doc_commands_pass_need_docs_true(
+    monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_wait(url: str, secs: float, **kw: Any) -> tuple[bool, bool, str | None]:
+        seen.update(kw)
+        return True, True, None
+
+    monkeypatch.setattr(client_mod, "wait_for_ready", fake_wait)
+    monkeypatch.setattr(client_mod, "call_tool_sync", lambda *a, **k: ({"status": "ok"}, None))
+    assert cli.main(["--wait", "5", *command]) == 0
+    assert seen["need_docs"] is True
+
+
+def test_wait_flag_navigation_runs_past_doc_index_error_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real wait over a doc-error status reply lets find-symbol run."""
+    _calls, fake_check = _scripted(
+        [
+            (
+                {
+                    "status": "ok",
+                    "state": "ready",
+                    "doc_index_state": "error",
+                    "doc_index_error": _DOC_ERROR_TEXT,
+                },
+                None,
+            )
+        ]
+    )
+    real_wait = client_mod.wait_for_ready
+    monkeypatch.setattr(
+        client_mod,
+        "wait_for_ready",
+        lambda url, secs, **kw: real_wait(
+            url, secs, status_check=fake_check, sleep=lambda _s: None, **kw
+        ),
+    )
+    tool_calls: list[str] = []
+    monkeypatch.setattr(
+        client_mod,
+        "call_tool_sync",
+        lambda _u, name, _a: (tool_calls.append(name), ({"status": "ok", "symbols": []}, None))[1],
+    )
+    assert cli.main(["--wait", "5", "find-symbol", "main"]) == 0
+    assert tool_calls == ["find_symbol"]
+    assert "doc index error" not in capsys.readouterr().err

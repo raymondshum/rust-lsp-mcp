@@ -115,7 +115,10 @@ async def hover(
       root (absolute paths and ``..``-escaping paths are rejected
       immediately, without calling the analyzer).  Carries
       ``recovery: "fix_input"`` for the position/path validation failures
-      above, or ``"unknown"`` for the catch-all LSP-exception fallback.
+      above and for a position past the end of the file (rust-analyzer's
+      "Invalid offset"), ``"refresh"`` while ``status`` reports an
+      ``analyzer_stall``, or ``"unknown"`` for the catch-all LSP-exception
+      fallback.
 
     Positions are 1-indexed (same convention as ``find_symbol`` output).
     Nothing to hover → ``not_found``; rust-analyzer returns the info as
@@ -170,7 +173,7 @@ async def hover(
         return guard if guard is not None else not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("hover: LSP error at %s:%d:%d", file, line, character)
-        return lsp_failure(exc)
+        return lsp_failure(exc, position=f"{file}:{line}:{character}")
 
     # 5. Handle None (no hover info).
     if hov is None:

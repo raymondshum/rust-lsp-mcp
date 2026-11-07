@@ -437,3 +437,21 @@ class TestHoverPositionBoundary:
 
         asyncio.run(_inner())
         assert captured["rel_path"] == "src/nested/bar.rs"
+
+
+class TestHoverOutOfRangePosition:
+    """Backlog line 172: rust-analyzer's "Invalid offset" maps to fix_input."""
+
+    def test_invalid_offset_returns_fix_input(self) -> None:
+        from multilspy.lsp_protocol_handler.server import Error
+
+        exc = Error(
+            -32603,  # ty: ignore[invalid-argument-type]
+            "Invalid offset LineCol { line: 99998, col: 0 } (line index length: 18464)",
+        )
+        mgr = _make_manager(STATE_READY)
+        result = _run_hover(mgr, "crates/core/main.rs", 99999, 1, None, raise_exc=exc)
+        assert result["status"] == "error"
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:99999:1" in result["message"]
+        assert "past the end" in result["message"]

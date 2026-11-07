@@ -77,3 +77,50 @@ def test_stale_dotenv_key_is_ignored(
     s = Settings(_env_file=str(env))  # ty: ignore[unknown-argument]
     assert s.project_root == "/tmp/x"
     assert not hasattr(s, "chroma_model_cache")
+
+
+def _clear_rlm_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in list(os.environ):
+        if name.startswith("RLM_"):
+            monkeypatch.delenv(name, raising=False)
+
+
+def test_stall_and_request_timeout_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stall threshold defaults to 180 s and the request timeout to 120 s."""
+    _clear_rlm_env(monkeypatch)
+    s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
+    assert s.stall_threshold_seconds == 180
+    assert s.request_timeout_seconds == 120
+
+
+def test_stall_and_request_timeout_env_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RLM_STALL_THRESHOLD_SECONDS and RLM_REQUEST_TIMEOUT_SECONDS set the fields."""
+    _clear_rlm_env(monkeypatch)
+    monkeypatch.setenv("RLM_STALL_THRESHOLD_SECONDS", "240")
+    monkeypatch.setenv("RLM_REQUEST_TIMEOUT_SECONDS", "45.5")
+    s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
+    assert s.stall_threshold_seconds == 240
+    assert s.request_timeout_seconds == 45.5
+
+
+def test_stall_and_request_timeout_accept_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 is accepted for both (it disables the timer signal / the timeout)."""
+    _clear_rlm_env(monkeypatch)
+    monkeypatch.setenv("RLM_STALL_THRESHOLD_SECONDS", "0")
+    monkeypatch.setenv("RLM_REQUEST_TIMEOUT_SECONDS", "0")
+    s = Settings(_env_file=None)  # ty: ignore[unknown-argument]
+    assert s.stall_threshold_seconds == 0
+    assert s.request_timeout_seconds == 0
+
+
+@pytest.mark.parametrize("name", ["RLM_STALL_THRESHOLD_SECONDS", "RLM_REQUEST_TIMEOUT_SECONDS"])
+def test_stall_and_request_timeout_reject_negative(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """A negative value fails validation."""
+    import pydantic
+
+    _clear_rlm_env(monkeypatch)
+    monkeypatch.setenv(name, "-1")
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None)  # ty: ignore[unknown-argument]

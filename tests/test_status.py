@@ -982,3 +982,66 @@ class TestStatusDocStateAgreesWithFields:
             result["doc_stale"],
             result["doc_unreadable_files"],
         ) == ("none", False, 0)
+
+
+# ---------------------------------------------------------------------------
+# FW1 (backlog line 150): analyzer_stall, quiescent and reindex_inflight
+# ---------------------------------------------------------------------------
+
+_STALL_FIELDS = ("analyzer_stall", "quiescent", "reindex_inflight")
+
+
+class TestStatusStallFields:
+    def test_no_manager_reads_null(self) -> None:
+        result = _call_status(None, subprocess_raises=OSError("no git"))
+        for field in _STALL_FIELDS:
+            assert field in result
+            assert result[field] is None, field
+
+    def test_no_stall_reads_null_with_manager_values(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        result = _call_status(mgr, subprocess_raises=OSError("no git"))
+        assert result["analyzer_stall"] is None
+        assert result["quiescent"] is None
+        assert result["reindex_inflight"] == []
+
+    def test_quiescent_and_reindex_inflight_read_from_manager(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        mgr._quiescent = False
+        mgr._reindex_inflight = frozenset({"rustAnalyzer/cachePriming", "rustAnalyzer/Fetching"})
+        mgr.stall_threshold_seconds = 0  # keep the timer out of this case
+        result = _call_status(mgr, subprocess_raises=OSError("no git"))
+        assert result["quiescent"] is False
+        assert result["reindex_inflight"] == ["rustAnalyzer/Fetching", "rustAnalyzer/cachePriming"]
+        assert result["analyzer_stall"] is None
+
+    def test_panic_signal_reads_panic(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        mgr._stall_panic_at = "2026-11-06T01:35:00+00:00"
+        mgr._stall_panic_thread = "PrimeCaches#6"
+        mgr._stall_panic_line = "thread 'PrimeCaches#6' (77) panicked at file_set.rs:31:34:"
+        result = _call_status(mgr, subprocess_raises=OSError("no git"))
+        stall = result["analyzer_stall"]
+        assert stall["signal"] == "panic"
+        assert stall["since"] == "2026-11-06T01:35:00+00:00"
+        assert "PrimeCaches#6" in stall["message"]
+        assert "refresh" in stall["message"]
+        # state and analyzer_health do not read the stall.
+        assert result["state"] == "ready"
+
+    def test_stale_progress_reads_progress_timeout(self, monkeypatch: Any) -> None:
+        mgr = _make_manager(STATE_INDEXING)
+        mgr._reindex_inflight = frozenset({"rustAnalyzer/cachePriming"})
+        mgr._quiescent = False
+        mgr._progress_message = "Indexing 63/64 (rg)"
+        mgr._progress_at = "2026-11-06T01:30:00+00:00"
+        mgr._progress_monotonic = 100.0
+        monkeypatch.setattr(analyzer_mod, "_monotonic", lambda: 100.0 + 181)
+        result = _call_status(mgr, subprocess_raises=OSError("no git"))
+        stall = result["analyzer_stall"]
+        assert stall["signal"] == "progress_timeout"
+        assert stall["since"] == "2026-11-06T01:30:00+00:00"
+        assert "Indexing 63/64 (rg)" in stall["message"]
+        assert result["state"] == "indexing"
+        assert result["quiescent"] is False
+        assert result["reindex_inflight"] == ["rustAnalyzer/cachePriming"]

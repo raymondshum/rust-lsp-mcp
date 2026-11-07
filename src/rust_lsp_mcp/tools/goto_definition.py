@@ -89,7 +89,10 @@ async def goto_definition(
       the workspace root (absolute paths and ``..``-escaping paths are
       rejected immediately, without calling the analyzer).  Carries
       ``recovery: "fix_input"`` for the position/path validation failures
-      above, or ``"unknown"`` for the catch-all LSP-exception fallback.
+      above and for a position past the end of the file (rust-analyzer's
+      "Invalid offset"), ``"refresh"`` while ``status`` reports an
+      ``analyzer_stall``, or ``"unknown"`` for the catch-all LSP-exception
+      fallback.
 
     Requires an exact position (file + 1-indexed line/character) such as one
     returned by ``find_symbol`` or ``document_symbols``; if you only have a
@@ -136,7 +139,7 @@ async def goto_definition(
         return guard if guard is not None else not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("goto_definition: LSP error for %r line=%d char=%d", file, line, character)
-        return lsp_failure(exc)
+        return lsp_failure(exc, position=f"{file}:{line}:{character}")
 
     # Step 7: map results to external (1-indexed) positions
     if not locs:

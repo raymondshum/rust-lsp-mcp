@@ -12,7 +12,11 @@ Status vocabulary (all phases):
                 Also returned by ``require_ready()`` — NOT ``not_ready`` —
                 when the analyzer's background indexing run has permanently
                 failed (``state == "error"``); this is only recoverable via
-                the ``refresh`` tool.  The analogous doc-store failure
+                the ``refresh`` tool.  Also returned with ``refresh`` by
+                ``require_ready()`` while rust-analyzer is stalled (``status``
+                reports ``analyzer_stall``), whatever ``state`` reads: a
+                stalled analyzer never finishes its indexing run on its own.
+                The analogous doc-store failure
                 (``doc_index_state == "error"``) is surfaced the same way by
                 ``search_docs``.
 
@@ -106,7 +110,17 @@ def error(message: str, recovery: str = RECOVERY_UNKNOWN) -> dict[str, Any]:
     return {"status": STATUS_ERROR, "message": message, "recovery": recovery}
 
 
-def lsp_failure(exc: Exception, context: str = "") -> dict[str, Any]:
+# rust-analyzer's text for a position past the end of the file, from
+# ``LineIndex`` offset conversion: ``Invalid offset LineCol { line: 99998,
+# col: 0 } (line index length: 18464)`` (live probe, rust-analyzer 1.99.1,
+# 2026-11-07).  Matched on the text alone: it arrives as JSON-RPC -32603
+# (InternalError), the code rust-analyzer also uses for request panics.
+INVALID_OFFSET_TEXT = "Invalid offset"
+
+
+def lsp_failure(
+    exc: Exception, context: str = "", *, position: str | None = None
+) -> dict[str, Any]:
     """Return an ``error`` envelope for a catch-all, unexpected LSP/search exception.
 
     Shared by every tool's catch-all ``except Exception`` fallback (reached
@@ -123,25 +137,58 @@ def lsp_failure(exc: Exception, context: str = "") -> dict[str, Any]:
     fires when the analyzer is already ready, so advising refresh would trade
     a one-off glitch for needless destructive downtime.
 
+    Three cases come before that text, in this order:
+
+    - a stalled analyzer (``AnalyzerManager.stall_report()`` is not None, FW1):
+      ``require_ready()``'s ``refresh`` envelope, because a request that
+      fails during a stall (a re-panic on a request thread) fails again;
+    - an ``AnalyzerRequestTimeoutError`` (the server-side request timeout):
+      ``recovery: "unknown"`` with a message that rust-analyzer did not
+      answer in time, that the caller may retry once, and that repeated
+      timeouts are worth a ``status`` check for ``analyzer_stall``;
+    - rust-analyzer's "Invalid offset" error (a position past the end of the
+      file, backlog line 172): ``recovery: "fix_input"``.
+
     Args:
         exc: The caught exception.
         context: Optional short parenthetical naming which sub-call failed
             (e.g. ``"definition"`` for ``find_references``'s second delegate
             call under ``include_declaration=True``), mirroring the existing
             ``"LSP error (definition): ..."`` distinction.
+        position: The ``file:line:character`` the caller sent (1-indexed),
+            named in the out-of-range message when given.
     """
     # The analyzer can fail between require_ready() and here (the process
     # died mid-request, SW-06): then the "still running, retry" text would be
     # false, so return require_ready()'s refresh envelope instead.  Deferred
     # import: core imports this module at load time.
     from rust_lsp_mcp import core
-    from rust_lsp_mcp.analyzer import STATE_ERROR
+    from rust_lsp_mcp.analyzer import STATE_ERROR, AnalyzerRequestTimeoutError
 
     manager = core.get_manager()
     if manager is not None and manager.state == STATE_ERROR:
         guard = core.require_ready()
         if guard is not None:
             return guard
+    if manager is not None and isinstance(manager.stall_report(), dict):
+        guard = core.require_ready()
+        if guard is not None:
+            return guard
+    if isinstance(exc, AnalyzerRequestTimeoutError):
+        return error(
+            f"rust-analyzer did not answer the {exc.op} request within "
+            f"{exc.timeout_seconds:g} seconds (RLM_REQUEST_TIMEOUT_SECONDS); the "
+            "analyzer is still running. Retry the request once; if requests keep "
+            "timing out, check status for analyzer_stall.",
+            recovery=RECOVERY_UNKNOWN,
+        )
+    if INVALID_OFFSET_TEXT in str(exc):
+        where = f"The position {position}" if position else "The position"
+        return error(
+            f"{where} is past the end of the file (rust-analyzer: {exc}). "
+            "Check the line and character against the file's current contents.",
+            recovery=RECOVERY_FIX_INPUT,
+        )
     prefix = f"LSP error ({context})" if context else "LSP error"
     return error(
         f"{prefix}: {exc}. This is an unexpected internal error; the analyzer "

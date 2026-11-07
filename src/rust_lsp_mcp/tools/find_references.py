@@ -201,7 +201,10 @@ async def find_references(
       root (absolute paths and ``..``-escaping paths are rejected
       immediately, without calling the analyzer).  Carries
       ``recovery: "fix_input"`` for the position/path validation failures
-      above, or ``"unknown"`` for the catch-all LSP-exception fallback.
+      above and for a position past the end of the file (rust-analyzer's
+      "Invalid offset"), ``"refresh"`` while ``status`` reports an
+      ``analyzer_stall``, or ``"unknown"`` for the catch-all LSP-exception
+      fallback.
 
     Requires an exact position (file + 1-indexed line/character) such as one
     returned by ``find_symbol`` or ``document_symbols``; if you only have a
@@ -249,7 +252,7 @@ async def find_references(
         return guard if guard is not None else not_ready(TORN_DOWN_RETRY_MESSAGE)
     except Exception as exc:
         _log.exception("find_references: LSP error for %r at (%d, %d)", file, line, character)
-        return lsp_failure(exc)
+        return lsp_failure(exc, position=f"{file}:{line}:{character}")
 
     # refs is list[Location] | None.
     # None means the LSP returned null (no symbol at this position) — not_found.
@@ -295,7 +298,7 @@ async def find_references(
                 line,
                 character,
             )
-            return lsp_failure(exc, context="definition")
+            return lsp_failure(exc, context="definition", position=f"{file}:{line}:{character}")
 
         # defs is list[Location] | None.
         # None means no symbol at this position — skip silently; the references

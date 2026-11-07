@@ -65,6 +65,30 @@ async def status() -> dict[str, Any]:
                            and after rust-analyzer exits.
     - ``watcher_message`` — the stderr line of the run's first watch
                            failure, or ``null``.
+    - ``analyzer_stall`` — ``null``, or an object when the server detects a
+                           rust-analyzer stall (a run that will not finish
+                           on its own): ``signal`` is ``"panic"`` when a
+                           cache-priming thread (``PrimeCaches#<n>``)
+                           panicked since rust-analyzer last reported
+                           ``quiescent: true``, else ``"progress_timeout"``
+                           when a re-index has shown no progress for longer
+                           than ``RLM_STALL_THRESHOLD_SECONDS`` (default 180)
+                           while ``quiescent`` reads ``false``; ``since`` is
+                           the ISO 8601 UTC time of the panic, or of the last
+                           progress; ``message`` names the cause and the
+                           recovery.  While it is set, every analyzer tool
+                           returns ``error`` with ``recovery: "refresh"``;
+                           one ``refresh`` clears it.  ``state`` and
+                           ``analyzer_health`` do not read it.  ``null`` with
+                           no manager.
+    - ``quiescent``      — rust-analyzer's latest ``quiescent`` report in
+                           this run (``false`` while it is busy), or ``null``
+                           before the first report, after ``refresh`` and
+                           with no manager.
+    - ``reindex_inflight`` — the re-index progress tokens (``cachePriming``,
+                           ``Fetching``, ``Roots Scanned``) that began and
+                           have not ended, as a sorted list (``[]`` when
+                           none); ``null`` with no manager.
     - ``analyzer_exit_code`` — exit code of a rust-analyzer process that died
                            without a shutdown request (``state`` is then
                            ``"error"``), else ``null``.  Cleared by
@@ -225,6 +249,9 @@ async def status() -> dict[str, Any]:
     analyzer_exit_code: int | None = mgr.analyzer_exit_code if mgr is not None else None
     watcher_health: str | None = mgr.watcher_health if mgr is not None else None
     watcher_message: str | None = mgr.watcher_message if mgr is not None else None
+    analyzer_stall: dict[str, str] | None = mgr.stall_report() if mgr is not None else None
+    quiescent: bool | None = mgr.quiescent if mgr is not None else None
+    reindex_inflight: list[str] | None = mgr.reindex_inflight if mgr is not None else None
     # Package versions are cheap to resolve (importlib.metadata reads
     # installed distribution metadata, no I/O beyond that) — compute fresh
     # per call rather than caching, unlike rust_analyzer_version's subprocess.
@@ -291,6 +318,9 @@ async def status() -> dict[str, Any]:
         analyzer_exit_code=analyzer_exit_code,
         watcher_health=watcher_health,
         watcher_message=watcher_message,
+        analyzer_stall=analyzer_stall,
+        quiescent=quiescent,
+        reindex_inflight=reindex_inflight,
         indexed_commit=indexed_commit,
         current_commit=current_commit,
         stale=stale,

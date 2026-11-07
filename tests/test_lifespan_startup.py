@@ -130,6 +130,12 @@ class _FakeManager:
         # Backlog line 49: status() reads the generation and may await
         # reconcile_head when stale would read true.
         self.generation = 0
+        # Backlog line 150 stall fields read by status().
+        self.quiescent: bool | None = None
+        self.reindex_inflight: list[str] = []
+
+    def stall_report(self) -> dict[str, str] | None:
+        return None
 
     async def reconcile_head(self, current_commit: str, gen: int) -> str | None:
         return None

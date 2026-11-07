@@ -171,3 +171,125 @@ class TestRecoveryEndToEnd:
         )
         assert result["status"] == STATUS_ERROR
         assert result["recovery"] == RECOVERY_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# FW1 (backlog line 150): refresh while stalled; the request timeout
+# ---------------------------------------------------------------------------
+
+_PANIC_LINE = "thread 'PrimeCaches#1' (9085) panicked at file_set.rs:31:34:"
+
+
+def _stalled(state: str) -> AnalyzerManager:
+    mgr = _make_manager(state)
+    mgr._stall_panic_at = "2026-11-06T01:35:00+00:00"
+    mgr._stall_panic_thread = "PrimeCaches#1"
+    mgr._stall_panic_line = _PANIC_LINE
+    return mgr
+
+
+def _with_manager(manager: AnalyzerManager | None, fn: Any) -> Any:
+    with patch.object(core, "_manager", manager):
+        return fn()
+
+
+class TestStallRecovery:
+    def test_require_ready_stalled_while_ready_returns_refresh(self) -> None:
+        mgr = _stalled(STATE_READY)
+        result = _with_manager(mgr, core.require_ready)
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == RECOVERY_REFRESH
+        assert result["message"] == mgr.stall_report()["message"]  # ty: ignore[not-subscriptable]
+
+    def test_require_ready_stalled_while_indexing_returns_refresh(self) -> None:
+        """A stall can form before the run's first quiescent: true (state
+        "indexing"); that caller gets refresh, not poll_status."""
+        mgr = _stalled(STATE_INDEXING)
+        result = _with_manager(mgr, core.require_ready)
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == RECOVERY_REFRESH
+        assert "PrimeCaches#1" in result["message"]
+
+    def test_require_ready_without_stall_unchanged(self) -> None:
+        assert _with_manager(_make_manager(STATE_READY), core.require_ready) is None
+        result = _with_manager(_make_manager(STATE_INDEXING), core.require_ready)
+        assert result["status"] == STATUS_NOT_READY
+
+    def test_lsp_failure_stalled_returns_refresh_without_retry_text(self) -> None:
+        mgr = _stalled(STATE_READY)
+        exc = RuntimeError("request handler panicked: no entry found for key (-32603)")
+        result = _with_manager(mgr, lambda: lsp_failure(exc))
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == RECOVERY_REFRESH
+        assert "Retry the request once" not in result["message"]
+        assert result == _with_manager(mgr, core.require_ready)
+
+    def test_lsp_failure_without_stall_unchanged(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        result = _with_manager(mgr, lambda: lsp_failure(RuntimeError("boom")))
+        assert result["recovery"] == RECOVERY_UNKNOWN
+        assert "Retry the request once" in result["message"]
+
+    def test_lsp_failure_request_timeout_not_stalled(self) -> None:
+        from rust_lsp_mcp.analyzer import AnalyzerRequestTimeoutError
+
+        mgr = _make_manager(STATE_READY)
+        exc = AnalyzerRequestTimeoutError("definition", 120)
+        result = _with_manager(mgr, lambda: lsp_failure(exc))
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == RECOVERY_UNKNOWN
+        assert "did not answer the definition request within 120 seconds" in result["message"]
+        assert "Retry the request once" in result["message"]
+        assert "analyzer_stall" in result["message"]
+
+    def test_lsp_failure_request_timeout_stalled_returns_refresh(self) -> None:
+        from rust_lsp_mcp.analyzer import AnalyzerRequestTimeoutError
+
+        mgr = _stalled(STATE_READY)
+        exc = AnalyzerRequestTimeoutError("definition", 120)
+        result = _with_manager(mgr, lambda: lsp_failure(exc))
+        assert result["recovery"] == RECOVERY_REFRESH
+        assert "PrimeCaches#1" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# Backlog line 172: a position past the end of the file is fix_input
+# ---------------------------------------------------------------------------
+
+# The exception step 1a recorded live (rust-analyzer 1.99.1, 2026-11-07):
+# multilspy.lsp_protocol_handler.server.Error, code -32603.
+_INVALID_OFFSET_TEXT = "Invalid offset LineCol { line: 99998, col: 0 } (line index length: 18464)"
+
+
+def _invalid_offset_error() -> Exception:
+    from multilspy.lsp_protocol_handler.server import Error
+
+    return Error(-32603, _INVALID_OFFSET_TEXT)  # ty: ignore[invalid-argument-type]
+
+
+class TestInvalidOffset:
+    def test_lsp_failure_invalid_offset_is_fix_input(self) -> None:
+        mgr = _make_manager(STATE_READY)
+        exc = _invalid_offset_error()
+        result = _with_manager(
+            mgr, lambda: lsp_failure(exc, position="crates/core/main.rs:99999:1")
+        )
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == RECOVERY_FIX_INPUT
+        assert "crates/core/main.rs:99999:1" in result["message"]
+        assert "past the end" in result["message"]
+        assert "Invalid offset" in result["message"]
+        assert "Retry the request once" not in result["message"]
+
+    def test_lsp_failure_invalid_offset_without_position(self) -> None:
+        result = _with_manager(None, lambda: lsp_failure(_invalid_offset_error()))
+        assert result["recovery"] == RECOVERY_FIX_INPUT
+        assert "past the end" in result["message"]
+
+    def test_other_minus_32603_error_stays_unknown(self) -> None:
+        from multilspy.lsp_protocol_handler.server import Error
+
+        exc = Error(-32603, "request handler panicked: no entry found for key")  # ty: ignore[invalid-argument-type]
+        result = _with_manager(_make_manager(STATE_READY), lambda: lsp_failure(exc))
+        assert result["recovery"] == RECOVERY_UNKNOWN
+        assert "Retry the request once" in result["message"]

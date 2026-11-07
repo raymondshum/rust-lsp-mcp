@@ -663,6 +663,31 @@ class TestErrorHandling:
         assert "message" in result
         assert "def boom" in result["message"]
 
+    def test_invalid_offset_returns_fix_input(self) -> None:
+        """Backlog line 172: rust-analyzer's "Invalid offset" maps to fix_input."""
+        from multilspy.lsp_protocol_handler.server import Error
+
+        exc = Error(
+            -32603,  # ty: ignore[invalid-argument-type]
+            "Invalid offset LineCol { line: 99998, col: 0 } (line index length: 18464)",
+        )
+        mgr = _make_manager(STATE_READY)
+
+        async def _inner() -> dict[str, Any]:
+            with (
+                patch.object(core, "_manager", mgr),
+                patch.object(mgr, "request_references", new=AsyncMock(side_effect=exc)),
+            ):
+                return await find_references(
+                    file="crates/core/main.rs", line=99999, character=1, include_declaration=False
+                )
+
+        result = asyncio.run(_inner())
+        assert result["status"] == STATUS_ERROR
+        assert result["recovery"] == "fix_input"
+        assert "crates/core/main.rs:99999:1" in result["message"]
+        assert "past the end" in result["message"]
+
 
 # ---------------------------------------------------------------------------
 # UR-11 (revised): total / truncated

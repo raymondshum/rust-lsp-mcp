@@ -16,11 +16,16 @@ Exit codes (D8, docs/planning/cli-frontend.md):
     1 - envelope status ``error``.
     2 - envelope status ``not_ready``, including a ``--wait`` window that
         expired while the daemon was reachable but never became ready, and a
-        ``--wait`` that stopped because the daemon reported a doc index
-        error (``doc_index_state == "error"``; run ``rust-lsp refresh``).
-    3 - the daemon was never reachable at all (connection refused, handshake
-        failure, timeout), including a ``--wait`` window that expired
-        without ever connecting.
+        ``--wait`` on ``search-docs`` or ``status`` that stopped because the
+        daemon reported a doc index error (``doc_index_state == "error"``;
+        run ``rust-lsp refresh``).
+    3 - the daemon was never reached (connection refused, handshake
+        failure, connect timeout), including a ``--wait`` window that
+        expired without ever connecting.
+    4 - the daemon was reached, but the request timed out after
+        ``client.READ_TIMEOUT_SECONDS`` (300 s) with no reply; rust-analyzer
+        may be stalled (check ``status`` for ``analyzer_stall``, then run
+        ``rust-lsp refresh``).
 
 Deliberate choice -- argparse usage errors: argparse's own default exit code
 for a parse failure (bad/missing arguments, unknown subcommand) is 2, which
@@ -53,6 +58,12 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NOT_READY = 2
 EXIT_UNREACHABLE = 3
+EXIT_TIMEOUT = 4
+
+# Commands whose --wait also waits for the doc index (backlog line 165): only
+# these read it (search-docs, status) or rebuild it (refresh).  Every other
+# command waits for the code index alone.
+_DOC_WAIT_COMMANDS = frozenset({"search-docs", "status", "refresh"})
 
 DEFAULT_HTTP_PORT = 8000
 
@@ -177,12 +188,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Before running the command, poll `status` every 2s until the "
-            "daemon reports both state=ready and doc_index_state=ready, i.e. "
-            "the code index and the doc index (or SECS elapses). Rides through "
-            "daemon boot (connection-refused -> not_ready -> ready). Stops at "
-            "once, exit 2, when the daemon reports doc_index_state=error, and "
-            "prints that error. Must be given BEFORE the subcommand, e.g. "
-            "`rust-lsp --wait 180 status`."
+            "daemon reports state=ready (or SECS elapses); for search-docs, "
+            "status and refresh, also doc_index_state=ready, i.e. the code "
+            "index and the doc index. Rides through daemon boot "
+            "(connection-refused -> not_ready -> ready). For search-docs and "
+            "status, stops at once, exit 2, when the daemon reports "
+            "doc_index_state=error, and prints that error; refresh runs "
+            "through it to rebuild the index. Must be given BEFORE the "
+            "subcommand, e.g. `rust-lsp --wait 180 status`."
         ),
     )
 
@@ -391,7 +404,9 @@ def main(argv: list[str] | None = None) -> int:
     from rust_lsp_cli import client
 
     if args.wait is not None:
-        ready, ever_connected, doc_error = client.wait_for_ready(base_url, args.wait)
+        ready, ever_connected, doc_error = client.wait_for_ready(
+            base_url, args.wait, need_docs=args.command in _DOC_WAIT_COMMANDS
+        )
         if not ready and doc_error is not None and args.command == "refresh":
             # Backlog line 110: refresh is the recovery from a doc error, so
             # the wait lets it through instead of stopping it.
@@ -419,6 +434,19 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_NOT_READY
 
     envelope, exc = client.call_tool_sync(base_url, tool_name, arguments)
+    if exc is not None and client.is_read_timeout(exc):
+        # FW2 (backlog line 171): the daemon accepted the connection and
+        # never replied; exit 3 would send a script to restart a daemon that
+        # is up.
+        leaf = client.innermost_exception(exc)
+        print(
+            f"rust-lsp: the daemon at {base_url} was reached, but the request timed out "
+            f"after {client.READ_TIMEOUT_SECONDS:g}s with no reply; rust-analyzer may be "
+            "stalled. Check rust-lsp status (analyzer_stall), then run rust-lsp refresh.",
+            file=sys.stderr,
+        )
+        print(f"rust-lsp: underlying error: {type(leaf).__name__}: {leaf}", file=sys.stderr)
+        return EXIT_TIMEOUT
     if exc is not None:
         print(_unreachable_hint(base_url), file=sys.stderr)
         print(f"rust-lsp: underlying error: {exc}", file=sys.stderr)

@@ -58,7 +58,7 @@ Every tool returns an object with a `status` field. The four possible values are
 | `ok` | The query ran successfully. The payload may be empty — an empty result is a meaningful answer, not an error. |
 | `not_ready` | The code analyzer is still indexing (or the documentation index is building). Transient — wait and retry. Always includes a `message` field and a `recovery` field (always `"poll_status"`). |
 | `not_found` | The requested thing does not exist at that name or position. Always includes a `message` field. |
-| `error` | Bad input, an internal failure, *or* a **permanently** failed analyzer/doc index (`state`/`doc_index_state` == `"error"` on the `status` tool). Unlike `not_ready`, this does not resolve on its own — call the `refresh` tool to recover. Always includes a `message` field and a `recovery` field. |
+| `error` | Bad input, an internal failure, a **permanently** failed analyzer/doc index (`state`/`doc_index_state` == `"error"` on the `status` tool), *or* a stalled analyzer (`analyzer_stall` set on the `status` tool). Unlike `not_ready`, the last two do not resolve on their own — call the `refresh` tool to recover. Always includes a `message` field and a `recovery` field. |
 
 **Positions are 1-based.** The first character of a file is line 1, character 1.
 A `character` offset counts **Unicode codepoints** (the intuitive "Nth
@@ -74,7 +74,7 @@ it directly instead of parsing `message` text. Exactly four values:
 | `recovery` | Meaning | Typical next action |
 |---|---|---|
 | `fix_input` | The request itself was malformed (bad position, bad path, empty query). Retrying unchanged will fail identically. | Correct the argument(s) and call again. |
-| `refresh` | The analyzer or documentation index has **permanently** failed (`state`/`doc_index_state` == `"error"`), or the doc-index rebuild thread could not be started. | Call the `refresh` tool (see below), then retry once `status` reports readiness. |
+| `refresh` | The analyzer or documentation index has **permanently** failed (`state`/`doc_index_state` == `"error"`), the doc-index rebuild thread could not be started, or rust-analyzer is stalled (`status` reports `analyzer_stall`; every analyzer tool returns this while it lasts, whatever `state` reads). | Call the `refresh` tool (see below), then retry once `status` reports readiness. |
 | `poll_status` | The server is transiently not ready (still indexing/building). This is the *only* value `not_ready` ever carries. | Poll `status` or `analyzer_status` and retry once ready. |
 | `unknown` | An unexpected/unclassified failure (e.g. the catch-all LSP-exception fallback), or a rare server-side condition that isn't a client input mistake. The default for `error()` when no more specific hint applies. | Surface the message; retrying once is reasonable, but there is no guaranteed fix. |
 
@@ -265,7 +265,7 @@ Find where the item at a given position is defined.
 | `ok` | `definitions`: list of location objects (see below). More than one is possible, e.g. a trait method that has several implementations. |
 | `not_found` | `message` — no in-workspace definition at that position. Each case has its own message: the position holds no symbol (whitespace, comment, or unknown token; "No definition found at ..."), or every returned location fell outside the project root, e.g. a standard-library or dependency definition, and was skipped (the message says the definitions resolve outside the workspace and gives their count). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or an unexpected LSP failure (`recovery: "unknown"`). |
+| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected LSP failure (`recovery: "unknown"`). |
 
 Each item in `definitions`:
 
@@ -319,7 +319,7 @@ Find all uses of the item at a given position.
 | `ok` | `references`: list of location objects; `total` and `truncated` (see [List caps](#list-caps-total-and-truncated) above). The list may be empty — see note below (`total: 0`). References that resolve outside the project root (e.g. into the standard library) are silently skipped. |
 | `not_found` | `message` — no symbol at that position (whitespace, comment, or unknown token). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or an unexpected failure (`recovery: "unknown"`). |
+| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected failure (`recovery: "unknown"`). |
 
 Each item in `references`:
 
@@ -408,7 +408,7 @@ Show the type signature and documentation for the item at a given position.
 | `ok` | `contents`: a Markdown string containing the type signature and any rustdoc comments, exactly as rust-analyzer produces them. |
 | `not_found` | `message` — nothing to show at that position (whitespace, comment, or unsupported construct). |
 | `not_ready` | `message`, `recovery: "poll_status"` — the analyzer is still indexing. |
-| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or an unexpected LSP failure (`recovery: "unknown"`). |
+| `error` | `message`, `recovery` — `line` or `character` is less than 1, or `file` is an absolute path or escapes the project root via `..` (both rejected before the analyzer is called; `recovery: "fix_input"`), or the position is past the end of the file (rust-analyzer's "Invalid offset"; the message names the position; `recovery: "fix_input"`), or rust-analyzer is stalled (`recovery: "refresh"`), or an unexpected LSP failure (`recovery: "unknown"`). |
 
 **Example response**
 
@@ -512,13 +512,16 @@ Always `ok`, with these fields:
 | `watcher_health` | `"ok"`, `"error"`, or `null` | Health of rust-analyzer's file watcher. `"error"` once rust-analyzer's stderr reports a watch failure in this run (for example the host's inotify watch limit, `notify error: OS file watch limit reached.`): edits and branch switches may no longer reach the code index until `refresh`. `"ok"` once `state` is `"ready"` with no such failure. `null` before the run is ready unless a watch failure was already seen in this run (then `"error"`), after `refresh` and after rust-analyzer exits. |
 | `watcher_message` | string or `null` | The rust-analyzer stderr line that reported the first watch failure of the run, or `null`. |
 | `analyzer_exit_code` | integer or `null` | Exit code of a rust-analyzer process that exited without a shutdown request; `state` is then `"error"` and gated tools return `rust-analyzer is not running (exited with code <n>); call refresh` with `recovery: "refresh"`. `null` otherwise; cleared by `refresh`. |
+| `analyzer_stall` | object or `null` | Set when the server detects a rust-analyzer stall, an indexing run that will not finish on its own: `signal` is `"panic"` when a cache-priming thread (`PrimeCaches#<n>`) panicked since rust-analyzer last reported `quiescent: true`, else `"progress_timeout"` when a re-index has shown no progress for longer than `RLM_STALL_THRESHOLD_SECONDS` (default 180) while `quiescent` is `false`; `since` is the ISO 8601 UTC time of the panic, or of the last progress; `message` names the cause and the recovery. While it is set, every analyzer tool returns `error` with `recovery: "refresh"`, whatever `state` reads; one `refresh` clears it. `state` and `analyzer_health` do not reflect it. `null` otherwise. |
+| `quiescent` | boolean or `null` | rust-analyzer's latest `quiescent` report in this run: `false` while it is busy, `true` once it has caught up. `null` before the first report, after `refresh`, and with no analyzer manager. |
+| `reindex_inflight` | array of strings or `null` | The re-index progress tokens (`rustAnalyzer/cachePriming`, `rustAnalyzer/Fetching`, `rustAnalyzer/Roots Scanned`) that began and have not ended, sorted; `[]` when none. `null` with no analyzer manager. |
 | `indexed_commit` | string or `null` | The git commit hash captured at analyzer start, re-captured once rust-analyzer reports itself quiescent after a re-index, and re-captured by `status` when HEAD moved over a tree the index already reflects (see `stale`). `null` if not yet captured or git is unavailable. |
 | `current_commit` | string or `null` | The git commit hash right now. `null` on any failure (non-git directory, git not installed, etc.). |
 | `stale` | boolean or `null` | `true` if the two commit hashes differ; `false` if they match; `null` if either hash is unknown. The server watches the project tree, so after a branch switch or pull that makes rust-analyzer re-index, `indexed_commit` is re-captured once rust-analyzer reports itself quiescent. After a commit of saved edits, or a switch that starts no re-index (one that changes no Rust or Cargo file included), `status` re-captures it itself once rust-analyzer is quiescent and every Rust or Cargo file that differs between the two commits matches HEAD on disk and was last modified more than 2 seconds ago. Either way `stale` returns to `false` without `refresh`. `status` makes no such re-capture while `watcher_health` is `"error"`: with a failed watcher an edit on disk may never have reached the index, so `stale` keeps reading `true` until `refresh`. |
 | `indexing_started_at` | string or `null` | ISO 8601 UTC time the current analyzer indexing run began; reset by every `refresh`. `null` before the first run. |
 | `analyzer_progress` | string or `null` | The latest rust-analyzer progress title and message (for example `"Indexing 120/512 (serde)"`). After that work ends it reads `"<title> done"` (for example `"Indexing done"`), or `null` when the work had no title. `null` before the first progress report of the run. |
 | `analyzer_progress_at` | string or `null` | ISO 8601 UTC time of that progress report, or `null`. |
-| `doc_index_state` | `"building"`, `"ready"`, or `"error"` | Whether the documentation search index (used by `search_docs`) can answer. Independent of `state` above. Stays `"ready"` while a rebuild runs over an existing index, because `search_docs` keeps answering from the old index; reads `"building"` for the first build on an empty store, and for an errored index while a `refresh` rebuild of it is in flight (`doc_index_error` then reads `null`, and `rust-lsp --wait` keeps polling). |
+| `doc_index_state` | `"building"`, `"ready"`, or `"error"` | Whether the documentation search index (used by `search_docs`) can answer. Independent of `state` above. Stays `"ready"` while a rebuild runs over an existing index, because `search_docs` keeps answering from the old index; reads `"building"` for the first build on an empty store, and for an errored index while a `refresh` rebuild of it is in flight (`doc_index_error` then reads `null`, and a `rust-lsp --wait` for `search-docs`, `status` or `refresh` keeps polling). |
 | `doc_index_error` | string or `null` | Diagnostic message when `doc_index_state` is `"error"`. Also set while `doc_index_state` is `"ready"` when the last rebuild failed and the old index is still being served. `null` otherwise. |
 | `doc_index_progress` | object or `null` | Progress of a running doc index rebuild, `null` when none is running: `files_total`, `files_done`, `started_at` (ISO 8601 UTC) and `phase` (`"starting"` while it waits for its locks, then `"scanning"`, `"embedding"` and `"swapping"`). |
 | `doc_index_chunk_count` | integer or `null` | Number of indexed Markdown chunks (a live `collection.count()`), or `null` when `doc_index_state != "ready"`. `0` is a valid, meaningful reading — a completed index over zero matching Markdown files (e.g. wrong `RLM_DOC_GLOB_PATTERNS`, empty/un-mounted project, or a project that genuinely ships no docs) — and is distinct from `null` ("not ready yet / no store"). Works whether the index was just rebuilt or adopted from a prior run. |
@@ -546,6 +549,9 @@ means "no committed changes since indexing began," not a freshness guarantee.
   "analyzer_exit_code": null,
   "watcher_health": "ok",
   "watcher_message": null,
+  "analyzer_stall": null,
+  "quiescent": true,
+  "reindex_inflight": [],
   "indexed_commit": "a3f1c9d",
   "current_commit": "a3f1c9d",
   "stale": false,
