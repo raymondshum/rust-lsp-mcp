@@ -4,22 +4,22 @@ type: Guide
 title: Architecture
 description: How rust-lsp-mcp's server, analyzer, and doc-search pieces fit together and why.
 tags: [guide, tier-b, architecture]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/server.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/core.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/analyzer.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/doc_chunking.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/envelope.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/positions.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
 cite:
   - src/rust_lsp_mcp/positions.py:external_to_lsp
 ---
@@ -71,7 +71,8 @@ function":
    make sense before doing any real work.
 3. **Readiness check**: the server confirms that rust-analyzer has finished
    indexing the codebase (see section 3). If it has not, the server returns
-   a `not_ready` status immediately instead of asking the analyzer.
+   a `not_ready` status immediately instead of asking the analyzer, or an
+   `error` that says to call `refresh` when rust-analyzer is stalled.
 4. **Position conversion**: line and column numbers are converted from the
    1-based counting humans use to the 0-based counting the protocol expects
    (see section 5).
@@ -103,8 +104,9 @@ To avoid this trap, the server tracks an explicit readiness state:
 - It flips to `"ready"` when rust-analyzer signals completion and the connection is active. In [`analyzer.py`](../../src/rust_lsp_mcp/analyzer.py), the `is_ready` property requires both conditions: `state == "ready"` and an active connection.
 - If background indexing fails, the state transitions to `"error"`. This is a permanent state until resolved. The `status` tool exposes the error message via `analyzer_error`.
 - Tools requiring the index call `require_ready()` in [`core.py`](../../src/rust_lsp_mcp/core.py).
-  - While indexing, `require_ready()` returns a `not_ready` envelope immediately.
+  - While indexing, `require_ready()` returns a `not_ready` envelope immediately, unless rust-analyzer is stalled.
   - If the analyzer is in an `"error"` state, `require_ready()` returns an `error` envelope. This envelope prompts the caller to invoke `refresh`.
+  - If rust-analyzer is stalled (`status` reports `analyzer_stall`), `require_ready()` returns an `error` envelope with `recovery: "refresh"`, whatever `state` reads: a stalled run never finishes on its own.
 
 The documentation store uses an identical tri-state model (`"building"`, `"ready"`, `"error"`). `search_docs` never returns partial results during rebuilds. It reports build failures as `error` rather than `not_ready`.
 
@@ -119,7 +121,7 @@ Every tool returns a response object containing a `status` field, defined in [`e
 | `ok` | The query ran successfully. Empty result sets are valid answers. |
 | `not_ready` | The index is currently building. Retry shortly. |
 | `not_found` | The requested symbol or file does not exist. |
-| `error` | Invalid input, internal failure, or failed indexing. Invoke `refresh` to recover from failed states. |
+| `error` | Invalid input, internal failure, failed indexing, or a stalled analyzer. Invoke `refresh` to recover from failed and stalled states. |
 
 `not_ready` and `error` envelopes include a machine-readable `recovery` hint (`"fix_input"`, `"refresh"`, `"poll_status"`, or `"unknown"`). Callers can branch on this field directly. `not_ready` always sets `recovery: "poll_status"`. See [Tool reference](tools.md#the-recovery-field) for the full matrix.
 
@@ -196,7 +198,7 @@ and the store logic in [`doc_store.py`](../../src/rust_lsp_mcp/doc_store.py).
 The `refresh` tool executes two recovery steps:
 
 1. **Restarts rust-analyzer**: The server sets state to `"indexing"` before shutting down the old instance. This prevents race conditions where callers observe `"ready"` during shutdown. The restart runs in the background. Callers should poll `status` until it returns `"ready"`.
-2. **Rebuilds documentation search**: `refresh` starts the ChromaDB documentation index rebuild on a background thread and returns at once. The rebuild writes a staging collection and swaps it in on success, so over a ready index the old index answers `search_docs` until the swap. If the index never initialized or is in an `"error"` state, `refresh` re-initialises it: `status` reports `doc_index_state: "building"`, and `search_docs` answers `not_ready` until the re-initialised index is ready.
+2. **Rebuilds documentation search**: `refresh` starts the ChromaDB documentation index rebuild on a background thread and returns at once. The rebuild writes a staging collection and swaps it in on success, so over a ready index the old index answers `search_docs` until the swap. If the index never initialized or is in an `"error"` state, `refresh` re-initialises it: `status` reports `doc_index_state: "building"`, and `search_docs` answers `not_ready` while the rebuild runs, after which `doc_index_state` reads `"ready"` or `"error"`.
 
 `refresh` preserves rust-analyzer's on-disk cache. Re-indexing is significantly faster than a cold start because the analyzer reuses prior build artifacts.
 

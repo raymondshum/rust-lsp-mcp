@@ -4,14 +4,14 @@ type: Guide
 title: Administrative & Diagnostic Tools
 description: Detailed reference for status, refresh, and validate_file_path tools.
 tags: [guide, tier-a, tools, admin]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
 ---
 
 [← Back to Tool Reference](../tools.md) · [Documentation index](../index.md)
@@ -69,7 +69,7 @@ Always returns `status: "ok"` with a health envelope:
 
 Restarts the language server process and rebuilds the documentation index in the background. It does not wait for either: it returns once the analyzer restart has begun and the doc rebuild thread has started.
 
-> **Blast radius warning**: `refresh` resets the shared language server. Concurrent navigation requests return `not_ready` until re-indexing completes. Over a ready doc index, `search_docs` keeps answering from the old index during the doc rebuild; over an errored or absent one it answers `not_ready` until the re-initialised index is ready. Avoid calling `refresh` during active query workflows unless the index is stale or in an `"error"` state.
+> **Blast radius warning**: `refresh` resets the shared language server. Concurrent navigation requests return `not_ready` until re-indexing completes. Over a ready doc index, `search_docs` keeps answering from the old index during the doc rebuild; over an errored or absent one it answers `not_ready` while the rebuild runs, after which `doc_index_state` reads `"ready"` or `"error"`. Avoid calling `refresh` during active query workflows unless the index is stale or in an `"error"` state.
 
 The doc rebuild writes a staging collection and swaps it in on success, so over a ready index the old index is served meanwhile and a failed rebuild loses nothing. Unchanged Markdown files keep their stored embeddings; a changed or renamed file is re-embedded, and every file is re-embedded when there is no complete live index for this project or the chunker version or the embedding model changed. Follow it through `status`'s `doc_index_progress`.
 

@@ -4,12 +4,12 @@ type: Guide
 title: CLI reference (rust-lsp)
 description: Command-line client reference for rust-lsp -- subcommands, exit codes, and --wait semantics for agents without MCP tool access.
 tags: [guide, tier-a, cli]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 source_pins:
   - path: src/rust_lsp_cli/cli.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_cli/client.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
 cite:
   - src/rust_lsp_cli/cli.py:EXIT_NOT_READY
 ---
@@ -159,12 +159,13 @@ global options ahead of the subcommand).
 
 With `--wait SECS` given, `rust-lsp` polls the daemon's `status` tool every 2
 seconds, for up to `SECS` seconds, before running your actual command. For
-`search-docs`, `status` and `refresh`, the wait ends only when **both**
-indexes are ready: `state == "ready"` (the code index) and `doc_index_state
-== "ready"` (the documentation index), so a `search-docs` call right after a
-successful wait does not exit `2`. Every other command (the navigation
-commands, which never read the doc index) waits for the code index alone:
-`state == "ready"` ends the wait whatever `doc_index_state` reads. This
+`search-docs`, `status`, `refresh` and `version`, the wait ends only when
+**both** indexes are ready: `state == "ready"` (the code index) and
+`doc_index_state == "ready"` (the documentation index), so a `search-docs`
+call right after a successful wait does not exit `2`. The navigation
+commands and `validate-file-path`, which never read the doc index, wait for
+the code index alone: `state == "ready"` ends the wait whatever
+`doc_index_state` reads. This
 is meant to absorb the daemon's first-use indexing window (which can take
 minutes on a large project) in one command instead of a hand-rolled retry
 loop. It rides through the *entire* boot sequence, not just the "already
@@ -193,7 +194,8 @@ The distinction that matters is what happens when the window *does* expire:
   (`docker compose up -d rust-lsp-mcp` — always name the service) or check
   `RLM_HTTP_PORT`/`RLM_CLI_URL`.
 - **Connected but never reported `ready`** (exit `2`) — the daemon is up but
-  one of the two indexes is still building, or the code index has permanently
+  the code index is still building (or, for `search-docs`, `status` and
+  `refresh`, the doc index is), or the code index has permanently
   failed (check `state` in a plain `rust-lsp status` call). A larger `--wait`
   won't help a permanently failed index; call `refresh` instead.
 
@@ -247,7 +249,7 @@ During normal operation, logs may display a per-request `ClosedResourceError` tr
 
 ## `refresh`: shared-daemon blast radius
 
-`refresh` restarts the single analyzer process and rebuilds the documentation index in the background, inside the container. It returns as soon as both have started. Because all CLI calls and MCP clients share this instance, running `refresh` makes all concurrent navigation queries return `not_ready` until the analyzer finishes indexing. Over a ready doc index, `search-docs` keeps answering from the old index while the doc rebuild runs; over an errored or absent one it returns `not_ready` until the re-initialised index is ready.
+`refresh` restarts the single analyzer process and rebuilds the documentation index in the background, inside the container. It returns as soon as both have started. Because all CLI calls and MCP clients share this instance, running `refresh` makes all concurrent navigation queries return `not_ready` until the analyzer finishes indexing. Over a ready doc index, `search-docs` keeps answering from the old index while the doc rebuild runs; over an errored or absent one it returns `not_ready` while the rebuild runs, after which `doc_index_state` reads `"ready"` or `"error"`.
 
 Check `rust-lsp status` before refreshing. Only trigger `refresh` when code changes warrant an index rebuild or when `state` reports `"error"`.
 

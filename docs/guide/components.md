@@ -4,54 +4,54 @@ type: Guide
 title: Components — source code tour
 description: Module-by-module tour of the rust-lsp-mcp server and the rust-lsp CLI client source.
 tags: [guide, tier-b, components]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 source_pins:
   - path: src/rust_lsp_mcp/core.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/analyzer.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/server.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/envelope.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/positions.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/settings.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/doc_store.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/doc_chunking.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/_main.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/__main__.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/__init__.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/find_symbol.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/goto_definition.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/find_references.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/hover.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/document_symbols.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/search_docs.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/status.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/refresh.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/diagnostics.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_mcp/tools/validate_file_path.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_cli/cli.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
   - path: src/rust_lsp_cli/client.py
-    commit: 47012aa930be0efbbb29ac82b4c9e69b949021d3
+    commit: 11bb774d57a795639a00e349fe734e59b5e8872c
 ---
 
 [← Back to the README](../../README.md) · [Documentation index](index.md)
@@ -132,9 +132,12 @@ the analyzer shutdown, and the lifespan ends when both have finished.
 **The readiness gate.** `require_ready()` is a single check that every
 navigation tool calls before doing anything. If rust-analyzer's background run
 has permanently failed (`state == "error"`), it returns an `error` envelope
-with `recovery="refresh"`. If it is still indexing (or hasn't started), it
-returns a `not_ready` envelope. If the analyzer is ready it returns `None` and
-the tool proceeds. The pattern in every tool file looks like:
+with `recovery="refresh"`. If rust-analyzer is stalled (`status` reports
+`analyzer_stall`), it returns an `error` envelope with `recovery="refresh"`,
+whatever `state` reads. Otherwise, if it is still indexing (or hasn't
+started), it returns a `not_ready` envelope. If the analyzer is ready it
+returns `None` and the tool proceeds. The pattern in every tool file looks
+like:
 
 ```python
 if (guard := require_ready()) is not None:
@@ -287,9 +290,12 @@ functions that produce these objects:
 - `error(message, recovery="unknown")` — something went wrong; the message
   explains what, and `recovery` is a machine-readable hint at the next action
   (`"fix_input"` / `"refresh"` / `"poll_status"` / `"unknown"`).
-- `lsp_failure(exc, context="")` — a thin wrapper over `error()` for the
-  catch-all unexpected-LSP-exception case shared by every nav tool; always
-  passes `recovery="unknown"`.
+- `lsp_failure(exc, context="", *, position=None)` — a thin wrapper over
+  `error()` for the catch-all unexpected-LSP-exception case shared by every
+  nav tool. It returns `require_ready()`'s envelope (`recovery="refresh"`)
+  when the analyzer has failed or is stalled, `recovery="fix_input"` for
+  rust-analyzer's "Invalid offset" (a position past the end of the file), and
+  `recovery="unknown"` otherwise, including a server-side request timeout.
 
 The `recovery` field is additive-only: no key renames, no new `status` values,
 and deliberately no `retriable` boolean or separate `code` enum (see
@@ -502,13 +508,16 @@ run at module level — `rust_lsp_cli.client` is imported lazily inside `main()`
 so `--help` and argparse-only invocations stay fast, and this package never
 imports `rust_lsp_mcp` at all (that would pull in the full server, including a
 second Chroma client). Exit codes are exact: `0` ok/not_found, `1` error, `2`
-not_ready, `3` daemon unreachable (`EXIT_OK` / `EXIT_ERROR` /
-`EXIT_NOT_READY` / `EXIT_UNREACHABLE`). `--wait SECS` polls `status` every 2s
-until the daemon reports both `state == "ready"` and
-`doc_index_state == "ready"`, riding through daemon boot
-(connection-refused → not_ready → ready); a `doc_index_state` of `"error"`
-ends the wait at once: `--wait SECS refresh` then runs the refresh, because
-`refresh` is the recovery, and every other command exits `2`.
+not_ready, `3` daemon unreachable, `4` request timed out after the daemon was
+reached (`EXIT_OK` / `EXIT_ERROR` / `EXIT_NOT_READY` / `EXIT_UNREACHABLE` /
+`EXIT_TIMEOUT`). `--wait SECS` polls `status` every 2s until the daemon
+reports `state == "ready"`, riding through daemon boot (connection-refused →
+not_ready → ready); for `search-docs`, `status`, `refresh` and `version` it
+also waits for `doc_index_state == "ready"`, and a `doc_index_state` of
+`"error"` ends the wait at once: `--wait SECS refresh` then runs the refresh,
+because `refresh` is the recovery, and `search-docs` and `status` exit `2`. A
+navigation command under `--wait` waits on `state` alone and runs past a doc
+index error.
 
 **`client.py`** is the streamable-HTTP MCP client half: `call_tool_sync` opens
 one connection per call, calls a tool, and parses the envelope from

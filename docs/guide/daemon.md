@@ -114,8 +114,9 @@ up in your shell instead of as a silent IDE hang.
      `state: "ready"` usually means the cache was not primed (step 2); the
      reason is in `analyzer_health_message`.
    - `stale: true` means the project's checked-out commit moved since the code
-     index was built; `doc_stale: true` means the same for the doc index. Run
-     step 5.
+     index was built; `doc_stale: true` means a covered Markdown file was
+     added, removed, or changed size or modification time since the doc index
+     was built. Run step 5.
 
    On the ripgrep sample, the first start on a fresh, primed volume reached
    this envelope in about a minute, most of it spent embedding the docs. A

@@ -188,5 +188,9 @@ speculatively or to "fix" an unrelated error.
   Read it; don't round-trip the LSP.
 - **Empty result ≠ error.** `ok` with an empty list means "no references /
   no symbols," which is a real answer — don't retry it as a failure.
-- `not_found` means the name/position doesn't resolve; `error` means bad input
-  or an LSP failure — re-check the path/position rather than retrying blindly.
+- `not_found` means the name/position doesn't resolve. For `goto_definition`,
+  it also means that every definition the position resolves to lies
+  outside the workspace (the standard library or a dependency); the message
+  says so and gives the count, and `hover` at the same position gives the
+  symbol's signature. `error` means bad input or an LSP failure — re-check
+  the path/position rather than retrying blindly.

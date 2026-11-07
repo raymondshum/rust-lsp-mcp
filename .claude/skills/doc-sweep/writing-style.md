@@ -64,10 +64,9 @@ a performance claim made as a plain fact, not a boast:
 ## Explaining a hard concept
 
 The guide carries genuinely hard ideas: readiness (a tool answering `not_ready` while rust-analyzer is
-still indexing), the 1-indexed↔0-indexed position boundary, the single-writer Chroma constraint that
-forced the daemon+client shape, and the cache-priming security trade-off (running untrusted `build.rs`
-offline). The failure mode is a wall of accurate but impenetrable prose. The good sources share three
-techniques for making a hard concept consumable without losing precision.
+still indexing), the 1-indexed↔0-indexed position boundary, and the cache-priming security trade-off
+(running untrusted `build.rs` offline). The failure mode is a wall of accurate but impenetrable prose.
+The good sources share three techniques for making a hard concept consumable without losing precision.
 
 **1. State the problem before the mechanism.** Say what breaks without this, then how it's solved.
 Stripe's idempotency-key docs open on the risk, not the API:
@@ -104,9 +103,10 @@ by refusing the mystique and correcting the wrong mental model head-on:
 
 If readers arrive with a wrong model ("I can warm-start a second `rust-lsp-mcp` server with `docker
 exec` for speed", "the server needs network to embed docs", "positions are 0-based like LSP"), name and
-correct it in one sentence rather than describing around it. The README's CLI section does exactly this
-for the warm-start misconception: it states the old pattern is gone because two servers against one
-Chroma store is a cross-process single-writer hazard, then gives the one-server-plus-client replacement.
+correct it in one sentence rather than describing around it. The section "5. Counting from 1, not 0" of
+[`docs/guide/architecture.md`](../../../docs/guide/architecture.md) does exactly this for the 0-based
+misconception: it states that LSP counts from 0, then that the server always presents 1-based positions
+to the outside world and converts at one boundary.
 
 ## Flow and structure (within a page)
 
@@ -236,8 +236,8 @@ code and `docs/impl/known-issues.md`.
 - **The daemon+client shape replaced the old warm-start pattern.** The current CLI path is a long-lived
   **daemon** container plus the `rust-lsp` **client**; there is exactly **one** server process per
   container. The old `docker exec -i … rust-lsp-mcp` (starting a *second* stdio server inside a running
-  container) is **gone** because two servers against one Chroma store is an unguarded cross-process
-  single-writer hazard (see known issue **KI-13**). Never document the warm-start pattern as current.
+  container) is **gone** because the daemon is the one server per container.
+  Never document the warm-start pattern as current.
 - **Positions are 1-indexed on the MCP tool surface, 0-indexed in LSP.** The tool API takes and returns
   **1-indexed** line/character; conversion to LSP's 0-indexed happens at the boundary
   (`src/rust_lsp_mcp/positions.py`). Never call the tool-facing positions 0-based.
